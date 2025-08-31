@@ -28,9 +28,6 @@ export function restoreFromStorage(): AuthState | null {
   if (!raw) return null
   try {
     const s = JSON.parse(raw) as Stored
-    if (Date.now() > s.expires_at) {
-      // expired, but we can refresh lazily
-    }
     return {
       accessToken: s.access_token,
       refreshToken: s.refresh_token,
@@ -79,13 +76,34 @@ export function signOut() {
   sessionStorage.removeItem(stateKey)
 }
 
+/**
+ * Robustly handle Spotify callback parameters whether they appear in:
+ * - /callback?code=...&state=...
+ * - /#/(callback)?code=...&state=...
+ */
 export async function handleAuthCodeCallback(url: string): Promise<AuthState> {
   const u = new URL(url)
-  const code = u.searchParams.get('code')
-  const state = u.searchParams.get('state')
-  const err = u.searchParams.get('error')
+
+  // Prefer search params
+  let params = u.searchParams
+
+  // If no code in search, try to parse from hash fragment
+  if (!params.get('code') && u.hash) {
+    const hash = u.hash.startsWith('#') ? u.hash.slice(1) : u.hash
+    const qIndex = hash.indexOf('?')
+    if (qIndex >= 0) {
+      const qs = hash.slice(qIndex + 1)
+      params = new URLSearchParams(qs)
+    }
+  }
+
+  const code = params.get('code')
+  const state = params.get('state')
+  const err = params.get('error')
+
   if (err) throw new Error(`Spotify auth error: ${err}`)
   if (!code) throw new Error('No authorization code in callback')
+
   const expectedState = sessionStorage.getItem(stateKey)
   if (!expectedState || expectedState !== state) throw new Error('State mismatch')
   const verifier = sessionStorage.getItem(verifierKey)

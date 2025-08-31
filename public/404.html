@@ -9,20 +9,16 @@
   <body>
     <noscript>This page redirects to the app root.</noscript>
     <script>
-      // GitHub Pages SPA redirect helper to hash routing
+      // GitHub Pages SPA redirect helper to hash routes.
+      // Keep the query (code/state) BEFORE the hash so the app can read it.
       (function () {
         var base = '/ffw/';
         var path = location.pathname;
-        // Ensure we only handle paths under the project site
         var i = path.indexOf(base);
-        if (i !== -1) {
-          var sub = path.slice(i + base.length);
-          var search = location.search || '';
-          // Redirect to hash route so index.html can handle it
-          location.replace(base + '#/' + sub + search);
-        } else {
-          location.replace(base);
-        }
+        var sub = (i !== -1) ? path.slice(i + base.length) : '';
+        var search = location.search || '';
+        // Redirect unknown paths to the same sub-route under hash routing
+        location.replace(base + search + '#/' + sub);
       })();
     </script>
   </body>

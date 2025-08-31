@@ -1,7 +1,9 @@
 import React from 'react'
 
+type V = { epilepsySafe: boolean, reducedMotion: boolean, highContrast: boolean, albumSkin: boolean }
+
 export default function VJPanel({ value, onChange }: {
-  value: { epilepsySafe: boolean, reducedMotion: boolean, highContrast: boolean },
+  value: V,
   onChange: (v: V) => void
 }) {
   return (
@@ -18,10 +20,13 @@ export default function VJPanel({ value, onChange }: {
         <label htmlFor="contrast">High contrast</label>
         <input id="contrast" type="checkbox" checked={value.highContrast} onChange={e => onChange({ ...value, highContrast: e.currentTarget.checked })} />
       </div>
+      <div className="row">
+        <label htmlFor="albumSkin">Album cover skin (panels)</label>
+        <input id="albumSkin" type="checkbox" checked={value.albumSkin} onChange={e => onChange({ ...value, albumSkin: e.currentTarget.checked })} />
+      </div>
       <div style={{ gridColumn: '1 / -1', color: 'var(--muted)' }}>
-        Keyboard: <kbd>Space</kbd> play/pause, <kbd>←/→</kbd> seek, <kbd>+/−</kbd> volume, <kbd>F</kbd> fullscreen, <kbd>D</kbd> devices.
+        Keyboard: Space play/pause, ←/→ seek, +/- volume, F fullscreen, D devices.
       </div>
     </div>
   )
 }
-type V = { epilepsySafe: boolean, reducedMotion: boolean, highContrast: boolean }

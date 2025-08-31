@@ -6,6 +6,7 @@ import { CONFIG } from '../../config'
 import { getPlaybackState } from '../../spotify/api'
 import { extractPaletteFromImage, applyPaletteToCss } from '../../utils/palette'
 import { cacheAlbumArt } from '../../utils/idb'
+import { setAlbumSkin } from '../../ui/ThemeManager'
 
 type Props = {
   auth: AuthState | null
@@ -19,6 +20,7 @@ type Props = {
     epilepsySafe: boolean
     reducedMotion: boolean
     highContrast: boolean
+    albumSkin: boolean
   }
 }
 
@@ -56,7 +58,6 @@ export default function BlankScene({ auth, quality, accessibility }: Props) {
         const player = await initPlayer('FFW Visualizer')
         await player.connect()
 
-        // Attach analyzer to page audio element if accessible
         const findAudio = () => {
           const els = Array.from(document.querySelectorAll('audio')) as HTMLAudioElement[]
           return els.find(el => !!el.src)
@@ -76,7 +77,6 @@ export default function BlankScene({ auth, quality, accessibility }: Props) {
         analyzer.onFrame = onAnalysisFrame
         analyzer.run()
 
-        // Initial palette from current playback album
         const s = await getPlaybackState().catch(() => null)
         if (s?.item?.album?.images?.length) {
           const url = s.item.album.images[0].url as string
@@ -91,7 +91,8 @@ export default function BlankScene({ auth, quality, accessibility }: Props) {
           img.src = blobUrl
           img.onload = () => {
             const pal = extractPaletteFromImage(img)
-            applyPaletteToCss(pal) // respects theme mode
+            applyPaletteToCss(pal)
+            setAlbumSkin(blobUrl)
           }
         }
       } catch (e) {
@@ -103,8 +104,10 @@ export default function BlankScene({ auth, quality, accessibility }: Props) {
   }, [auth])
 
   function onAnalysisFrame(frame: AnalysisFrame) {
-    if (!ctx2d || !canvasRef.current) return
-    drawFrame(ctx2d, canvasRef.current, frame, {
+    const canvas = canvasRef.current
+    const ctx = ctx2d
+    if (!canvas || !ctx) return
+    drawFrame(ctx, canvas, frame, {
       bloom: quality.bloom,
       motionBlur: quality.motionBlur && !accessibility.reducedMotion,
       epilepsySafe: accessibility.epilepsySafe
@@ -137,7 +140,6 @@ function drawFrame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, fra
     g.fillStyle = 'rgba(10, 15, 20, 0.08)'
     g.fillRect(0, 0, W, H)
   } else {
-    // gradient background with accent tint
     const bg = g.createLinearGradient(0, 0, 0, H)
     bg.addColorStop(0, 'rgba(0,0,0,0.5)')
     bg.addColorStop(1, 'rgba(0,0,0,0.75)')
@@ -148,7 +150,7 @@ function drawFrame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, fra
   const color = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#0ff'
   const color2 = getComputedStyle(document.documentElement).getPropertyValue('--accent-2').trim() || '#f0f'
 
-  // Neon horizon line reacting to loudness
+  // Neon horizon
   const baseY = H * 0.65
   const loud = frame.loudness
   g.strokeStyle = color
@@ -172,7 +174,7 @@ function drawFrame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, fra
     g.shadowBlur = 0
   }
 
-  // Simple bar array visualizer at bottom
+  // Simple bars
   const bars = 48
   const step = Math.floor(frame.fftLog.length / bars)
   const barW = (W - 40) / bars
@@ -195,7 +197,6 @@ function drawFrame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, fra
     g.stroke()
   }
 
-  // Reset composite
   g.globalCompositeOperation = 'source-over'
   g.shadowBlur = 0
 }

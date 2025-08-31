@@ -4,12 +4,9 @@ import { getPlaybackState, nextTrack, pause, prevTrack, resume, seek, setRepeat,
 import { mmss } from '../utils/time'
 import { useInterval } from '../utils/useInterval'
 
-// Read SDK player if available (set by spotify/player.ts)
+// expose SDK player if available (set by spotify/player.ts)
 function getSDKPlayer(): Spotify.Player | null {
   return (window as any).__ffwPlayer?.player || null
-}
-function getSDKDeviceId(): string | null {
-  return (window as any).__ffwPlayer?.deviceId || null
 }
 
 export default function PlayerController({ auth, onOpenDevices }: { auth: AuthState | null, onOpenDevices: () => void }) {
@@ -20,7 +17,6 @@ export default function PlayerController({ auth, onOpenDevices }: { auth: AuthSt
   const [shuffle, setShuf] = useState(false)
   const [repeat, setRep] = useState<'off' | 'context' | 'track'>('off')
 
-  // Scrubbing UI state for better seek UX
   const [isScrubbing, setIsScrubbing] = useState(false)
   const [scrubValue, setScrubValue] = useState(0)
   const scrubCommitRef = useRef<number | null>(null)
@@ -48,43 +44,28 @@ export default function PlayerController({ auth, onOpenDevices }: { auth: AuthSt
     setPosition(p => Math.min(duration, p + 1000))
   }, state?.is_playing ? 1000 : null)
 
-  // Periodic refresh to stay in sync (lightweight)
+  // Periodic refresh to stay in sync
   useInterval(() => { refresh() }, auth ? 5000 : null)
 
   useEffect(() => {
     const onVis = () => { if (!document.hidden) refresh() }
     document.addEventListener('visibilitychange', onVis)
-    return () => document.removeEventListener('visibilitychange', onVis)
-  }, [])
-
-  // Commit scrub on global pointer/key release
-  useEffect(() => {
-    const up = () => {
-      if (!isScrubbing) return
-      setIsScrubbing(false)
-      commitSeek(scrubValue)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !e.repeat) { e.preventDefault(); togglePlay() }
+      if (e.key === 'ArrowLeft') doSeek(Math.max(0, position - 5000))
+      if (e.key === 'ArrowRight') doSeek(Math.min(duration, position + 5000))
+      if (e.key === '+' || e.key === '=') changeVolumeUI(Math.min(100, volume + 5))
+      if (e.key === '-' || e.key === '_') changeVolumeUI(Math.max(0, volume - 5))
     }
-    const key = (e: KeyboardEvent) => {
-      if (isScrubbing && (e.key === 'Enter' || e.key === 'Escape')) {
-        setIsScrubbing(false)
-        if (e.key === 'Enter') commitSeek(scrubValue)
-      }
-    }
-    window.addEventListener('pointerup', up)
-    window.addEventListener('keyup', key)
-    window.addEventListener('touchend', up)
+    window.addEventListener('keydown', onKey)
     return () => {
-      window.removeEventListener('pointerup', up)
-      window.removeEventListener('keyup', key)
-      window.removeEventListener('touchend', up)
+      document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('keydown', onKey)
     }
-  }, [isScrubbing, scrubValue])
+  }, [position, duration, volume, state])
 
   async function togglePlay() {
-    if (!state) {
-      await refresh()
-      return
-    }
+    if (!state) { await refresh(); return }
     try {
       const sdk = getSDKPlayer()
       if (sdk) {
@@ -94,51 +75,42 @@ export default function PlayerController({ auth, onOpenDevices }: { auth: AuthSt
         else await resume()
       }
     } catch {
-      // Fallback to Web API resume if toggle fails
       try {
         if (state.is_playing) await pause()
         else await resume()
       } catch {}
     } finally {
-      // Allow time for Spotify to propagate then refresh
       await sleep(300)
       await refresh()
     }
   }
 
+  async function doSeek(ms: number) {
+    setPosition(ms)
+    try {
+      const sdk = getSDKPlayer()
+      if (sdk) await sdk.seek(ms)
+      else await seek(ms)
+    } finally {
+      await sleep(150)
+      refresh()
+    }
+  }
+
   async function commitSeek(ms: number) {
-    // Debounce multiple quick commits
     if (scrubCommitRef.current) {
       clearTimeout(scrubCommitRef.current)
       scrubCommitRef.current = null
     }
-    const doCommit = async () => {
-      setPosition(ms)
-      try {
-        const sdk = getSDKPlayer()
-        if (sdk) {
-          await sdk.seek(ms)
-        } else {
-          await seek(ms)
-        }
-      } finally {
-        await sleep(150)
-        refresh()
-      }
-    }
-    // Light debounce to avoid spamming API
-    scrubCommitRef.current = window.setTimeout(doCommit, 80)
+    scrubCommitRef.current = window.setTimeout(() => doSeek(ms), 80)
   }
 
   async function changeVolumeUI(v: number) {
     setVol(v)
     try {
       const sdk = getSDKPlayer()
-      if (sdk) {
-        await sdk.setVolume(Math.max(0, Math.min(1, v / 100)))
-      } else {
-        await setVolume(v)
-      }
+      if (sdk) await sdk.setVolume(Math.max(0, Math.min(1, v / 100)))
+      else await setVolume(v)
     } catch {}
   }
 
@@ -192,11 +164,9 @@ export default function PlayerController({ auth, onOpenDevices }: { auth: AuthSt
           max={duration || 1}
           step={500}
           value={progressValue}
-          onChange={(e) => {
-            const v = Number(e.currentTarget.value)
-            setIsScrubbing(true)
-            setScrubValue(v)
-          }}
+          onChange={(e) => { const v = Number(e.currentTarget.value); setIsScrubbing(true); setScrubValue(v) }}
+          onMouseUp={() => { setIsScrubbing(false); commitSeek(scrubValue) }}
+          onTouchEnd={() => { setIsScrubbing(false); commitSeek(scrubValue) }}
           aria-label="Seek"
         />
         <div className="progress-labels">

@@ -1,14 +1,15 @@
-import React, { useEffect, useState } from 'react'
+import React, { Suspense, useEffect, useMemo, useState } from 'react'
 import { Route, Routes, useNavigate } from 'react-router-dom'
 import { loginWithSpotify, restoreFromStorage, type AuthState, signOut } from './auth/token'
 import Callback from './auth/Callback'
 import PlayerController from './controllers/PlayerController'
 import BlankScene from './visuals/scenes/BlankScene'
+const WireframeHouse = React.lazy(() => import('./visuals/scenes/WireframeHouse'))
 import Popup from './ui/Popup'
 import QualityPanel from './ui/QualityPanel'
 import VJPanel from './ui/VJPanel'
 import DevicePicker from './ui/DevicePicker'
-import { ThemeManager, setTheme, getTheme, ThemeName } from './ui/ThemeManager'
+import { ThemeManager, setTheme, getTheme, ThemeName, setAlbumSkinEnabled, isAlbumSkinEnabled } from './ui/ThemeManager'
 import { getFPS } from './utils/fps'
 import { detectGPUInfo } from './utils/gpu'
 
@@ -28,10 +29,11 @@ export default function App() {
   const [accessibility, setAccessibility] = useState({
     epilepsySafe: true,
     reducedMotion: false,
-    highContrast: false
+    highContrast: false,
+    albumSkin: isAlbumSkinEnabled()
   })
   const [theme, setThemeState] = useState<ThemeName>(getTheme())
-  const [scene, setScene] = useState<string>('Blank')
+  const [scene, setScene] = useState<string>(() => localStorage.getItem('ffw_scene') || 'Blank')
 
   const navigate = useNavigate()
 
@@ -49,6 +51,7 @@ export default function App() {
   useEffect(() => {
     document.documentElement.style.setProperty('--contrast', accessibility.highContrast ? '1.2' : '1')
     document.documentElement.style.setProperty('--motion-scale', accessibility.reducedMotion ? '0.5' : '1')
+    setAlbumSkinEnabled(accessibility.albumSkin)
   }, [accessibility])
 
   useEffect(() => {
@@ -79,6 +82,11 @@ export default function App() {
     setTheme(t)
   }
 
+  function onSceneChange(v: string) {
+    setScene(v)
+    localStorage.setItem('ffw_scene', v)
+  }
+
   return (
     <div className="app-shell" role="application" aria-label="FFW Visualizer">
       <div className="canvas-wrap">
@@ -90,11 +98,25 @@ export default function App() {
         <Routes>
           <Route path="/callback" element={<Callback onAuth={a => setAuth(a)} />} />
           <Route path="/*" element={
-            <BlankScene
-              auth={auth}
-              quality={quality}
-              accessibility={accessibility}
-            />
+            <Suspense fallback={<div className="badge" style={{ position: 'absolute', left: 16, top: 72 }}>Loading scene…</div>}>
+              {scene === 'Wireframe House' ? (
+                <WireframeHouse
+                  auth={auth}
+                  quality={quality}
+                  accessibility={{
+                    epilepsySafe: accessibility.epilepsySafe,
+                    reducedMotion: accessibility.reducedMotion,
+                    highContrast: accessibility.highContrast
+                  }}
+                />
+              ) : (
+                <BlankScene
+                  auth={auth}
+                  quality={quality}
+                  accessibility={accessibility}
+                />
+              )}
+            </Suspense>
           } />
         </Routes>
         <div className="cyber-panel" aria-hidden={false}>
@@ -102,8 +124,9 @@ export default function App() {
           <span style={{ marginLeft: 8, color: 'var(--muted)' }}>(Q, V, D)</span>
           <div style={{ display: 'inline-flex', gap: 8, marginLeft: 10, alignItems: 'center' }}>
             <label htmlFor="scene" style={{ fontSize: 11, color: 'var(--muted)' }}>Scene</label>
-            <select id="scene" value={scene} onChange={(e) => setScene(e.currentTarget.value)} title="Scene selector" aria-label="Scene selector">
+            <select id="scene" value={scene} onChange={(e) => onSceneChange(e.currentTarget.value)} title="Scene selector" aria-label="Scene selector">
               <option value="Blank">Blank</option>
+              <option value="Wireframe House">Wireframe House</option>
             </select>
 
             <label htmlFor="theme" style={{ fontSize: 11, color: 'var(--muted)' }}>Theme</label>

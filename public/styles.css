@@ -13,6 +13,7 @@
   --focus: rgba(0, 255, 255, 0.25);
   --contrast: 1;
   --motion-scale: 1;
+  --album-art-url: none; /* set via ThemeManager.setAlbumSkin(url) */
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -34,12 +35,7 @@ html, body, #root {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-.app-shell {
-  display: grid;
-  grid-template-rows: 1fr auto;
-  height: 100%;
-}
-
+.app-shell { display: grid; grid-template-rows: 1fr auto; height: 100%; }
 .canvas-wrap { position: relative; overflow: hidden; }
 
 .cyber-panel {
@@ -48,6 +44,32 @@ a:hover { text-decoration: underline; }
   backdrop-filter: blur(8px) saturate(1.2) contrast(var(--contrast));
   box-shadow: 0 0 24px -8px var(--glow), inset 0 0 0 1px rgba(255,255,255,0.05);
   font-size: 12px;
+}
+
+/* Album skin overlays */
+.album-skin .cyber-panel {
+  background:
+    linear-gradient(180deg, rgba(10,15,20,0.74), rgba(10,15,20,0.58)),
+    var(--album-art-url);
+  background-size: cover;
+  background-position: center;
+  background-blend-mode: overlay;
+}
+.album-skin .badge {
+  background:
+    linear-gradient(180deg, rgba(10,15,20,0.74), rgba(10,15,20,0.58)),
+    var(--album-art-url);
+  background-size: cover;
+  background-position: center;
+  background-blend-mode: overlay;
+}
+.album-skin .control-bar {
+  background:
+    linear-gradient(180deg, rgba(0,0,0,0.28), rgba(0,0,0,0.36)),
+    var(--album-art-url);
+  background-size: cover;
+  background-position: center;
+  background-blend-mode: overlay;
 }
 
 .hud { position: absolute; left: 16px; top: 16px; display: flex; gap: 12px; }
@@ -113,10 +135,7 @@ a:hover { text-decoration: underline; }
   box-shadow: 0 0 20px -12px var(--glow);
 }
 
-.popup-backdrop[aria-hidden="false"] {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-  backdrop-filter: blur(2px);
-}
+.popup-backdrop[aria-hidden="false"] { position: fixed; inset: 0; background: rgba(0,0,0,0.4); backdrop-filter: blur(2px); }
 .popup {
   position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: min(92vw, 720px); max-height: 80vh; overflow: auto;

@@ -3,7 +3,7 @@ import type { AuthState } from '../../auth/token'
 import { initPlayer } from '../../spotify/player'
 import { AudioAnalyzer, type AnalysisFrame } from '../../audio/AudioAnalyzer'
 import { CONFIG } from '../../config'
-import { getDevices, getPlaybackState } from '../../spotify/api'
+import { getPlaybackState } from '../../spotify/api'
 import { extractPaletteFromImage, applyPaletteToCss } from '../../utils/palette'
 import { cacheAlbumArt } from '../../utils/idb'
 
@@ -27,7 +27,6 @@ export default function BlankScene({ auth, quality, accessibility }: Props) {
   const [ctx2d, setCtx2d] = useState<CanvasRenderingContext2D | null>(null)
   const analyzerRef = useRef<AudioAnalyzer | null>(null)
   const [trackMeta, setTrackMeta] = useState<{ name: string, artists: string, albumUrl: string }|null>(null)
-  const [paused, setPaused] = useState(true)
 
   useEffect(() => {
     const canvas = canvasRef.current!
@@ -56,11 +55,11 @@ export default function BlankScene({ auth, quality, accessibility }: Props) {
       try {
         const player = await initPlayer('FFW Visualizer')
         await player.connect()
-        // Attempt to hook the audio element for analysis (may fail gracefully)
-        // Probe any audio element created by SDK
+
+        // Attach analyzer to page audio element if accessible
         const findAudio = () => {
-          const els = Array.from(document.querySelectorAll('audio'))
-          return els.find(el => (el as HTMLAudioElement).src?.includes('scdn') || (el as HTMLAudioElement).src)
+          const els = Array.from(document.querySelectorAll('audio')) as HTMLAudioElement[]
+          return els.find(el => !!el.src)
         }
         const aEl = findAudio()
         const analyzer = new AudioAnalyzer({
@@ -71,17 +70,13 @@ export default function BlankScene({ auth, quality, accessibility }: Props) {
         })
         analyzerRef.current = analyzer
         if (aEl) {
-          analyzer.attachMedia(aEl as HTMLAudioElement)
+          analyzer.attachMedia(aEl)
           await analyzer.resume()
-          analyzer.run()
-          analyzer.onFrame = onAnalysisFrame
-        } else {
-          // Fallback: still run fake timing to keep scene alive
-          analyzer.run()
-          analyzer.onFrame = onAnalysisFrame
         }
+        analyzer.onFrame = onAnalysisFrame
+        analyzer.run()
 
-        // Fetch initial playback for album palette
+        // Initial palette from current playback album
         const s = await getPlaybackState().catch(() => null)
         if (s?.item?.album?.images?.length) {
           const url = s.item.album.images[0].url as string
@@ -96,7 +91,7 @@ export default function BlankScene({ auth, quality, accessibility }: Props) {
           img.src = blobUrl
           img.onload = () => {
             const pal = extractPaletteFromImage(img)
-            applyPaletteToCss(pal)
+            applyPaletteToCss(pal) // respects theme mode
           }
         }
       } catch (e) {
@@ -150,10 +145,12 @@ function drawFrame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, fra
     g.fillRect(0, 0, W, H)
   }
 
+  const color = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#0ff'
+  const color2 = getComputedStyle(document.documentElement).getPropertyValue('--accent-2').trim() || '#f0f'
+
   // Neon horizon line reacting to loudness
   const baseY = H * 0.65
   const loud = frame.loudness
-  const color = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#0ff'
   g.strokeStyle = color
   g.lineWidth = Math.max(1, 2 + loud * 4)
   g.globalCompositeOperation = 'lighter'
@@ -162,7 +159,6 @@ function drawFrame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, fra
   const scaleX = W / (N - 1)
   for (let i = 0; i < N; i++) {
     const v = frame.fftLog[i]
-    // log curve shaping
     const y = baseY - Math.pow(v, 0.6) * (H * 0.3)
     const x = i * scaleX
     if (i === 0) g.moveTo(x, y); else g.lineTo(x, y)
@@ -176,9 +172,22 @@ function drawFrame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, fra
     g.shadowBlur = 0
   }
 
-  // Beat pulse: draw ring
+  // Simple bar array visualizer at bottom
+  const bars = 48
+  const step = Math.floor(frame.fftLog.length / bars)
+  const barW = (W - 40) / bars
+  for (let i = 0; i < bars; i++) {
+    const v = frame.fftLog[i * step] ?? 0
+    const h = Math.pow(v, 0.8) * (H * 0.25) + (frame.beat ? 2 : 0)
+    const x = 20 + i * barW
+    const y = H - 24 - h
+    g.fillStyle = i % 2 === 0 ? color : color2
+    g.fillRect(x, y, barW * 0.8, h)
+  }
+
+  // Beat pulse ring
   if (frame.beat) {
-    const r = 30 + loud * 40
+    const r = 24 + loud * 40
     g.beginPath()
     g.arc(W * 0.85, H * 0.2, r, 0, Math.PI * 2)
     g.strokeStyle = color
@@ -186,7 +195,7 @@ function drawFrame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, fra
     g.stroke()
   }
 
-  // Reset composite and shadow
+  // Reset composite
   g.globalCompositeOperation = 'source-over'
   g.shadowBlur = 0
 }

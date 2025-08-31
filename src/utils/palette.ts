@@ -31,8 +31,10 @@ export function extractPaletteFromImage(img: HTMLImageElement): Palette {
 }
 
 export function applyPaletteToCss(p: Palette) {
+  // Respect current theme mode; only apply palette when in 'album' mode
+  const theme = localStorage.getItem('ffw_theme') || 'album'
+  if (theme !== 'album') return
   const root = document.documentElement
   root.style.setProperty('--accent', p.accent)
   root.style.setProperty('--accent-2', p.accent2)
-  // Keep background subtle
 }

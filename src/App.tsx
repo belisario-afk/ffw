@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Route, Routes, useNavigate } from 'react-router-dom'
 import { loginWithSpotify, restoreFromStorage, type AuthState, signOut } from './auth/token'
 import Callback from './auth/Callback'
@@ -8,7 +8,7 @@ import Popup from './ui/Popup'
 import QualityPanel from './ui/QualityPanel'
 import VJPanel from './ui/VJPanel'
 import DevicePicker from './ui/DevicePicker'
-import { ThemeManager } from './ui/ThemeManager'
+import { ThemeManager, setTheme, getTheme, ThemeName } from './ui/ThemeManager'
 import { getFPS } from './utils/fps'
 import { detectGPUInfo } from './utils/gpu'
 
@@ -30,6 +30,8 @@ export default function App() {
     reducedMotion: false,
     highContrast: false
   })
+  const [theme, setThemeState] = useState<ThemeName>(getTheme())
+  const [scene, setScene] = useState<string>('Blank')
 
   const navigate = useNavigate()
 
@@ -72,6 +74,11 @@ export default function App() {
     location.reload()
   }
 
+  function onThemeChange(t: ThemeName) {
+    setThemeState(t)
+    setTheme(t)
+  }
+
   return (
     <div className="app-shell" role="application" aria-label="FFW Visualizer">
       <div className="canvas-wrap">
@@ -92,12 +99,28 @@ export default function App() {
         </Routes>
         <div className="cyber-panel" aria-hidden={false}>
           <strong>FFW</strong> — <span style={{ color: 'var(--accent)' }}>Cyber</span> Visualizer
-          {!auth ? (
-            <button className="btn primary" style={{ marginLeft: 10 }} onClick={handleLogin} aria-label="Login with Spotify">Login</button>
-          ) : (
-            <button className="btn" style={{ marginLeft: 10 }} onClick={handleSignOut} aria-label="Sign out">Sign out</button>
-          )}
-          <span style={{ marginLeft: 8, color: 'var(--muted)' }}>(Press Q, V, D)</span>
+          <span style={{ marginLeft: 8, color: 'var(--muted)' }}>(Q, V, D)</span>
+          <div style={{ display: 'inline-flex', gap: 8, marginLeft: 10, alignItems: 'center' }}>
+            <label htmlFor="scene" style={{ fontSize: 11, color: 'var(--muted)' }}>Scene</label>
+            <select id="scene" value={scene} onChange={(e) => setScene(e.currentTarget.value)} title="Scene selector" aria-label="Scene selector">
+              <option value="Blank">Blank</option>
+            </select>
+
+            <label htmlFor="theme" style={{ fontSize: 11, color: 'var(--muted)' }}>Theme</label>
+            <select id="theme" value={theme} onChange={(e) => onThemeChange(e.currentTarget.value as ThemeName)} title="Theme" aria-label="Theme">
+              <option value="album">Album (auto)</option>
+              <option value="neon">Neon Aqua</option>
+              <option value="magenta">Magenta</option>
+              <option value="matrix">Matrix</option>
+              <option value="sunset">Sunset</option>
+            </select>
+
+            {!auth ? (
+              <button className="btn primary" onClick={handleLogin} aria-label="Login with Spotify">Login</button>
+            ) : (
+              <button className="btn" onClick={handleSignOut} aria-label="Sign out">Sign out</button>
+            )}
+          </div>
         </div>
       </div>
 

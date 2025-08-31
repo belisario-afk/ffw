@@ -5,6 +5,7 @@ declare global {
   interface Window {
     onSpotifyWebPlaybackSDKReady?: () => void
     Spotify: any
+    __ffwPlayer?: { player: Spotify.Player | null, deviceId: string | null }
   }
 }
 
@@ -34,7 +35,7 @@ export async function loadWebPlaybackSDK(): Promise<void> {
 
 export async function initPlayer(name = 'FFW Visualizer'): Promise<PlayerHandle> {
   await loadWebPlaybackSDK()
-  let token = await getAccessToken()
+  const token = await getAccessToken()
   if (!token) throw new Error('No token for Web Playback SDK')
   const player = new window.Spotify.Player({
     name,
@@ -51,11 +52,13 @@ export async function initPlayer(name = 'FFW Visualizer'): Promise<PlayerHandle>
 
   player.addListener('ready', ({ device_id }: any) => {
     deviceId = device_id
+    window.__ffwPlayer = { player, deviceId }
     readyResolve!(true)
   })
 
   player.addListener('not_ready', ({ device_id }: any) => {
     if (deviceId === device_id) deviceId = null
+    window.__ffwPlayer = { player, deviceId }
   })
 
   player.addListener('initialization_error', ({ message }: any) => console.error('init error', message))
@@ -70,16 +73,18 @@ export async function initPlayer(name = 'FFW Visualizer'): Promise<PlayerHandle>
     if (deviceId) {
       try {
         await transferPlayback(deviceId, true)
-      } catch (e) {
-        // Not premium or cannot transfer; ignore.
+      } catch {
+        // Not premium or cannot transfer; ignore
       }
     }
   }
 
   const disconnect = () => { try { player.disconnect() } catch {} }
 
-  // Player element is sandboxed; in some cases the audio element is on the page and can be analyzed.
-  const hasInPagePlayback = true // We conservatively allow; AudioAnalyzer will probe the element.
+  const hasInPagePlayback = true
+
+  // expose globally for controller UX
+  window.__ffwPlayer = { player, deviceId }
 
   return { deviceId, player, connect, disconnect, hasInPagePlayback }
 }

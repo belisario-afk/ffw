@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en" data-theme="cyberpunk">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0ff" id="theme-color-meta" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="stylesheet" href="/styles.css" />
+    <title>FFW — Spotify Visualizer</title>
+    <meta name="description" content="FFW — Minimal Cyber-Punk Spotify Visualizer with Web Playback SDK and audio-reactive Blank Scene." />
+    <link rel="preconnect" href="https://api.spotify.com" />
+    <link rel="preconnect" href="https://accounts.spotify.com" />
+    <script>
+      // Ensure /callback becomes #/callback for HashRouter in both local dev and Pages
+      (function () {
+        var path = location.pathname;
+        var isPages = path.indexOf('/ffw/') !== -1;
+        var base = isPages ? '/ffw/' : '/';
+        if (path.endsWith('/callback')) {
+          location.replace(base + '#/callback' + (location.search || ''));
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

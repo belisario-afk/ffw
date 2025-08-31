@@ -1,0 +1,16 @@
+{
+  "name": "FFW Visualizer",
+  "short_name": "FFW",
+  "start_url": "/ffw/",
+  "scope": "/ffw/",
+  "display": "standalone",
+  "theme_color": "#00ffff",
+  "background_color": "#0a0f14",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "32x32 48x48 64x64",
+      "type": "image/x-icon"
+    }
+  ]
+}

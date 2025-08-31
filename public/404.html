@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Redirecting…</title>
+    <meta name="robots" content="noindex" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  </head>
+  <body>
+    <noscript>This page redirects to the app root.</noscript>
+    <script>
+      // GitHub Pages SPA redirect helper to hash routing
+      (function () {
+        var base = '/ffw/';
+        var path = location.pathname;
+        // Ensure we only handle paths under the project site
+        var i = path.indexOf(base);
+        if (i !== -1) {
+          var sub = path.slice(i + base.length);
+          var search = location.search || '';
+          // Redirect to hash route so index.html can handle it
+          location.replace(base + '#/' + sub + search);
+        } else {
+          location.replace(base);
+        }
+      })();
+    </script>
+  </body>
+</html>

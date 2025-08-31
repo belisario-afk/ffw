@@ -1,0 +1,26 @@
+{
+  "name": "ffw",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FFW - Minimal Cyber-Punk Spotify Visualizer (Vite + React + TypeScript) for GitHub Pages",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/postbuild-copy-404.cjs",
+    "preview": "vite preview --port 5173",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.4",
+    "@types/react": "^18.3.7",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react-swc": "^3.7.1",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.5"
+  }
+}

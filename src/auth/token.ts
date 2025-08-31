@@ -26,22 +26,26 @@ const stateKey = 'ffw_auth_state'
 export function restoreFromStorage(): AuthState | null {
   const raw = localStorage.getItem(storageKey)
   if (!raw) return null
-  // Guard against legacy string-only values
-  if (raw && raw.trim() && raw.trim().charAt(0) !== '{') {
-    // Looks like a plain token string from an old build; clear it
+  // If it's clearly not JSON, clear and exit.
+  if (raw.trim().charAt(0) !== '{') {
     try { localStorage.removeItem(storageKey) } catch {}
     return null
   }
   try {
-    const s = JSON.parse(raw) as Stored
+    const s = JSON.parse(raw) as Partial<Stored>
+    if (!s || typeof s.access_token !== 'string' || typeof s.refresh_token !== 'string' || typeof s.expires_at !== 'number') {
+      // Shape invalid — clear
+      try { localStorage.removeItem(storageKey) } catch {}
+      return null
+    }
     return {
       accessToken: s.access_token,
       refreshToken: s.refresh_token,
       expiresAt: s.expires_at,
-      scope: s.scope
+      scope: s.scope || ''
     }
   } catch {
-    // If parsing fails, clear and return null to avoid console noise
+    // If parsing fails, clear and return null to avoid JSON errors from old/bad values.
     try { localStorage.removeItem(storageKey) } catch {}
     return null
   }
@@ -85,7 +89,7 @@ export function signOut() {
 }
 
 /**
- * Robustly handle Spotify callback parameters from search or hash.
+ * Robustly handle Spotify callback parameters (search or hash).
  */
 export async function handleAuthCodeCallback(url: string): Promise<AuthState> {
   const u = new URL(url)

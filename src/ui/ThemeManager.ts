@@ -1,9 +1,9 @@
 import React, { useEffect } from 'react'
 
-export type ThemeName = 'album' | 'neon' | 'magenta' | 'matrix' | 'sunset'
+export type ThemeName = 'album' | 'neon' | 'magenta' | 'matrix' | 'sunset' | 'light' | 'slate' | 'hcpro'
 
 const THEME_KEY = 'ffw_theme'
-const SKIN_KEY = 'ffw_album_skin' // '1' or '0'
+const SKIN_KEY = 'ffw_album_skin'
 
 export function getTheme(): ThemeName {
   const t = (localStorage.getItem(THEME_KEY) as ThemeName | null) || 'album'
@@ -26,33 +26,43 @@ export function setAlbumSkinEnabled(enabled: boolean) {
 }
 
 export function setAlbumSkin(url: string | null) {
-  // URL should be a blob or remote image. We store as CSS var used by panels.
   const root = document.documentElement
   root.style.setProperty('--album-art-url', url ? `url("${url}")` : 'none')
 }
 
+function clearThemeClasses(root: HTMLElement) {
+  root.classList.remove('theme-light', 'theme-slate', 'theme-hcpro')
+}
+
 function applyTheme(name: ThemeName) {
   const root = document.documentElement
-  const presets: Record<Exclude<ThemeName, 'album'>, Record<string, string>> = {
+  clearThemeClasses(root)
+
+  // Accent presets (kept for all themes)
+  const presets: Record<'neon'|'magenta'|'matrix'|'sunset', Record<string, string>> = {
     neon: { '--accent': '#00ffff', '--accent-2': '#ff00d4' },
     magenta: { '--accent': '#ff00d4', '--accent-2': '#00ffff' },
     matrix: { '--accent': '#00ff88', '--accent-2': '#00ffaa' },
     sunset: { '--accent': '#ff7a18', '--accent-2': '#af002d' }
   }
-  if (name !== 'album') {
-    const map = presets[name]
-    Object.entries(map).forEach(([k, v]) => root.style.setProperty(k, v))
+
+  if (name in presets) {
+    Object.entries(presets[name as keyof typeof presets]).forEach(([k, v]) => root.style.setProperty(k, v))
   }
+
+  // High visibility theme classes adjust backgrounds and text sharply via CSS
+  if (name === 'light') root.classList.add('theme-light')
+  if (name === 'slate') root.classList.add('theme-slate')
+  if (name === 'hcpro') root.classList.add('theme-hcpro')
+
   const meta = document.getElementById('theme-color-meta') as HTMLMetaElement | null
   if (meta) meta.content = getComputedStyle(root).getPropertyValue('--accent').trim() || '#00ffff'
 }
 
 export function ThemeManager() {
   useEffect(() => {
-    // Apply stored presets on boot
     applyTheme(getTheme())
     setAlbumSkinEnabled(isAlbumSkinEnabled())
-    // Keep <meta name="theme-color"> in sync with accent changes
     const meta = document.getElementById('theme-color-meta') as HTMLMetaElement | null
     const update = () => {
       const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#00ffff'

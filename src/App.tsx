@@ -1,4 +1,4 @@
-import React, { Suspense, useEffect, useMemo, useState } from 'react'
+import React, { Suspense, useEffect, useState } from 'react'
 import { Route, Routes, useNavigate } from 'react-router-dom'
 import { loginWithSpotify, restoreFromStorage, type AuthState, signOut } from './auth/token'
 import Callback from './auth/Callback'
@@ -50,9 +50,9 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.style.setProperty('--contrast', accessibility.highContrast ? '1.2' : '1')
-    document.documentElement.style.setProperty('--motion-scale', accessibility.reducedMotion ? '0.5' : '1')
+    document.documentElement.classList.toggle('album-skin', accessibility.albumSkin)
     setAlbumSkinEnabled(accessibility.albumSkin)
-  }, [accessibility])
+  }, [accessibility.highContrast, accessibility.albumSkin])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -136,6 +136,9 @@ export default function App() {
               <option value="magenta">Magenta</option>
               <option value="matrix">Matrix</option>
               <option value="sunset">Sunset</option>
+              <option value="slate">Slate (readable dark)</option>
+              <option value="light">Light (high legibility)</option>
+              <option value="hcpro">High Contrast Pro</option>
             </select>
 
             {!auth ? (

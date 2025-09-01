@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { AuthState } from '../../auth/token'
-import { initPlayer } from '../../spotify/player'
+import { ensurePlayerConnected } from '../../spotify/player'
 import { AudioAnalyzer, type AnalysisFrame } from '../../audio/AudioAnalyzer'
 import { CONFIG } from '../../config'
 import { getPlaybackState } from '../../spotify/api'
@@ -29,8 +29,6 @@ type Edge = [number, number]
 export default function WireframeHouse({ auth, quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [ctx2d, setCtx2d] = useState<CanvasRenderingContext2D | null>(null)
-  const analyzerRef = useRef<AudioAnalyzer | null>(null)
-  const [trackMeta, setTrackMeta] = useState<{ name: string, artists: string, albumUrl: string }|null>(null)
 
   const vertsRef = useRef<Vec3[]>([])
   const restRef = useRef<Vec3[]>([])
@@ -39,6 +37,13 @@ export default function WireframeHouse({ auth, quality, accessibility }: Props) 
   const starsRef = useRef<{ x: number; y: number; z: number; b: number }[]>([])
   const lastBeatAtRef = useRef(0)
   const tRef = useRef(0)
+
+  // Analysis + render loop
+  const analyzerRef = useRef<AudioAnalyzer | null>(null)
+  const lastFrameRef = useRef<AnalysisFrame | null>(null)
+  const rafRef = useRef<number | null>(null)
+
+  const [trackMeta, setTrackMeta] = useState<{ name: string, artists: string, albumUrl: string }|null>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current!
@@ -60,8 +65,8 @@ export default function WireframeHouse({ auth, quality, accessibility }: Props) 
     return () => window.removeEventListener('resize', onResize)
   }, [quality.renderScale])
 
+  // geometry
   useEffect(() => {
-    // geometry
     const base = 1.2, h = 0.8, roofH = 0.9
     const verts: Vec3[] = [
       { x: -base, y: -h, z: -base },
@@ -86,7 +91,6 @@ export default function WireframeHouse({ auth, quality, accessibility }: Props) 
     velRef.current = verts.map(() => ({ x: 0, y: 0, z: 0 }))
     edgesRef.current = e
 
-    // stars
     const stars = Array.from({ length: 600 }, () => ({
       x: (Math.random() * 2 - 1) * 2.5,
       y: (Math.random() * 2 - 1) * 2.0,
@@ -96,19 +100,33 @@ export default function WireframeHouse({ auth, quality, accessibility }: Props) 
     starsRef.current = stars
   }, [])
 
+  // Start render loop regardless of analyzer so scene is always visible
+  useEffect(() => {
+    if (!ctx2d || !canvasRef.current) return
+    let running = true
+    const loop = () => {
+      if (!running) return
+      const f = lastFrameRef.current || fallbackFrame()
+      stepHousePhysics(f, accessibility)
+      drawScene(ctx2d, canvasRef.current!, f, {
+        bloom: quality.bloom,
+        motionBlur: quality.motionBlur && !accessibility.reducedMotion,
+        epilepsySafe: accessibility.epilepsySafe
+      })
+      rafRef.current = requestAnimationFrame(loop)
+    }
+    rafRef.current = requestAnimationFrame(loop)
+    return () => { running = false; if (rafRef.current) cancelAnimationFrame(rafRef.current) }
+  }, [ctx2d, quality.bloom, quality.motionBlur, accessibility])
+
   useEffect(() => {
     let cancelled = false
     async function boot() {
       if (!auth) return
       try {
-        const player = await initPlayer('FFW Visualizer')
-        await player.connect()
+        await ensurePlayerConnected()
 
-        const findAudio = () => {
-          const els = Array.from(document.querySelectorAll('audio')) as HTMLAudioElement[]
-          return els.find(el => !!el.src)
-        }
-        const aEl = findAudio()
+        const aEl = findAudioElement()
         const analyzer = new AudioAnalyzer({
           fftSize: CONFIG.fftSize,
           smoothing: 0.82,
@@ -120,7 +138,7 @@ export default function WireframeHouse({ auth, quality, accessibility }: Props) 
           analyzer.attachMedia(aEl)
           await analyzer.resume()
         }
-        analyzer.onFrame = onAnalysisFrame
+        analyzer.onFrame = (frame) => { lastFrameRef.current = frame }
         analyzer.run()
 
         const s = await getPlaybackState().catch(() => null)
@@ -147,19 +165,8 @@ export default function WireframeHouse({ auth, quality, accessibility }: Props) 
     }
     boot()
     return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth])
-
-  function onAnalysisFrame(frame: AnalysisFrame) {
-    const canvas = canvasRef.current
-    const ctx = ctx2d
-    if (!canvas || !ctx) return
-    stepHousePhysics(frame)
-    drawScene(ctx, canvas, frame, {
-      bloom: quality.bloom,
-      motionBlur: quality.motionBlur && !accessibility.reducedMotion,
-      epilepsySafe: accessibility.epilepsySafe
-    })
-  }
 
   return (
     <div style={{ height: '100%', position: 'relative' }}>
@@ -178,12 +185,14 @@ export default function WireframeHouse({ auth, quality, accessibility }: Props) 
     </div>
   )
 
-  function stepHousePhysics(frame: AnalysisFrame) {
+  // Helpers
+
+  function stepHousePhysics(frame: AnalysisFrame, acc: { epilepsySafe: boolean }) {
     const verts = vertsRef.current
     const rest = restRef.current
     const vel = velRef.current
     const now = performance.now()
-    const minBeatGap = accessibility.epilepsySafe ? 180 : 120
+    const minBeatGap = acc.epilepsySafe ? 180 : 120
 
     if (frame.beat && now - lastBeatAtRef.current > minBeatGap) {
       lastBeatAtRef.current = now
@@ -251,7 +260,6 @@ export default function WireframeHouse({ auth, quality, accessibility }: Props) 
   function drawStars(g: CanvasRenderingContext2D, W: number, H: number, stars: {x:number;y:number;z:number;b:number}[], frame: AnalysisFrame) {
     const tw = frame.chroma[0] * 0.6 + frame.chroma[7] * 0.4
     const base = 0.6 + frame.loudness * 0.3
-    g.fillStyle = 'white'
     for (let i = 0; i < stars.length; i++) {
       const s = stars[i]
       const fx = (s.x / s.z) * 240 + (W / 2)
@@ -319,21 +327,34 @@ export default function WireframeHouse({ auth, quality, accessibility }: Props) 
     g.globalCompositeOperation = 'source-over'
     g.shadowBlur = 0
   }
+}
 
-  function withAlpha(hexOrCss: string, a: number) {
-    if (hexOrCss.startsWith('#')) {
-      const h = hexOrCss.replace('#','')
-      const r = parseInt(h.slice(0,2),16)
-      const g = parseInt(h.slice(2,4),16)
-      const b = parseInt(h.slice(4,6),16)
-      return `rgba(${r},${g},${b},${a})`
-    }
-    if (hexOrCss.startsWith('rgb')) {
-      return hexOrCss.replace(/rgba?\(([^)]+)\)/, (_m, inner) => {
-        const [r,g,b] = inner.split(',').map((s:string)=>s.trim()).slice(0,3)
-        return `rgba(${r},${g},${b},${a})`
-      })
-    }
-    return hexOrCss
+function findAudioElement(): HTMLAudioElement | undefined {
+  const els = Array.from(document.querySelectorAll('audio')) as HTMLAudioElement[]
+  return els.find(el => !!el.src)
+}
+
+function fallbackFrame(): AnalysisFrame {
+  const t = performance.now() / 1000
+  const fft = new Float32Array(2048).fill(0).map((_, i) => 0.08 + 0.04 * Math.sin(i * 0.02 + t * 2))
+  const fftLog = new Float32Array(256).fill(0).map((_, i) => 0.1 + 0.06 * Math.sin(i * 0.12 + t * 2.2))
+  const chroma = new Float32Array(12).fill(0)
+  return { time: t, fft, fftLog, chroma, loudness: 0.12, beat: false, tempo: 120 }
+}
+
+function withAlpha(hexOrCss: string, a: number) {
+  if (hexOrCss.startsWith('#')) {
+    const h = hexOrCss.replace('#','')
+    const r = parseInt(h.slice(0,2),16)
+    const g = parseInt(h.slice(2,4),16)
+    const b = parseInt(h.slice(4,6),16)
+    return `rgba(${r},${g},${b},${a})`
   }
+  if (hexOrCss.startsWith('rgb')) {
+    return hexOrCss.replace(/rgba?\(([^)]+)\)/, (_m, inner) => {
+      const [r,g,b] = inner.split(',').map((s:string)=>s.trim()).slice(0,3)
+      return `rgba(${r},${g},${b},${a})`
+    })
+  }
+  return hexOrCss
 }

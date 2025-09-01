@@ -19,11 +19,14 @@ type Props = {
 type Vec3 = { x: number; y: number; z: number }
 type Edge = [number, number]
 
+type Ring = { r: number; w: number; a: number }          // floor ring: radius, width, alpha
+type Confetti = { p: Vec3; v: Vec3; life: number; hue: number }
+
 export default function WireframeHouse({ auth, quality, accessibility, settings }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [ctx2d, setCtx2d] = useState<CanvasRenderingContext2D | null>(null)
 
-  // Geometry
+  // Geometry (upright house on ground y=0)
   const vertsRef = useRef<Vec3[]>([])
   const restRef = useRef<Vec3[]>([])
   const velRef = useRef<Vec3[]>([])
@@ -32,8 +35,10 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
 
   // World
   const starsRef = useRef<{ x: number; y: number; z: number; b: number }[]>([])
+  const ringsRef = useRef<Ring[]>([])
+  const confettiRef = useRef<Confetti[]>([])
 
-  // Dynamics
+  // Camera & dynamics
   const lastBeatAtRef = useRef(0)
   const beatIntensityRef = useRef(0)
   const shakeRef = useRef(0)
@@ -64,42 +69,38 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     return () => window.removeEventListener('resize', onResize)
   }, [quality.renderScale])
 
-  // Geometry once — upright house on ground (y=0), roof up
+  // Build geometry (no object rotation; house stays still)
   useEffect(() => {
-    const base = 1.2        // half-width
-    const h = 0.8           // wall height
-    const roofH = 0.9       // extra apex height
-
-    // Bottom on ground y=0, top of walls y=h, roof apex y=h+roofH
+    const base = 1.2, h = 0.9, roofH = 0.95
     const verts: Vec3[] = [
-      // floor rectangle (y=0)
+      // floor (y=0)
       { x: -base, y: 0, z: -base }, { x:  base, y: 0, z: -base },
       { x:  base, y: 0, z:  base }, { x: -base, y: 0, z:  base },
-      // top of walls (y=h)
+      // walls top
       { x: -base, y:  h, z: -base }, { x:  base, y:  h, z: -base },
       { x:  base, y:  h, z:  base }, { x: -base, y:  h, z:  base },
       // roof apex
       { x: 0, y: h + roofH, z: 0 }
     ]
-    const edges: Edge[] = [
-      [0,1],[1,2],[2,3],[3,0],  // floor
-      [4,5],[5,6],[6,7],[7,4],  // top
-      [0,4],[1,5],[2,6],[3,7],  // pillars
-      [4,8],[5,8],[6,8],[7,8],  // roof
-      [4,6],[5,7]               // diagonals
-    ]
+    const edges: Edge = [
+      [0,1],[1,2],[2,3],[3,0],
+      [4,5],[5,6],[6,7],[7,4],
+      [0,4],[1,5],[2,6],[3,7],
+      [4,8],[5,8],[6,8],[7,8],
+      [4,6],[5,7]
+    ] as any
     vertsRef.current = verts.map(v => ({...v}))
     restRef.current = verts.map(v => ({...v}))
     velRef.current = verts.map(() => ({ x: 0, y: 0, z: 0 }))
     edgesRef.current = edges
 
-    // Window sample points on front/back faces
+    // Windows sampling points (front/back faces)
     const windows: Array<{ p: Vec3 }> = []
     const rows = 3, cols = 4
     for (let face = -1; face <= 1; face += 2) {
       for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
         const x = -base*0.75 + (c/(cols-1)) * (base*1.5)
-        const y = h*0.2 + (r/(rows-1)) * (h*0.6)
+        const y = h*0.25 + (r/(rows-1)) * (h*0.6)
         const z = face * base
         windows.push({ p: { x, y, z } })
       }
@@ -107,7 +108,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     windowsRef.current = windows
   }, [])
 
-  // Stars (react to settings.stars)
+  // Stars by settings
   useEffect(() => {
     const stars = Array.from({ length: settings.stars }, () => ({
       x: (Math.random() * 2 - 1) * 2.5,
@@ -118,7 +119,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     starsRef.current = stars
   }, [settings.stars])
 
-  // Render loop (always visible)
+  // Render loop
   useEffect(() => {
     if (!ctx2d || !canvasRef.current) return
     let running = true
@@ -138,7 +139,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     return () => { running = false; if (rafRef.current) cancelAnimationFrame(rafRef.current) }
   }, [ctx2d, quality, accessibility, settings])
 
-  // Attach analyzer + palette
+  // Analyzer + palette
   useEffect(() => {
     let cancelled = false
     async function boot() {
@@ -195,12 +196,12 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     </div>
   )
 
-  // ====== Helpers ======
+  // ===== Helpers =====
 
   function stepPhysics(frame: AnalysisFrame, dt: number) {
-    const [low] = energies(frame)
+    const [low, mid, high] = energies(frame)
 
-    // Beat smoothing and camera shake
+    // Beat gate
     const minBeatGap = accessibility.epilepsySafe ? 180 : 120
     const now = performance.now()
     if (frame.beat && now - lastBeatAtRef.current > minBeatGap) {
@@ -208,22 +209,40 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
       beatIntensityRef.current = Math.min(1, beatIntensityRef.current + 0.6 + low * 0.5)
       shakeRef.current = Math.min(1, shakeRef.current + settings.camShake * 0.8)
 
-      // Explode outward slightly
+      // Explosion impulse
       const power = settings.beatPower * (0.5 + low * 0.9)
       const verts = vertsRef.current, vel = velRef.current
       for (let i = 0; i < verts.length; i++) {
-        const d = { x: verts[i].x, y: verts[i].y - 0.6, z: verts[i].z } // slight up bias
+        const d = { x: verts[i].x, y: verts[i].y - 0.6, z: verts[i].z }
         const len = Math.max(0.001, Math.hypot(d.x, d.y, d.z))
         const dir = { x: d.x / len, y: d.y / len, z: d.z / len }
         vel[i].x += dir.x * power * (0.8 + Math.random() * 0.2)
         vel[i].y += (dir.y * 0.6 + 0.12) * power
         vel[i].z += dir.z * power * (0.8 + Math.random() * 0.2)
       }
+
+      // FX: floor ring
+      if (settings.partyRings) {
+        ringsRef.current.push({ r: 0, w: 0.35, a: 0.6 })
+      }
+
+      // FX: confetti
+      if (settings.confetti) {
+        const count = 80
+        for (let i = 0; i < count; i++) {
+          confettiRef.current.push({
+            p: { x: (Math.random() - 0.5) * 1.0, y: 1.0 + Math.random() * 0.4, z: (Math.random() - 0.5) * 1.0 },
+            v: { x: (Math.random() - 0.5) * 1.6, y: 2.8 + Math.random() * 1.2, z: (Math.random() - 0.5) * 1.6 },
+            life: 1.0,
+            hue: Math.random() * 360
+          })
+        }
+      }
     }
     beatIntensityRef.current *= 0.9
     shakeRef.current *= 0.88
 
-    // Orbiting camera — speed reacts to bass + beat
+    // Orbit camera angle (reactive speed)
     if (settings.orbit) {
       const speed = settings.orbitSpeed + low * 0.8 + beatIntensityRef.current * 1.2
       orbitAngleRef.current += speed * dt
@@ -241,11 +260,32 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
       verts[i].y += vel[i].y * dt
       verts[i].z += vel[i].z * dt
     }
+
+    // Evolve rings (screen-space ellipse approximation)
+    for (const ring of ringsRef.current) {
+      ring.r += (2.6 + low * 3.0) * dt
+      ring.w += 0.06 * dt
+      ring.a *= 0.985
+    }
+    ringsRef.current = ringsRef.current.filter(r => r.a > 0.03 && r.r < 10)
+
+    // Confetti physics
+    const conf = confettiRef.current
+    for (let i = conf.length - 1; i >= 0; i--) {
+      const c = conf[i]
+      c.v.y -= 3.8 * dt
+      c.p.x += c.v.x * dt
+      c.p.y += c.v.y * dt
+      c.p.z += c.v.z * dt
+      c.life -= 0.9 * dt
+      if (c.p.y < 0) { c.p.y = 0; c.v.y *= -0.35; c.v.x *= 0.7; c.v.z *= 0.7 }
+      if (c.life <= 0) { conf.splice(i, 1) }
+    }
   }
 
   function drawScene(g: CanvasRenderingContext2D, canvas: HTMLCanvasElement, frame: AnalysisFrame) {
     const { width: W, height: H } = canvas
-    const [, mid, high] = energies(frame)
+    const [low, mid, high] = energies(frame)
 
     // Background
     if (quality.motionBlur && !accessibility.reducedMotion) {
@@ -259,7 +299,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
       g.fillRect(0, 0, W, H)
     }
 
-    // Accents (+ optional reactive morph)
+    // Accents (+ reactive)
     const accentBase = getVar('--accent', '#0ff')
     const accent2Base = getVar('--accent-2', '#f0f')
     const accent = settings.colorMode === 'reactive' ? mixHex(accentBase, accent2Base, clamp01(high * 0.9)) : accentBase
@@ -276,46 +316,57 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     g.fill()
     g.globalCompositeOperation = 'source-over'
 
-    // True orbit camera position around the house
+    // True orbit camera (camera moves, house stays at origin)
     const radius = Math.max(3.5, settings.orbitRadius)
-    const angle = orbitAngleRef.current
+    const angle = settings.orbit ? orbitAngleRef.current : 0
     const elev = settings.orbitElev
     const cam: Vec3 = {
       x: Math.sin(angle) * radius,
       z: Math.cos(angle) * radius,
-      y: Math.sin(elev) * (radius * 0.5) + 1.2 // slight above ground
+      y: Math.sin(elev) * (radius * 0.5) + 1.2
     }
-    const target: Vec3 = { x: 0, y: 0.9, z: 0 } // look slightly above center
-    // Shake
+    const target: Vec3 = { x: 0, y: 1.1, z: 0 }
     const t = performance.now()/1000
     const shakeAmp = shakeRef.current * 0.06
     cam.x += shakeAmp * Math.sin(t * 27.3)
     cam.y += shakeAmp * Math.cos(t * 31.7)
 
-    // Projection helper using view (look-at) transform, Y‑up
+    // Projection helper
     const proj = (v: Vec3, scale = 1) => projectLookAt(v, cam, target, W, H, scale)
 
-    // Floor grid
-    if (settings.grid) {
-      drawGrid(g, W, H, proj, { color: withAlpha(accent2, 0.25), beat: beatIntensityRef.current })
-    }
+    // Grid
+    if (settings.grid) drawGrid(g, proj, { color: withAlpha(accent2, 0.25), beat: beatIntensityRef.current })
 
-    // Party beams
-    drawPartyBeams(g, proj, { accent2, high, beat: beatIntensityRef.current })
+    // Floor rings (elliptical pulses approximated in screen space)
+    if (settings.partyRings) drawRings(g, W, H, ringsRef.current, accent)
 
-    // Wireframe (depth sorted) with reactive width/glow and slight scale on beat
-    const scale = 1 + beatIntensityRef.current * 0.06
+    // Beams
+    if (settings.beams) drawPartyBeams(g, proj, { accent2, high, beat: beatIntensityRef.current })
+
+    // Wireframe (depth sorted) + EQ edges + jitter
+    const scale = 1 + beatIntensityRef.current * 0.06 + low * 0.02
     drawWire(g, vertsRef.current, edgesRef.current, proj, {
       accent, accent2,
       glow: quality.bloom ? settings.glow : 0,
       lineWidth: settings.lineWidth * (1 + beatIntensityRef.current * 0.25),
-      scale
+      scale,
+      eqEdges: settings.eqEdges,
+      edgeJitter: settings.edgeJitter * (0.5 + high * 1.2)
+    }, frame)
+
+    // Windows
+    if (settings.windows) drawWindows(g, windowsRef.current, proj, {
+      accent: accent2,
+      high,
+      beat: beatIntensityRef.current,
+      intensity: settings.windowIntensity
     })
 
-    // Windows flicker
-    if (settings.windows) drawWindows(g, windowsRef.current, proj, { accent: accent2, high, beat: beatIntensityRef.current })
+    // Confetti on top
+    if (settings.confetti) drawConfetti(g, proj, confettiRef.current)
   }
 
+  // ---------- Draw helpers ----------
   function drawStars(g: CanvasRenderingContext2D, W: number, H: number, stars: {x:number;y:number;z:number;b:number}[], frame: AnalysisFrame) {
     const tw = frame.chroma[0] * 0.6 + frame.chroma[7] * 0.4
     const base = 0.6 + frame.loudness * 0.3
@@ -331,15 +382,11 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
   }
 
   function drawGrid(
-    g: CanvasRenderingContext2D, W: number, H: number,
+    g: CanvasRenderingContext2D,
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
     opts: { color: string, beat: number }
   ) {
-    const y = 0 // ground plane at y=0
-    const span = 8
-    const step = 0.6
-    const shimmer = (0.7 + opts.beat * 0.6)
-
+    const y = 0, span = 8, step = 0.6, shimmer = (0.7 + opts.beat * 0.6)
     g.strokeStyle = opts.color
     g.lineWidth = 1
     g.globalCompositeOperation = 'lighter'
@@ -359,20 +406,31 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     g.globalCompositeOperation = 'source-over'
   }
 
+  function drawRings(g: CanvasRenderingContext2D, W: number, H: number, rings: Ring[], accent: string) {
+    const cx = W * 0.5, cy = H * 0.82
+    for (const r of rings) {
+      g.strokeStyle = withAlpha(accent, r.a * 0.9)
+      g.lineWidth = Math.max(1, r.w * 14)
+      g.beginPath()
+      g.ellipse(cx, cy, r.r * 120, r.r * 38, 0, 0, Math.PI * 2)
+      g.stroke()
+    }
+  }
+
   function drawPartyBeams(
     g: CanvasRenderingContext2D,
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
     opts: { accent2: string, high: number, beat: number }
   ) {
     const beams = 8
-    const radius = 2.2
+    const radius = 2.3
     const t = performance.now() / 1000
     const spin = t * (0.6 + opts.beat * 2)
     g.globalCompositeOperation = 'lighter'
     for (let i = 0; i < beams; i++) {
       const a = spin + (i / beams) * Math.PI * 2
       const p0 = proj({ x: Math.cos(a) * radius, y: 0.05, z: Math.sin(a) * radius })
-      const p1 = proj({ x: Math.cos(a) * (radius + 2.5), y: 1.2, z: Math.sin(a) * (radius + 2.5) })
+      const p1 = proj({ x: Math.cos(a) * (radius + 2.6), y: 1.4, z: Math.sin(a) * (radius + 2.6) })
       g.strokeStyle = withAlpha(opts.accent2, 0.2 + 0.6 * (opts.high))
       g.lineWidth = 2
       g.beginPath(); g.moveTo(p0.x, p0.y); g.lineTo(p1.x, p1.y); g.stroke()
@@ -384,27 +442,55 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     g: CanvasRenderingContext2D,
     verts: Vec3[], edges: Edge[],
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
-    opts: { accent: string, accent2: string, glow: number, lineWidth: number, scale: number }
+    opts: { accent: string, accent2: string, glow: number, lineWidth: number, scale: number, eqEdges: boolean, edgeJitter: number },
+    frame: AnalysisFrame
   ) {
     const P = verts.map(v => proj(v, opts.scale))
-
-    // Depth sort
-    const es = edges.map(([a,b]) => ({ a, b, z: (P[a].z + P[b].z) * 0.5 }))
+    const es = edges.map(([a,b], idx) => ({ a, b, z: (P[a].z + P[b].z) * 0.5, idx }))
       .sort((e1, e2) => e2.z - e1.z)
+
+    // jitter amount in pixels
+    const t = performance.now()/1000
+    const jitter = opts.edgeJitter
+    const jitterPoint = (pt: {x:number;y:number}, seed: number) => {
+      if (jitter <= 0.001) return pt
+      const j = (Math.sin(seed * 13.37 + t * 9.1) + Math.cos(seed * 7.91 + t * 6.7)) * 0.5
+      const amp = 1 + 2.5 * jitter
+      return { x: pt.x + j * amp, y: pt.y + j * amp * 0.6 }
+    }
+
+    const [low, mid, high] = energies(frame)
+    const bandE = (edgeIdx: number) => {
+      // map edge index to band weight
+      const f = (edgeIdx % 16) / 16
+      return f < 0.33 ? low : f < 0.66 ? mid : high
+    }
 
     g.globalCompositeOperation = 'lighter'
     if (opts.glow > 0) { g.shadowColor = opts.accent; g.shadowBlur = 10 * opts.glow } else { g.shadowBlur = 0 }
 
-    // Back pass
-    g.strokeStyle = withAlpha(opts.accent2, 0.35)
+    // Back pass (use accent2 tint)
     g.lineWidth = opts.lineWidth
-    for (const e of es) { g.beginPath(); g.moveTo(P[e.a].x, P[e.a].y); g.lineTo(P[e.b].x, P[e.b].y); g.stroke() }
+    for (const e of es) {
+      const a = jitterPoint(P[e.a], e.idx + 1)
+      const b = jitterPoint(P[e.b], e.idx + 2)
+      const w = opts.eqEdges ? bandE(e.idx) : 0.35
+      g.strokeStyle = opts.eqEdges
+        ? withAlpha(mixHex(opts.accent2, opts.accent, w), 0.55)
+        : withAlpha(opts.accent2, 0.35)
+      g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke()
+    }
 
     // Front pass brighter
-    g.strokeStyle = withAlpha(opts.accent, 0.92)
     g.lineWidth = opts.lineWidth + 0.7
-    for (const e of es) { g.beginPath(); g.moveTo(P[e.a].x, P[e.a].y); g.lineTo(P[e.b].x, P[e.b].y); g.stroke() }
-
+    for (const e of es) {
+      const a = jitterPoint(P[e.a], e.idx + 3)
+      const b = jitterPoint(P[e.b], e.idx + 4)
+      const w = opts.eqEdges ? bandE(e.idx) : 1
+      const col = opts.eqEdges ? mixHex(opts.accent, opts.accent2, 1 - w) : opts.accent
+      g.strokeStyle = withAlpha(col, 0.95)
+      g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke()
+    }
     g.globalCompositeOperation = 'source-over'
     g.shadowBlur = 0
   }
@@ -413,45 +499,51 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     g: CanvasRenderingContext2D,
     windows: Array<{ p: Vec3 }>,
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
-    opts: { accent: string, high: number, beat: number }
+    opts: { accent: string, high: number, beat: number, intensity: number }
   ) {
     const t = performance.now() / 1000
+    const k = Math.max(0.1, Math.min(1, opts.intensity))
     for (let i = 0; i < windows.length; i++) {
       const q = proj(windows[i].p)
       const size = 7 + opts.beat * 10
-      const flicker = 0.35 + 0.65 * Math.abs(Math.sin(t * (6 + (i % 5)) + i * 1.13)) * (0.4 + opts.high * 0.6)
-      g.fillStyle = withAlpha(opts.accent, flicker * 0.9)
+      const flicker = (0.25 + 0.75 * Math.abs(Math.sin(t * (6 + (i % 5)) + i * 1.13))) * (0.3 + opts.high * 0.7) * k
+      g.fillStyle = withAlpha(opts.accent, flicker)
       g.fillRect(q.x - size*0.5, q.y - size*0.5, size, size * 0.7)
     }
   }
 
-  // Look-at projection, Y-up. Returns screen coords (x,y) and depth zFwd.
+  function drawConfetti(
+    g: CanvasRenderingContext2D,
+    proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
+    conf: Confetti[]
+  ) {
+    for (const c of conf) {
+      const q = proj(c.p)
+      const alpha = Math.max(0, Math.min(1, c.life))
+      g.fillStyle = `hsla(${c.hue},100%,60%,${alpha})`
+      g.fillRect(q.x - 2, q.y - 2, 4, 4)
+    }
+  }
+
+  // Look-at projection (Y-up)
   function projectLookAt(v: Vec3, cam: Vec3, target: Vec3, W: number, H: number, scale = 1) {
     const p = { x: v.x * scale - cam.x, y: v.y * scale - cam.y, z: v.z * scale - cam.z }
     const up = { x: 0, y: 1, z: 0 }
-    const fwd = norm(sub(target, cam))       // camera forward
+    const fwd = norm(sub(target, cam))
     const right = norm(cross(fwd, up))
     const up2 = cross(right, fwd)
-
-    // Camera space
     const cx = dot(right, p)
     const cy = dot(up2, p)
-    const cz = dot(fwd, p)                   // forward depth; should be > 0
-
+    const cz = dot(fwd, p)
     const persp = 240 / Math.max(0.001, cz)
-    return { x: cx * persp + W / 2, y: -cy * persp + H * 0.65, z: cz }
+    return { x: cx * persp + W / 2, y: -cy * persp + H * 0.68, z: cz }
   }
 
   // Math helpers
   function sub(a: Vec3, b: Vec3): Vec3 { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z } }
   function dot(a: Vec3, b: Vec3) { return a.x*b.x + a.y*b.y + a.z*b.z }
-  function cross(a: Vec3, b: Vec3): Vec3 {
-    return { x: a.y*b.z - a.z*b.y, y: a.z*b.x - a.x*b.z, z: a.x*b.y - a.y*b.x }
-  }
-  function norm(v: Vec3): Vec3 {
-    const l = Math.hypot(v.x, v.y, v.z) || 1
-    return { x: v.x / l, y: v.y / l, z: v.z / l }
-  }
+  function cross(a: Vec3, b: Vec3): Vec3 { return { x: a.y*b.z - a.z*b.y, y: a.z*b.x - a.x*b.z, z: a.x*b.y - a.y*b.x } }
+  function norm(v: Vec3): Vec3 { const l = Math.hypot(v.x, v.y, v.z) || 1; return { x: v.x / l, y: v.y / l, z: v.z / l } }
 
   function energies(frame: AnalysisFrame): [number, number, number] {
     const arr = frame.fftLog, N = arr.length

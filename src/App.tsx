@@ -35,8 +35,15 @@ export default function App() {
   })
   const [theme, setThemeState] = useState<ThemeName>(getTheme())
   const [scene, setScene] = useState<string>(() => localStorage.getItem('ffw_scene') || 'Blank')
+
+  // Merge saved scene settings with defaults so new options get sane values
   const [houseSettings, setHouseSettings] = useState<HouseSettings>(() => {
-    try { return JSON.parse(localStorage.getItem('ffw_house_settings') || '') as HouseSettings } catch { return defaultHouseSettings }
+    try {
+      const saved = JSON.parse(localStorage.getItem('ffw_house_settings') || '{}')
+      return { ...defaultHouseSettings, ...saved }
+    } catch {
+      return defaultHouseSettings
+    }
   })
 
   const navigate = useNavigate()
@@ -68,6 +75,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [auth])
 
+  // Persist scene settings
   useEffect(() => {
     localStorage.setItem('ffw_house_settings', JSON.stringify(houseSettings))
   }, [houseSettings])

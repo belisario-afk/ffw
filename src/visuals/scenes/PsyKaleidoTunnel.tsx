@@ -11,11 +11,11 @@ type Props = {
 }
 
 /**
-Album-only visuals, crash-hardened
-- Colors come only from album textures and swatches (avg + top3).
-- Two modes: 0=Vortex Prism, 1=Liquid Mosaic.
-- Interlacing/fusion between current and previous covers.
-- Uniform writes are guarded by ensureUniform() to eliminate null.value crashes.
+Album-only visuals (no synthetic colors)
+- Modes: 0=Vortex Prism, 1=Liquid Mosaic
+- Uses only album textures + extracted swatches (avg + top3)
+- Interlacing current/previous cover (radial/stripes/checker) with safe guards
+- Crash-hardened uniform writing (no direct .value reads, auto-recreate uniforms)
 **/
 
 type Cfg = {
@@ -49,7 +49,7 @@ type Cfg = {
 
 type Preset = { name: string } & Cfg
 
-const LS_KEY = 'ffw.kaleido.albumonly.safe.v4'
+const LS_KEY = 'ffw.kaleido.albumonly.safe.v5'
 
 const PRESETS: Record<string, Preset> = {
   vortexPrism: {
@@ -75,12 +75,12 @@ const PRESETS: Record<string, Preset> = {
 export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
-  // Album textures (current & previous) and flags
+  // Album textures (current & previous)
   const tAlbum1Ref = useRef<THREE.Texture | null>(null)
   const tAlbum2Ref = useRef<THREE.Texture | null>(null)
   const has1Ref = useRef(0)
   const has2Ref = useRef(0)
-  const crossRef = useRef(1) // 0->1
+  const crossRef = useRef(1) // 0->1 crossfade progress
 
   // Album swatches
   const albAvg = useRef(new THREE.Color('#808080'))
@@ -90,9 +90,11 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
   // Scene refs
   const matRef = useRef<THREE.ShaderMaterial | null>(null)
+  const uniformsRef = useRef<Record<string, { value: any }>>({})
   const scrollRef = useRef(0)
+  const disposedRef = useRef(false)
 
-  // UI
+  // UI state
   const [panelOpen, setPanelOpen] = useState(false)
   const [selectedPreset, setSelectedPreset] = useState<keyof typeof PRESETS>('vortexPrism')
   const [cfg, setCfg] = useState<Cfg>(() => {
@@ -105,6 +107,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
+
+    disposedRef.current = false
 
     const scene = new THREE.Scene()
     scene.background = new THREE.Color('#01040a')
@@ -126,14 +130,11 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       motionBlur: false
     })
 
-    let running = true
-    let disposed = false
-
     // Audio frames
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Album loader (palette + texture), robust against CORS
+    // Album loader
     let lastTrackId: string | null = null
     function quantizeTopN(data: Uint8ClampedArray, nPick = 3): THREE.Color[] {
       const bins = new Map<number, number>()
@@ -176,14 +177,16 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         if (!id || !url || id === lastTrackId) return
         lastTrackId = id
 
-        // Move current to previous
+        // rotate textures
         if (tAlbum1Ref.current) {
           tAlbum2Ref.current?.dispose()
           tAlbum2Ref.current = tAlbum1Ref.current
           has2Ref.current = 1
+          safeSetTex('tAlbum2', tAlbum2Ref.current)
+          safeSetF('uHasAlbum2', 1)
         }
 
-        // Load cover image with CORS, fallback blob
+        // load image (CORS first, blob fallback)
         const img = await new Promise<HTMLImageElement>((resolve, reject) => {
           const im = new Image()
           im.crossOrigin = 'anonymous'
@@ -201,21 +204,21 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           })
         })
 
-        // Swatches
-        const c = document.createElement('canvas'); c.width = 64; c.height = 64
+        // swatches
+        const c = document.createElement('canvas'); c.width = 48; c.height = 48
         const g = c.getContext('2d')
         if (g) {
-          g.drawImage(img, 0, 0, 64, 64)
-          const data = g.getImageData(0, 0, 64, 64).data
+          g.drawImage(img, 0, 0, 48, 48)
+          const data = g.getImageData(0, 0, 48, 48).data
           const picks = quantizeTopN(data, 3)
           albC1.current.copy(picks[0]); albC2.current.copy(picks[1]); albC3.current.copy(picks[2])
-          setColor('uC0', albAvg.current)
-          setColor('uC1', albC1.current)
-          setColor('uC2', albC2.current)
-          setColor('uC3', albC3.current)
+          safeSetColor('uC0', albAvg.current)
+          safeSetColor('uC1', albC1.current)
+          safeSetColor('uC2', albC2.current)
+          safeSetColor('uC3', albC3.current)
         }
 
-        // Texture (current)
+        // texture
         const loader = new THREE.TextureLoader()
         loader.setCrossOrigin('anonymous' as any)
         const tex = await new Promise<THREE.Texture>((resolve, reject) => {
@@ -227,14 +230,14 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         tex.magFilter = THREE.LinearFilter
         tex.generateMipmaps = true
         tAlbum1Ref.current = tex
-        setTex('tAlbum1', tex)
         has1Ref.current = 1
-        setF('uHasAlbum1', 1.0)
-        setF('uHasAlbum2', has2Ref.current ? 1.0 : 0.0)
+        safeSetTex('tAlbum1', tex)
+        safeSetF('uHasAlbum1', 1)
+        safeSetF('uHasAlbum2', has2Ref.current ? 1 : 0)
 
-        // Start crossfade to current
-        crossRef.current = 0.0
-        setF('uAlbumCross', 0.0)
+        // crossfade to current
+        crossRef.current = 0
+        safeSetF('uAlbumCross', 0)
       } catch { /* ignore */ }
     }
 
@@ -242,23 +245,21 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const albumIv = window.setInterval(loadAlbum, 6000)
 
     // Geometry
-    const radius = 14, tunnelLen = 220
-    const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 360, 1, true)
+    const tunnel = new THREE.CylinderGeometry(14, 14, 220, 360, 1, true)
     tunnel.rotateZ(Math.PI * 0.5)
 
-    // Uniforms
-    const uniforms = {
+    // Initialize uniforms ONCE and keep a live reference we will update safely
+    const uniforms: Record<string, { value: any }> = uniformsRef.current = {
       uTime: { value: 0.0 },
       uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
       uLoud: { value: 0.12 },
       uBeat: { value: 0.0 },
-
       uScroll: { value: 0.0 },
       uSpin: { value: 0.0 },
       uZoom: { value: 0.0 },
 
-      tAlbum1: { value: null as THREE.Texture | null },
-      tAlbum2: { value: null as THREE.Texture | null },
+      tAlbum1: { value: null },
+      tAlbum2: { value: null },
       uHasAlbum1: { value: 0.0 },
       uHasAlbum2: { value: 0.0 },
       uAlbumCross: { value: 1.0 },
@@ -495,33 +496,33 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const tunnelMesh = new THREE.Mesh(tunnel, mat)
     scene.add(tunnelMesh)
 
-    // SAFER uniform setters: rebuild missing uniforms on the fly to avoid null.value
-    const ensureUniform = (name: keyof typeof uniforms, init: any) => {
-      const m = matRef.current as THREE.ShaderMaterial | null
-      const table = m?.uniforms as any
-      if (!m || !table) return null
-      const u = table[name]
-      if (!u || typeof u !== 'object' || !('value' in u)) { table[name] = { value: init }; return table[name] }
-      return u
+    // Ultra-safe uniform setters: no direct table reads in callers, no .value on null, try/catch barrier
+    const ensure = (name: string, init: any) => {
+      try {
+        const table = uniformsRef.current
+        if (!table[name]) table[name] = { value: init }
+        else if (!('value' in table[name])) table[name] = { value: init }
+        return table[name]
+      } catch { return null }
     }
-    const setF = (name: keyof typeof uniforms, v: number) => { const u = ensureUniform(name, v); if (u) u.value = v }
-    const setV2 = (name: keyof typeof uniforms, x: number, y: number) => {
-      const u = ensureUniform(name, new THREE.Vector2(x, y)); if (!u) return
-      if (u.value?.isVector2) u.value.set(x, y); else u.value = new THREE.Vector2(x, y)
+    const safeSetF = (name: string, v: number) => { const u = ensure(name, v); if (u) u.value = v }
+    const safeSetV2 = (name: string, x: number, y: number) => {
+      const u = ensure(name, new THREE.Vector2(x, y)); if (!u) return
+      if (u.value && u.value.isVector2) u.value.set(x, y); else u.value = new THREE.Vector2(x, y)
     }
-    const setV3 = (name: keyof typeof uniforms, x: number, y: number, z: number) => {
-      const u = ensureUniform(name, new THREE.Vector3(x, y, z)); if (!u) return
-      if (u.value?.isVector3) u.value.set(x, y, z); else u.value = new THREE.Vector3(x, y, z)
+    const safeSetV3 = (name: string, x: number, y: number, z: number) => {
+      const u = ensure(name, new THREE.Vector3(x, y, z)); if (!u) return
+      if (u.value && u.value.isVector3) u.value.set(x, y, z); else u.value = new THREE.Vector3(x, y, z)
     }
-    const setColor = (name: keyof typeof uniforms, col: THREE.Color) => {
-      const u = ensureUniform(name, col.clone()); if (!u) return
-      if (u.value?.isColor) u.value.copy(col); else u.value = col.clone()
+    const safeSetColor = (name: string, col: THREE.Color) => {
+      const u = ensure(name, col.clone()); if (!u) return
+      if (u.value && u.value.isColor) u.value.copy(col); else u.value = col.clone()
     }
-    const setTex = (name: keyof typeof uniforms, tex: THREE.Texture | null) => { const u = ensureUniform(name, tex); if (u) u.value = tex }
+    const safeSetTex = (name: string, tex: THREE.Texture | null) => { const u = ensure(name, tex); if (u) u.value = tex }
 
     // Resize
     const onResize = () => {
-      if (disposed) return
+      if (disposedRef.current) return
       const view = renderer.getSize(new THREE.Vector2())
       camera.aspect = view.x / Math.max(1, view.y)
       camera.updateProjectionMatrix()
@@ -537,7 +538,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
     const animate = () => {
       raf = requestAnimationFrame(animate)
-      if (!running || disposed) return
+      if (disposedRef.current) return
 
       const dt = Math.min(0.05, clock.getDelta())
       const t = clock.elapsedTime
@@ -581,10 +582,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       }
 
       const k = 1 - Math.pow(0.0001, dt)
-      ;(Object.keys(target) as (keyof typeof target)[]).forEach(key => {
-        // @ts-ignore
-        s[key] += (target[key] - s[key]) * k
-      })
+      ;(Object.keys(target) as (keyof typeof target)[]).forEach(key => { /* @ts-ignore */ s[key] += (target[key] - s[key]) * k })
 
       const kIntensity = THREE.MathUtils.lerp(s.intensity, Math.min(s.intensity, 0.6), safe)
       const kSpeed = THREE.MathUtils.lerp(s.speed, Math.min(s.speed, 0.4), safe)
@@ -595,46 +593,47 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       scrollRef.current += dt * (0.24 + 1.05 * kSpeed + 0.48 * loud)
       crossRef.current = Math.min(1, crossRef.current + dt * 0.35)
 
-      setF('uTime', t)
-      setV3('uAudio', low, mid, high)
-      setF('uLoud', loud)
-      setF('uBeat', beat)
-      setF('uSafe', safe)
-      setF('uContrastBoost', accessibility.highContrast ? 1.0 : 0.0)
+      // Push uniforms via safe setters (never deref .value without checks)
+      safeSetF('uTime', t)
+      safeSetV3('uAudio', low, mid, high)
+      safeSetF('uLoud', loud)
+      safeSetF('uBeat', beat)
+      safeSetF('uSafe', safe)
+      safeSetF('uContrastBoost', accessibility.highContrast ? 1.0 : 0.0)
 
-      setF('uScroll', scrollRef.current)
-      setF('uSpin', spin)
-      setF('uZoom', zoom)
+      safeSetF('uScroll', scrollRef.current)
+      safeSetF('uSpin', spin)
+      safeSetF('uZoom', zoom)
 
-      setF('uIntensity', kIntensity)
-      setF('uSpeed', kSpeed)
-      setF('uExposure', s.exposure)
-      setF('uSaturation', s.saturation)
-      setF('uGamma', s.gamma)
-      setF('uVignette', s.vignette)
+      safeSetF('uIntensity', kIntensity)
+      safeSetF('uSpeed', kSpeed)
+      safeSetF('uExposure', s.exposure)
+      safeSetF('uSaturation', s.saturation)
+      safeSetF('uGamma', s.gamma)
+      safeSetF('uVignette', s.vignette)
 
-      setF('uShapeMode', s.shapeMode)
-      setF('uSlices', s.slices)
-      setF('uTileScale', s.tileScale)
-      setF('uTileRound', s.tileRound)
+      safeSetF('uShapeMode', s.shapeMode)
+      safeSetF('uSlices', s.slices)
+      safeSetF('uTileScale', s.tileScale)
+      safeSetF('uTileRound', s.tileRound)
 
-      setF('uPrismDispersion', s.prismDispersion)
-      setF('uPrismWarp', s.prismWarp)
+      safeSetF('uPrismDispersion', s.prismDispersion)
+      safeSetF('uPrismWarp', s.prismWarp)
 
-      setV2('uTexScale', s.texScaleU, s.texScaleV)
-      setF('uTexRotate', s.texRotate)
-      setF('uAlbumTexWarp', s.albumTexWarp)
+      safeSetV2('uTexScale', s.texScaleU, s.texScaleV)
+      safeSetF('uTexRotate', s.texRotate)
+      safeSetF('uAlbumTexWarp', s.albumTexWarp)
 
-      setF('uInterlaceMode', s.interlaceMode)
-      setF('uInterlaceScale', s.interlaceScale)
-      setF('uInterlaceStrength', s.interlaceStrength)
-      setF('uFuseBias', s.fuseBias)
+      safeSetF('uInterlaceMode', s.interlaceMode)
+      safeSetF('uInterlaceScale', s.interlaceScale)
+      safeSetF('uInterlaceStrength', s.interlaceStrength)
+      safeSetF('uFuseBias', s.fuseBias)
 
-      setF('uEdgeEmphasis', s.edgeEmphasis)
+      safeSetF('uEdgeEmphasis', s.edgeEmphasis)
 
-      setF('uHasAlbum1', has1Ref.current ? 1.0 : 0.0)
-      setF('uHasAlbum2', has2Ref.current ? 1.0 : 0.0)
-      setF('uAlbumCross', crossRef.current)
+      safeSetF('uHasAlbum1', has1Ref.current ? 1.0 : 0.0)
+      safeSetF('uHasAlbum2', has2Ref.current ? 1.0 : 0.0)
+      safeSetF('uAlbumCross', crossRef.current)
 
       comp.composer.render()
     }
@@ -643,8 +642,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
     // Cleanup
     return () => {
-      running = false
-      disposed = true
+      disposedRef.current = true
       window.removeEventListener('resize', onResize)
       cancelAnimationFrame(raf)
       window.clearInterval(albumIv)
@@ -711,7 +709,10 @@ function Panel(props: {
     padding: '6px 10px', fontSize: 12, borderRadius: 6, border: '1px solid #2b2f3a',
     background: 'rgba(16,18,22,0.8)', color: '#cfe7ff', cursor: 'pointer'
   }
-  const onRange = (cb: (v: number) => void) => (e: React.ChangeEvent<HTMLInputElement>) => cb(Number(e.currentTarget.value))
+  const onRange = (cb: (v: number) => void) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = Number(e.currentTarget.value)
+    if (Number.isFinite(raw)) cb(raw)
+  }
 
   return (
     <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 10, userSelect: 'none', pointerEvents: 'auto' }}>
@@ -740,28 +741,22 @@ function Panel(props: {
 
           <Card title="Core">
             <Row label={`Intensity ${cfg.intensity.toFixed(2)}`}>
-              <input type="range" min={0} max={1.6} step={0.01} value={cfg.intensity}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, intensity: Math.max(0, Math.min(1.6, v)) })))} />
+              <input type="range" min={0} max={1.6} step={0.01} value={cfg.intensity} onChange={onRange(v => onChange(prev => ({ ...prev, intensity: Math.max(0, Math.min(1.6, v)) })))} />
             </Row>
             <Row label={`Speed ${cfg.speed.toFixed(2)}`}>
-              <input type="range" min={0} max={2} step={0.01} value={cfg.speed}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, speed: Math.max(0, Math.min(2, v)) })))} />
+              <input type="range" min={0} max={2} step={0.01} value={cfg.speed} onChange={onRange(v => onChange(prev => ({ ...prev, speed: Math.max(0, Math.min(2, v)) })))} />
             </Row>
             <Row label={`Exposure ${cfg.exposure.toFixed(2)}`}>
-              <input type="range" min={0} max={1.6} step={0.01} value={cfg.exposure}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, exposure: Math.max(0, Math.min(1.6, v)) })))} />
+              <input type="range" min={0} max={1.6} step={0.01} value={cfg.exposure} onChange={onRange(v => onChange(prev => ({ ...prev, exposure: Math.max(0, Math.min(1.6, v)) })))} />
             </Row>
             <Row label={`Saturation ${cfg.saturation.toFixed(2)}`}>
-              <input type="range" min={0.6} max={1.6} step={0.01} value={cfg.saturation}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, saturation: Math.max(0.6, Math.min(1.6, v)) })))} />
+              <input type="range" min={0.6} max={1.6} step={0.01} value={cfg.saturation} onChange={onRange(v => onChange(prev => ({ ...prev, saturation: Math.max(0.6, Math.min(1.6, v)) })))} />
             </Row>
             <Row label={`Gamma ${cfg.gamma.toFixed(3)}`}>
-              <input type="range" min={0.85} max={1.15} step={0.001} value={cfg.gamma}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, gamma: Math.max(0.85, Math.min(1.15, v)) })))} />
+              <input type="range" min={0.85} max={1.15} step={0.001} value={cfg.gamma} onChange={onRange(v => onChange(prev => ({ ...prev, gamma: Math.max(0.85, Math.min(1.15, v)) })))} />
             </Row>
             <Row label={`Vignette ${cfg.vignette.toFixed(2)}`}>
-              <input type="range" min={0} max={1} step={0.01} value={cfg.vignette}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, vignette: Math.max(0, Math.min(1, v)) })))} />
+              <input type="range" min={0} max={1} step={0.01} value={cfg.vignette} onChange={onRange(v => onChange(prev => ({ ...prev, vignette: Math.max(0, Math.min(1, v)) })))} />
             </Row>
           </Card>
 
@@ -777,50 +772,40 @@ function Panel(props: {
               </select>
             </Row>
             <Row label={`Slices (prism) ${Math.round(cfg.slices)}`}>
-              <input type="range" min={1} max={48} step={1} value={cfg.slices}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, slices: Math.max(1, Math.min(48, Math.round(v))) })))} />
+              <input type="range" min={1} max={48} step={1} value={cfg.slices} onChange={onRange(v => onChange(prev => ({ ...prev, slices: Math.max(1, Math.min(48, Math.round(v))) })))} />
             </Row>
             <Row label={`Tile Scale (mosaic) ${cfg.tileScale.toFixed(2)}`}>
-              <input type="range" min={0.8} max={6} step={0.01} value={cfg.tileScale}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, tileScale: Math.max(0.8, Math.min(6, v)) })))} />
+              <input type="range" min={0.8} max={6} step={0.01} value={cfg.tileScale} onChange={onRange(v => onChange(prev => ({ ...prev, tileScale: Math.max(0.8, Math.min(6, v)) })))} />
             </Row>
             <Row label={`Tile Round (mosaic) ${cfg.tileRound.toFixed(2)}`}>
-              <input type="range" min={0} max={1} step={0.01} value={cfg.tileRound}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, tileRound: Math.max(0, Math.min(1, v)) })))} />
+              <input type="range" min={0} max={1} step={0.01} value={cfg.tileRound} onChange={onRange(v => onChange(prev => ({ ...prev, tileRound: Math.max(0, Math.min(1, v)) })))} />
             </Row>
             <Row label={`Edge Emphasis ${cfg.edgeEmphasis.toFixed(2)}`}>
-              <input type="range" min={0} max={1} step={0.01} value={cfg.edgeEmphasis}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, edgeEmphasis: Math.max(0, Math.min(1, v)) })))} />
+              <input type="range" min={0} max={1} step={0.01} value={cfg.edgeEmphasis} onChange={onRange(v => onChange(prev => ({ ...prev, edgeEmphasis: Math.max(0, Math.min(1, v)) })))} />
             </Row>
           </Card>
 
           <Card title="Prism / Refraction">
             <Row label={`Dispersion ${cfg.prismDispersion.toFixed(2)}`}>
-              <input type="range" min={0} max={1} step={0.01} value={cfg.prismDispersion}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, prismDispersion: Math.max(0, Math.min(1, v)) })))} />
+              <input type="range" min={0} max={1} step={0.01} value={cfg.prismDispersion} onChange={onRange(v => onChange(prev => ({ ...prev, prismDispersion: Math.max(0, Math.min(1, v)) })))} />
             </Row>
             <Row label={`Warp ${cfg.prismWarp.toFixed(2)}`}>
-              <input type="range" min={0} max={1} step={0.01} value={cfg.prismWarp}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, prismWarp: Math.max(0, Math.min(1, v)) })))} />
+              <input type="range" min={0} max={1} step={0.01} value={cfg.prismWarp} onChange={onRange(v => onChange(prev => ({ ...prev, prismWarp: Math.max(0, Math.min(1, v)) })))} />
             </Row>
           </Card>
 
           <Card title="Album Texture Mapping">
             <Row label={`Tex Scale U ${cfg.texScaleU.toFixed(2)}`}>
-              <input type="range" min={0.5} max={6} step={0.01} value={cfg.texScaleU}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, texScaleU: Math.max(0.5, Math.min(6, v)) })))} />
+              <input type="range" min={0.5} max={6} step={0.01} value={cfg.texScaleU} onChange={onRange(v => onChange(prev => ({ ...prev, texScaleU: Math.max(0.5, Math.min(6, v)) })))} />
             </Row>
             <Row label={`Tex Scale V ${cfg.texScaleV.toFixed(2)}`}>
-              <input type="range" min={0.5} max={6} step={0.01} value={cfg.texScaleV}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, texScaleV: Math.max(0.5, Math.min(6, v)) })))} />
+              <input type="range" min={0.5} max={6} step={0.01} value={cfg.texScaleV} onChange={onRange(v => onChange(prev => ({ ...prev, texScaleV: Math.max(0.5, Math.min(6, v)) })))} />
             </Row>
             <Row label={`Tex Rotate ${cfg.texRotate.toFixed(2)} rad`}>
-              <input type="range" min={-3.14159} max={3.14159} step={0.01} value={cfg.texRotate}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, texRotate: Math.max(-Math.PI, Math.min(Math.PI, v)) })))} />
+              <input type="range" min={-3.14159} max={3.14159} step={0.01} value={cfg.texRotate} onChange={onRange(v => onChange(prev => ({ ...prev, texRotate: Math.max(-Math.PI, Math.min(Math.PI, v)) })))} />
             </Row>
             <Row label={`Tex Warp ${cfg.albumTexWarp.toFixed(2)}`}>
-              <input type="range" min={0} max={0.8} step={0.01} value={cfg.albumTexWarp}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, albumTexWarp: Math.max(0, Math.min(0.8, v)) })))} />
+              <input type="range" min={0} max={0.8} step={0.01} value={cfg.albumTexWarp} onChange={onRange(v => onChange(prev => ({ ...prev, albumTexWarp: Math.max(0, Math.min(0.8, v)) })))} />
             </Row>
           </Card>
 
@@ -834,22 +819,19 @@ function Panel(props: {
                 })}
                 style={{ width: '100%', background: '#0f1218', color: '#cfe7ff', border: '1px solid #2b2f3a', borderRadius: 6, padding: '6px' }}
               >
-                <option value={0}>Radial (for Prism)</option>
+                <option value={0}>Radial (Prism)</option>
                 <option value={1}>Stripes</option>
                 <option value={2}>Checker</option>
               </select>
             </Row>
             <Row label={`Scale ${cfg.interlaceScale.toFixed(0)}`}>
-              <input type="range" min={40} max={600} step={1} value={cfg.interlaceScale}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, interlaceScale: Math.max(40, Math.min(600, v)) })))} />
+              <input type="range" min={40} max={600} step={1} value={cfg.interlaceScale} onChange={onRange(v => onChange(prev => ({ ...prev, interlaceScale: Math.max(40, Math.min(600, v)) })))} />
             </Row>
             <Row label={`Strength ${cfg.interlaceStrength.toFixed(2)}`}>
-              <input type="range" min={0} max={1} step={0.01} value={cfg.interlaceStrength}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, interlaceStrength: Math.max(0, Math.min(1, v)) })))} />
+              <input type="range" min={0} max={1} step={0.01} value={cfg.interlaceStrength} onChange={onRange(v => onChange(prev => ({ ...prev, interlaceStrength: Math.max(0, Math.min(1, v)) })))} />
             </Row>
             <Row label={`Fuse Bias prev↔current ${cfg.fuseBias.toFixed(2)}`}>
-              <input type="range" min={0} max={1} step={0.01} value={cfg.fuseBias}
-                     onChange={onRange(v => onChange(prev => ({ ...prev, fuseBias: Math.max(0, Math.min(1, v)) })))} />
+              <input type="range" min={0} max={1} step={0.01} value={cfg.fuseBias} onChange={onRange(v => onChange(prev => ({ ...prev, fuseBias: Math.max(0, Math.min(1, v)) })))} />
             </Row>
           </Card>
 

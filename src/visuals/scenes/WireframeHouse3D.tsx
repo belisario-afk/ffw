@@ -1,3 +1,6 @@
+// Minimal, calmer defaults + lyrics marquee fix + token wiring from props.auth.
+// Film grain/motion blur disabled to avoid WebGL 3D texture warnings in some setups.
+
 import React, { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
@@ -15,11 +18,9 @@ type Props = {
   auth: AuthState | null
   quality: { renderScale: 1 | 1.25 | 1.5 | 1.75 | 2, msaa: 0 | 2 | 4 | 8, bloom: boolean, motionBlur: boolean }
   accessibility: { epilepsySafe: boolean, reducedMotion: boolean, highContrast: boolean }
-  // settings prop is still accepted but this component now manages its own panel/state (used as initial)
   settings?: any
 }
 
-// Local settings dedicated to the 3D scene (independent from WireframeHouse.tsx)
 type LocalCfg = {
   path: 'Circle'|'Ellipse'|'Lemniscate'|'Manual'
   orbitSpeed: number
@@ -45,7 +46,6 @@ type LocalCfg = {
     autoPath: boolean
     target: { x:number, y:number, z:number }
   }
-  // FX toggles
   fx: {
     beams: boolean
     groundRings: boolean
@@ -64,26 +64,26 @@ const LS_KEY = 'ffw.wire3d.settings.v2'
 function defaults(initial?: any): LocalCfg {
   return {
     path: initial?.path ?? 'Circle',
-    orbitSpeed: initial?.orbitSpeed ?? 0.55,
-    orbitRadius: initial?.orbitRadius ?? 8.0,
-    orbitElev: initial?.orbitElev ?? 0.08,
-    camBob: initial?.camBob ?? 0.15,
-    lineWidthPx: initial?.lineWidthPx ?? 2.5,
+    orbitSpeed: initial?.orbitSpeed ?? 0.35,      // slower
+    orbitRadius: initial?.orbitRadius ?? 9.5,     // a touch wider
+    orbitElev: initial?.orbitElev ?? 0.06,        // lower angle
+    camBob: initial?.camBob ?? 0.08,              // reduced bob
+    lineWidthPx: initial?.lineWidthPx ?? 1.6,     // thinner lines
     camera: {
-      fov: clamp(initial?.camera?.fov ?? 55, 30, 95),
-      minDistance: clamp(initial?.camera?.minDistance ?? 4, 2, 30),
-      maxDistance: clamp(initial?.camera?.maxDistance ?? 18, 6, 100),
-      minPolarAngle: clamp(initial?.camera?.minPolarAngle ?? (Math.PI * 0.1), 0, Math.PI / 2),
-      maxPolarAngle: clamp(initial?.camera?.maxPolarAngle ?? (Math.PI * 0.9), Math.PI / 4, Math.PI),
+      fov: clamp(initial?.camera?.fov ?? 50, 30, 85),
+      minDistance: clamp(initial?.camera?.minDistance ?? 5, 3, 30),
+      maxDistance: clamp(initial?.camera?.maxDistance ?? 16, 6, 100),
+      minPolarAngle: clamp(initial?.camera?.minPolarAngle ?? (Math.PI * 0.12), 0, Math.PI / 2),
+      maxPolarAngle: clamp(initial?.camera?.maxPolarAngle ?? (Math.PI * 0.85), Math.PI / 4, Math.PI),
       enablePan: initial?.camera?.enablePan ?? true,
       enableZoom: initial?.camera?.enableZoom ?? true,
       enableDamping: initial?.camera?.enableDamping ?? true,
-      dampingFactor: clamp(initial?.camera?.dampingFactor ?? 0.08, 0.01, 0.2),
-      rotateSpeed: clamp(initial?.camera?.rotateSpeed ?? 0.8, 0.1, 5),
-      zoomSpeed: clamp(initial?.camera?.zoomSpeed ?? 0.8, 0.1, 5),
-      panSpeed: clamp(initial?.camera?.panSpeed ?? 0.8, 0.1, 5),
+      dampingFactor: clamp(initial?.camera?.dampingFactor ?? 0.1, 0.05, 0.2),
+      rotateSpeed: clamp(initial?.camera?.rotateSpeed ?? 0.6, 0.1, 5),
+      zoomSpeed: clamp(initial?.camera?.zoomSpeed ?? 0.7, 0.1, 5),
+      panSpeed: clamp(initial?.camera?.panSpeed ?? 0.6, 0.1, 5),
       autoRotate: initial?.camera?.autoRotate ?? false,
-      autoRotateSpeed: clamp(initial?.camera?.autoRotateSpeed ?? 0.8, 0.05, 10),
+      autoRotateSpeed: clamp(initial?.camera?.autoRotateSpeed ?? 0.5, 0.05, 5),
       autoPath: initial?.camera?.autoPath ?? true,
       target: {
         x: initial?.camera?.target?.x ?? 0,
@@ -92,15 +92,15 @@ function defaults(initial?: any): LocalCfg {
       }
     },
     fx: {
-      beams: initial?.fx?.beams ?? true,
-      groundRings: initial?.fx?.groundRings ?? true,
-      floorRipple: initial?.fx?.floorRipple ?? true,
-      windowEQ: initial?.fx?.windowEQ ?? true,
-      chimneySmoke: initial?.fx?.chimneySmoke ?? true,
-      starfield: initial?.fx?.starfield ?? true,
-      bloomBreath: initial?.fx?.bloomBreath ?? true,
+      beams: initial?.fx?.beams ?? false,         // OFF by default
+      groundRings: initial?.fx?.groundRings ?? false,
+      floorRipple: initial?.fx?.floorRipple ?? false,
+      windowEQ: initial?.fx?.windowEQ ?? true,    // subtle window flicker
+      chimneySmoke: initial?.fx?.chimneySmoke ?? false,
+      starfield: initial?.fx?.starfield ?? false, // OFF by default
+      bloomBreath: initial?.fx?.bloomBreath ?? false,
       lyricsMarquee: initial?.fx?.lyricsMarquee ?? true,
-      mosaicFloor: initial?.fx?.mosaicFloor ?? true
+      mosaicFloor: initial?.fx?.mosaicFloor ?? false
     }
   }
 }
@@ -116,39 +116,33 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   })
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Wire Spotify token provider from props.auth if available (removes "provider not set" and helps device appear)
+  // Provide token to Spotify player if available from props.auth
   useEffect(() => {
-    if (auth && (auth as any).accessToken) {
-      try {
-        setSpotifyTokenProvider(async () => (auth as any).accessToken as string)
-      } catch {}
+    const token = (auth as any)?.accessToken
+    if (token) {
+      try { setSpotifyTokenProvider(async () => token) } catch {}
     }
   }, [auth])
 
-  // Keep Spotify device listed without touching volume (guarded)
+  // Connect Web Playback SDK device (guarded)
   useEffect(() => {
     if (hasSpotifyTokenProvider()) {
-      ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: false })
+      ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
         .catch(e => console.warn('Spotify ensurePlayerConnected (3D) failed:', e))
     } else {
       console.warn('WireframeHouse3D: Spotify token provider not set. Skipping player connect.')
     }
   }, [])
 
-  // Allow a global gear to open ONLY this 3D panel via a custom event
+  // Allow global gear to open this panel
   useEffect(() => {
     const open = () => setPanelOpen(true)
     const close = () => setPanelOpen(false)
     window.addEventListener('ffw:open-wireframe3d-settings', open as EventListener)
     window.addEventListener('ffw:close-wireframe3d-settings', close as EventListener)
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.key === 'S' || e.key === 's') && (e.shiftKey || e.metaKey)) setPanelOpen(p => !p)
-    }
-    window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('ffw:open-wireframe3d-settings', open as EventListener)
       window.removeEventListener('ffw:close-wireframe3d-settings', close as EventListener)
-      window.removeEventListener('keydown', onKey)
     }
   }, [])
 
@@ -163,24 +157,25 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     // Scene & camera
     const scene = new THREE.Scene()
     scene.background = null
-    scene.fog = new THREE.Fog(new THREE.Color('#06080a'), 60, 180)
+    scene.fog = new THREE.Fog(new THREE.Color('#050607'), 50, 140)
 
     const camera = new THREE.PerspectiveCamera(cfg.camera.fov, 1, 0.05, 300)
-    camera.position.set(0, 3.2, 14)
+    camera.position.set(0, 2.8, 12.5)
     camera.lookAt(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
 
-    // Renderer + post
+    // Renderer + post (film grain & motion blur disabled to avoid 3D texture warnings)
     const { renderer, dispose: disposeRenderer } = createRenderer(canvasRef.current, quality.renderScale)
     const comp = createComposer(renderer, scene, camera, {
       bloom: quality.bloom,
-      bloomStrength: 0.9,
-      bloomRadius: 0.28,
-      bloomThreshold: 0.25,
+      bloomStrength: 0.55,          // gentler
+      bloomRadius: 0.22,
+      bloomThreshold: 0.35,
       fxaa: true,
       vignette: true,
-      vignetteStrength: 0.55,
-      filmGrain: true,
-      filmGrainStrength: 0.3
+      vignetteStrength: 0.45,
+      filmGrain: false,             // off
+      filmGrainStrength: 0.0,
+      motionBlur: false             // off
     })
 
     // Orbit Controls
@@ -206,29 +201,27 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.target.set(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
     })
 
-    // Palette
-    const cssColor = (name: string, fallback: string) =>
-      getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
-    const baseAccent = new THREE.Color(cssColor('--accent', '#00f0ff'))
-    const baseAccent2 = new THREE.Color(cssColor('--accent-2', '#ff00f0'))
+    // Palette (calmer tones)
+    const baseAccent = new THREE.Color('#77d0ff')  // soft cyan
+    const baseAccent2 = new THREE.Color('#a7b8ff') // soft periwinkle
     const accent = baseAccent.clone()
     const accent2 = baseAccent2.clone()
 
-    // Grid
-    const grid = new THREE.GridHelper(160, 160, accent2.clone().multiplyScalar(0.35), accent2.clone().multiplyScalar(0.12))
+    // Grid (very faint)
+    const grid = new THREE.GridHelper(160, 160, accent2.clone().multiplyScalar(0.25), accent2.clone().multiplyScalar(0.08))
     ;(grid.material as THREE.Material).transparent = true
-    ;(grid.material as THREE.Material).opacity = 0.08
+    ;(grid.material as THREE.Material).opacity = 0.05
     grid.position.y = 0
     scene.add(grid)
 
-    // Album floor — ShaderMaterial: album texture + dim + ripple
+    // Album floor — ShaderMaterial (dim, subtle)
     const floorSize = 22
     const floorGeom = new THREE.PlaneGeometry(floorSize, floorSize, 1, 1)
     const floorMat = new THREE.ShaderMaterial({
       uniforms: {
         tAlbum: { value: null as THREE.Texture | null },
-        uDim: { value: 0.9 },
-        uOpacity: { value: 0.95 },
+        uDim: { value: 0.82 },       // darker
+        uOpacity: { value: 0.85 },   // a bit more transparent
         uTime: { value: 0 },
         uRippleAmp: { value: cfg.fx.floorRipple ? 0.0 : 0.0 },
         uRippleRadius: { value: 0.0 },
@@ -239,10 +232,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       vertexShader: `
         precision highp float; precision highp int;
         varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
+        void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
       `,
       fragmentShader: `
         precision highp float; precision highp int;
@@ -252,15 +242,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         uniform float uRippleAmp, uRippleRadius, uRippleDecay;
         void main() {
           vec2 uv = vUv;
-          // Ripple: radial from center
           if (uRippleAmp > 0.0) {
             vec2 p = uv - 0.5;
             float r = length(p);
-            float wave = sin(20.0 * (r - uRippleRadius) - uTime * 4.0) * exp(-uRippleDecay * abs(r - uRippleRadius));
-            uv += normalize(p) * wave * (uRippleAmp * 0.015);
+            float wave = sin(18.0 * (r - uRippleRadius) - uTime * 3.6) * exp(-uRippleDecay * abs(r - uRippleRadius));
+            uv += normalize(p) * wave * (uRippleAmp * 0.012);
           }
           vec4 tex = texture2D(tAlbum, uv);
-          vec3 col = tex.rgb * uDim;
+          vec3 col = mix(vec3(0.06,0.08,0.1), tex.rgb, 0.6) * uDim;
           gl_FragColor = vec4(col, uOpacity);
         }
       `
@@ -270,7 +259,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     floorMesh.position.y = 0.001
     scene.add(floorMesh)
 
-    // Mosaic floor (tiles of album covers). Visible when cfg.fx.mosaicFloor
+    // Mosaic floor (optional)
     const mosaicGroup = new THREE.Group()
     const tiles: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
     const tileN = 8
@@ -278,35 +267,30 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     for (let y = 0; y < tileN; y++) {
       for (let x = 0; x < tileN; x++) {
         const g = new THREE.PlaneGeometry(tileSize, tileSize)
-        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, map: null, transparent: true, opacity: 0.95, depthWrite: false })
+        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, map: null, transparent: true, opacity: 0.8, depthWrite: false })
         const mesh = new THREE.Mesh(g, m)
         mesh.rotation.x = -Math.PI / 2
-        mesh.position.set(
-          (x + 0.5) * tileSize - floorSize / 2,
-          0.0025,
-          (y + 0.5) * tileSize - floorSize / 2
-        )
-        mosaicGroup.add(mesh)
-        tiles.push(mesh)
+        mesh.position.set((x + 0.5) * tileSize - floorSize / 2, 0.0025, (y + 0.5) * tileSize - floorSize / 2)
+        mosaicGroup.add(mesh); tiles.push(mesh)
       }
     }
     mosaicGroup.visible = !!cfg.fx.mosaicFloor
     scene.add(mosaicGroup)
 
-    // Mansion edges (fat lines + fallback)
+    // Mansion edges (fat lines + thin fallback)
     const mansionPositions = buildMansionEdges()
     const fatGeo = new LineSegmentsGeometry()
     fatGeo.setPositions(mansionPositions)
     const fatMat = new LineMaterial({
       color: accent.getHex(),
       transparent: true,
-      opacity: 0.98,
+      opacity: 0.95,
       depthTest: true
     })
     ;(fatMat as any).worldUnits = false
     const setLinePixels = (px: number) => {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-      fatMat.linewidth = Math.max(0.0009, px / Math.max(1, draw.y))
+      fatMat.linewidth = Math.max(0.0008, px / Math.max(1, draw.y))
       fatMat.needsUpdate = true
     }
     {
@@ -319,219 +303,108 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
     const thinGeo = new THREE.BufferGeometry()
     thinGeo.setAttribute('position', new THREE.BufferAttribute(mansionPositions, 3))
-    const thinMat = new THREE.LineBasicMaterial({ color: accent.getHex(), transparent: true, opacity: 0.98, depthTest: true })
+    const thinMat = new THREE.LineBasicMaterial({ color: accent.getHex(), transparent: true, opacity: 0.95, depthTest: true })
     const thinLines = new THREE.LineSegments(thinGeo, thinMat)
     thinLines.visible = false
     scene.add(thinLines)
 
-    // Starfield (background parallax)
+    // Optional Starfield, Beams, Smoke (default off)
     let starfield: THREE.Points | null = null
+    const beamGroup = new THREE.Group()
+    const smokeGroup = new THREE.Group()
+    let smokeTex: THREE.Texture | null = null
+    const smokeEmitters = [ new THREE.Vector3(-0.8, 3.75, 0.2), new THREE.Vector3(0.9, 3.75,-0.25) ]
+    const smokeSprites: THREE.Sprite[] = []
     if (cfg.fx.starfield) {
       const g = new THREE.BufferGeometry()
-      const N = 1500
+      const N = 900
       const positions = new Float32Array(N * 3)
       for (let i=0;i<N;i++){
-        const r = THREE.MathUtils.lerp(40, 90, Math.random())
+        const r = THREE.MathUtils.lerp(45, 80, Math.random())
         const theta = Math.acos(THREE.MathUtils.lerp(-1, 1, Math.random()))
         const phi = Math.random()*Math.PI*2
         const x = r * Math.sin(theta) * Math.cos(phi)
-        const y = r * Math.cos(theta) * 0.5
+        const y = r * Math.cos(theta) * 0.4
         const z = r * Math.sin(theta) * Math.sin(phi)
         positions.set([x,y,z], i*3)
       }
       g.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-      const m = new THREE.PointsMaterial({ color: 0xffffff, size: 0.8, sizeAttenuation: true, transparent: true, opacity: 0.6, depthWrite: false })
+      const m = new THREE.PointsMaterial({ color: 0xeaf3ff, size: 0.7, sizeAttenuation: true, transparent: true, opacity: 0.45, depthWrite: false })
       starfield = new THREE.Points(g, m)
       scene.add(starfield)
     }
-
-    // Party beams (additive rotating planes)
-    const beamGroup = new THREE.Group()
     if (cfg.fx.beams) {
-      const beamGeom = new THREE.PlaneGeometry(0.08, 7.5)
-      for (let i = 0; i < 16; i++) {
-        const mat = new THREE.MeshBasicMaterial({
-          color: accent2,
-          transparent: true,
-          opacity: 0.0,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false
-        })
+      const beamGeom = new THREE.PlaneGeometry(0.06, 6.2)
+      for (let i = 0; i < 12; i++) {
+        const mat = new THREE.MeshBasicMaterial({ color: accent2, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending, depthWrite: false })
         const beam = new THREE.Mesh(beamGeom, mat)
-        beam.position.set(0, 1.8, 0)
-        beam.rotation.y = (i / 16) * Math.PI * 2
+        beam.position.set(0, 1.8, 0); beam.rotation.y = (i / 12) * Math.PI * 2
         beamGroup.add(beam)
       }
       scene.add(beamGroup)
     }
-
-    // Ground pulse rings (spawn on beat)
-    const rings: THREE.Mesh[] = []
-    let ringPool: THREE.Mesh[] = []
-    const emitRing = () => {
-      if (!cfg.fx.groundRings) return
-      const mesh = ringPool.pop() ?? (() => {
-        const rg = new THREE.RingGeometry(0.1, 0.12, 64)
-        const rm = new THREE.MeshBasicMaterial({ color: accent.getHex(), transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false })
-        const m = new THREE.Mesh(rg, rm)
-        m.rotation.x = -Math.PI/2
-        return m
-      })()
-      mesh.scale.setScalar(0.5)
-      ;(mesh.material as THREE.MeshBasicMaterial).opacity = 0.6
-      mesh.position.set(0, 0.003, 0)
-      scene.add(mesh)
-      rings.push(mesh)
-      if (rings.length > 12) {
-        const old = rings.shift()!
-        scene.remove(old)
-        ringPool.push(old)
+    if (cfg.fx.chimneySmoke) {
+      smokeTex = createSoftCircleTexture()
+      if (smokeTex) {
+        for (let i=0;i<40;i++) {
+          const mat = new THREE.SpriteMaterial({ map: smokeTex, color: 0xffffff, transparent: true, opacity: 0, depthWrite: false })
+          const s = new THREE.Sprite(mat)
+          resetSmoke(s, smokeEmitters[i%smokeEmitters.length], true)
+          smokeGroup.add(s); smokeSprites.push(s)
+        }
+        scene.add(smokeGroup)
       }
     }
 
-    // Windows (emissive planes) + optional EQ behavior
-    const windowGroup = new THREE.Group()
-    const windowMeta: { mesh: THREE.Mesh, story: number, col: number, side: 'front'|'back'|'left'|'right' }[] = []
-    {
-      const winGeom = new THREE.PlaneGeometry(0.22, 0.16)
-      const addWindow = (p: THREE.Vector3, out: THREE.Vector3, story: number, col: number, side: 'front'|'back'|'left'|'right') => {
-        const m = new THREE.MeshBasicMaterial({ color: accent2, transparent: true, opacity: 0 })
-        const mesh = new THREE.Mesh(winGeom, m)
-        mesh.position.copy(p)
-        mesh.lookAt(p.clone().add(out))
-        windowGroup.add(mesh)
-        windowMeta.push({ mesh, story, col, side })
-      }
-      addMansionWindows(addWindow)
-      scene.add(windowGroup)
-    }
-
-    // Chimney smoke (lightweight particles)
-    const smokeGroup = new THREE.Group()
-    let smokeTex: THREE.Texture | null = createSoftCircleTexture()
-    const smokeEmitters = [
-      new THREE.Vector3(-0.8, 3.75, 0.2),
-      new THREE.Vector3( 0.9, 3.75,-0.25),
-    ]
-    const smokeSprites: THREE.Sprite[] = []
-    if (cfg.fx.chimneySmoke && smokeTex) {
-      for (let i=0;i<60;i++) {
-        const mat = new THREE.SpriteMaterial({ map: smokeTex, color: 0xffffff, transparent: true, opacity: 0, depthWrite: false })
-        const s = new THREE.Sprite(mat)
-        resetSmoke(s, smokeEmitters[i%smokeEmitters.length], true)
-        smokeGroup.add(s)
-        smokeSprites.push(s)
-      }
-      scene.add(smokeGroup)
-    }
-
-    // Haze sheet
+    // Haze (subtle)
     const fogSheet = (() => {
       const geom = new THREE.PlaneGeometry(34, 12)
       const mat = new THREE.ShaderMaterial({
-        uniforms: {
-          uTime: { value: 0 },
-          uIntensity: { value: 0 },
-          uColor: { value: new THREE.Color(0x9fc7ff) }
-        },
+        uniforms: { uTime: { value: 0 }, uIntensity: { value: 0 }, uColor: { value: new THREE.Color(0xa9cfff) } },
         transparent: true,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
-        vertexShader: `
-          precision highp float; precision highp int;
-          varying vec2 vUv;
-          void main() {
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `,
+        vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
         fragmentShader: `
-          precision highp float; precision highp int;
-          varying vec2 vUv;
-          uniform float uTime; uniform float uIntensity; uniform vec3 uColor;
-          float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
-          float noise(vec2 p){
-            vec2 i=floor(p), f=fract(p);
-            float a=hash(i), b=hash(i+vec2(1.,0.)), c=hash(i+vec2(0.,1.)), d=hash(i+vec2(1.,1.));
-            vec2 u=f*f*(3.-2.*f);
-            return mix(a,b,u.x)+ (c-a)*u.y*(1.-u.x) + (d-b)*u.x*u.y;
-          }
-          void main(){
-            float n = noise(vUv*2.6 + vec2(uTime*0.03, 0.0));
-            float m = smoothstep(0.25, 0.82, n);
-            float alpha = m * uIntensity * 0.55;
-            gl_FragColor = vec4(uColor, alpha);
-          }
+          precision highp float; varying vec2 vUv; uniform float uTime; uniform float uIntensity; uniform vec3 uColor;
+          float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+          float noise(vec2 p){ vec2 i=floor(p), f=fract(p); float a=hash(i), b=hash(i+vec2(1.,0.)), c=hash(i+vec2(0.,1.)), d=hash(i+vec2(1.,1.));
+            vec2 u=f*f*(3.-2.*f); return mix(a,b,u.x)+ (c-a)*u.y*(1.-u.x) + (d-b)*u.x*u.y; }
+          void main(){ float n=noise(vUv*2.2+vec2(uTime*0.025,0.0)); float m=smoothstep(0.32,0.78,n);
+            float alpha=m*uIntensity*0.38; gl_FragColor=vec4(uColor,alpha); }
         `
       })
       const mesh = new THREE.Mesh(geom, mat)
-      mesh.position.set(0, 3.4, -1.2)
-      mesh.rotation.x = -0.06
+      mesh.position.set(0, 3.2, -1.4); mesh.rotation.x = -0.06
       scene.add(mesh)
       return mesh
     })()
 
-    // Lyrics Marquee (balcony fascia): scrolling text texture
+    // Lyrics marquee: always initialize with default text
     let marqueeMat: THREE.ShaderMaterial | null = null
     let marqueeTex: THREE.Texture | null = null
     let marqueeMesh: THREE.Mesh | null = null
     let marqueeText = ''
     const setupMarquee = (text: string) => {
       const canvas = document.createElement('canvas')
-      canvas.width = 2048
-      canvas.height = 128
+      canvas.width = 2048; canvas.height = 128
       const g = canvas.getContext('2d')!
       g.clearRect(0,0,canvas.width,canvas.height)
-      g.fillStyle = '#ffffff'
-      g.font = 'bold 72px system-ui, sans-serif'
-      g.textBaseline = 'middle'
-      const gap = 80
-      const metrics = g.measureText(text)
-      const w = Math.max(metrics.width + gap, 400)
-      let x = 0
-      while (x < canvas.width + w) {
-        g.fillText(text, x, canvas.height/2)
-        x += w
-      }
-      const tex = new THREE.CanvasTexture(canvas)
-      tex.wrapS = THREE.RepeatWrapping
-      tex.wrapT = THREE.ClampToEdgeWrapping
-      tex.repeat.set(2, 1)
-      tex.colorSpace = THREE.SRGBColorSpace
-      marqueeTex?.dispose()
-      marqueeTex = tex
+      g.fillStyle = '#ffffff'; g.font = '600 72px system-ui, sans-serif'; g.textBaseline = 'middle'
+      const gap = 90; const metrics = g.measureText(text); const w = Math.max(metrics.width + gap, 500)
+      let x = 0; while (x < canvas.width + w) { g.fillText(text, x, canvas.height/2); x += w }
+      const tex = new THREE.CanvasTexture(canvas); tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.ClampToEdgeWrapping
+      tex.repeat.set(2, 1); tex.colorSpace = THREE.SRGBColorSpace
+      marqueeTex?.dispose(); marqueeTex = tex
 
       if (!marqueeMat) {
         marqueeMat = new THREE.ShaderMaterial({
-          uniforms: {
-            tText: { value: marqueeTex },
-            uScroll: { value: 0 },
-            uOpacity: { value: 0.0 },
-            uTint: { value: new THREE.Color(0xffffff) }
-          },
-          transparent: true,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-          vertexShader: `
-            varying vec2 vUv;
-            void main(){
-              vUv = uv;
-              gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
-            }
-          `,
+          uniforms: { tText: { value: marqueeTex }, uScroll: { value: 0 }, uOpacity: { value: 0.0 }, uTint: { value: new THREE.Color(0xffffff) } },
+          transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+          vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
           fragmentShader: `
-            precision highp float;
-            varying vec2 vUv;
-            uniform sampler2D tText;
-            uniform float uScroll;
-            uniform float uOpacity;
-            uniform vec3 uTint;
-            void main(){
-              vec2 uv = vUv;
-              uv.x = fract(uv.x + uScroll);
-              vec4 c = texture2D(tText, uv);
-              gl_FragColor = vec4(c.rgb * uTint, c.a * uOpacity);
-            }
+            precision highp float; varying vec2 vUv; uniform sampler2D tText; uniform float uScroll; uniform float uOpacity; uniform vec3 uTint;
+            void main(){ vec2 uv=vUv; uv.x=fract(uv.x+uScroll); vec4 c=texture2D(tText, uv); gl_FragColor=vec4(c.rgb*uTint, c.a*uOpacity); }
           `
         })
         const geom = new THREE.PlaneGeometry(3.8, 0.22)
@@ -543,22 +416,15 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         marqueeMat.needsUpdate = true
       }
     }
-    // Ensure marquee exists even without Spotify/token (fixes "no lyrics showing")
-    if (cfg.fx.lyricsMarquee) {
-      marqueeText = 'FFw Visualizer'
-      setupMarquee(marqueeText)
-    }
+    if (cfg.fx.lyricsMarquee) { marqueeText = 'FFw Visualizer'; setupMarquee(marqueeText) }
 
-    // Album cover loader + brightness compensation feeding floor shader + mosaic source
+    // Album cover loading
     let floorTex: THREE.Texture | null = null
     const coverTextures: THREE.Texture[] = []
-    let currentTrackId: string | null = null
-
     const loadAlbumCover = async () => {
       try {
         const s = await getPlaybackState().catch(() => null)
         const url = (s?.item?.album?.images?.[0]?.url as string) || null
-        const id = (s?.item?.id as string) || null
         const title = (s?.item?.name as string) || ''
         const artist = (s?.item?.artists?.[0]?.name as string) || ''
         if (url) {
@@ -573,33 +439,20 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           tex.generateMipmaps = true
 
           const brightness = await estimateTextureLuminance(tex).catch(() => 0.6)
-          const dim = clamp(1.05 - brightness * 0.5, 0.55, 0.95)
+          const dim = clamp(1.02 - brightness * 0.45, 0.6, 0.92)
           floorMat.uniforms.uDim.value = dim
-          floorMat.uniforms.uOpacity.value = clamp(0.95 - (brightness - 0.6) * 0.25, 0.7, 0.95)
+          floorMat.uniforms.uOpacity.value = clamp(0.9 - (brightness - 0.6) * 0.25, 0.65, 0.9)
 
-          floorTex?.dispose()
-          floorTex = tex
-          floorMat.uniforms.tAlbum.value = tex
-          floorMat.needsUpdate = true
+          floorTex?.dispose(); floorTex = tex
+          floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
 
           coverTextures.push(tex)
           if (cfg.fx.mosaicFloor && tiles.length) {
-            for (let i=0;i<tiles.length;i++) {
-              const m = tiles[i].material
-              if (!m.map) m.map = tex
-              m.needsUpdate = true
-            }
+            for (let i=0;i<tiles.length;i++) { const m = tiles[i].material; if (!m.map) m.map = tex; m.needsUpdate = true }
           }
         }
-
-        // Update marquee with "Title — Artist" when available
         const text = title && artist ? `${title} — ${artist}` : (title || artist || '')
-        if (cfg.fx.lyricsMarquee && text && text !== marqueeText) {
-          marqueeText = text
-          setupMarquee(text)
-        }
-
-        currentTrackId = id || currentTrackId
+        if (cfg.fx.lyricsMarquee && text && text !== marqueeText) { marqueeText = text; setupMarquee(text) }
       } catch {}
     }
     loadAlbumCover()
@@ -609,27 +462,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
     const offBeat = reactivityBus.on('beat', () => {
-      // Beat events
       if (cfg.fx.groundRings) emitRing()
-      if (cfg.fx.floorRipple) {
-        floorMat.uniforms.uRippleAmp.value = 1.0 // spike, will decay in animate
-        floorMat.uniforms.uRippleRadius.value = 0.05
-        floorMat.uniforms.uRippleDecay.value = 10.0
-      }
-      // Mosaic: swap a random tile to current cover
+      if (cfg.fx.floorRipple) { floorMat.uniforms.uRippleAmp.value = 1.0; floorMat.uniforms.uRippleRadius.value = 0.05; floorMat.uniforms.uRippleDecay.value = 10.0 }
       if (cfg.fx.mosaicFloor && floorTex && tiles.length) {
         const idx = Math.floor(Math.random() * tiles.length)
         const mat = tiles[idx].material
-        mat.map = floorTex
-        mat.needsUpdate = true
-      }
-    })
-    const offBar = reactivityBus.on('bar', () => {
-      // gentle camera preset flip on bar if autoPath
-      if (cfg.camera.autoPath) {
-        const vary = (v:number, amt:number, min:number, max:number) => clamp(v + THREE.MathUtils.randFloatSpread(amt), min, max)
-        cfg.orbitRadius = vary(cfg.orbitRadius, 1.0, 5.0, 13.0)
-        cfg.orbitElev = vary(cfg.orbitElev, 0.02, 0.02, 0.25)
+        mat.map = floorTex; mat.needsUpdate = true
       }
     })
 
@@ -660,59 +498,56 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const now = performance.now()
       const stale = !latest || (now - (latest.t || 0)) > 240
 
-      const low = latest?.bands.low ?? 0.12
-      const mid = latest?.bands.mid ?? 0.12
-      const high = latest?.bands.high ?? 0.12
-      const loud = latest?.loudness ?? 0.2
+      const low = latest?.bands.low ?? 0.08
+      const mid = latest?.bands.mid ?? 0.08
+      const high = latest?.bands.high ?? 0.08
+      const loud = latest?.loudness ?? 0.15
 
-      // Accent color morph by highs (keeps palette coherent)
-      accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.8, 0, 1))
-      accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.5, 0, 1))
-      fatMat.color.set(accent)
-      thinMat.color.set(accent)
+      // Calmer accent modulation (narrow range)
+      accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.25, 0, 0.25))
+      accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.2, 0, 0.2))
+      fatMat.color.set(accent); thinMat.color.set(accent)
 
-      // Line width pulse slightly on beat/highs
-      const px = cfg.lineWidthPx * (latest?.beat ? 1.35 : 1.0) * (1.0 + 0.15 * high)
+      // Line width: subtle pulse
+      const px = cfg.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
       setLinePixels(px)
 
-      // Windows: EQ-like behavior per story
-      windowMeta.forEach((w, i) => {
-        const mat = w.mesh.material as THREE.MeshBasicMaterial
-        let energy = 0.4 + 0.6 * mid
-        if (cfg.fx.windowEQ) {
-          energy = (
-            (w.story === 0 ? (0.25 + 1.2 * low) : 0) +
-            (w.story === 1 ? (0.25 + 1.2 * mid) : 0) +
-            (w.story === 2 ? (0.25 + 1.2 * high) : 0)
-          )
-        }
-        const flicker = energy * Math.abs(Math.sin((t + i * 0.17) * (3.2 + (i % 5))))
-        mat.opacity = THREE.MathUtils.clamp(flicker, 0, 1)
+      // Windows flicker (subtle)
+      windowGroup.children.forEach((obj, i) => {
+        const mesh = obj as THREE.Mesh
+        const mat = mesh.material as THREE.MeshBasicMaterial
+        const base = 0.12 + 0.25 * mid
+        const flicker = base * Math.abs(Math.sin((t + i * 0.17) * 2.2))
+        mat.opacity = THREE.MathUtils.clamp(flicker, 0, 0.6)
         ;(mat.color as THREE.Color).copy(accent2)
       })
 
-      // Beams
+      // Optional effects
       if (cfg.fx.beams) {
-        beamGroup.rotation.y += dt * (0.35 + high * 2.6)
-        beamGroup.children.forEach((b, bi) => {
+        beamGroup.rotation.y += dt * (0.2 + high * 1.2)
+        beamGroup.children.forEach((b) => {
           const m = (b as THREE.Mesh).material as THREE.MeshBasicMaterial
-          m.opacity = THREE.MathUtils.clamp(0.05 + high * 0.8 + (latest?.beat && (bi%4===0) ? 0.3 : 0), 0, 1)
+          m.opacity = THREE.MathUtils.clamp(0.02 + high * 0.4 + (latest?.beat ? 0.15 : 0), 0, 0.6)
           ;(m.color as THREE.Color).copy(accent2)
         })
+      }
+      if (starfield) {
+        starfield.rotation.y += dt * 0.015
+        starfield.rotation.x = Math.sin(t * 0.02) * 0.015
       }
 
       // Haze
       const fogMat = fogSheet.material as THREE.ShaderMaterial
       fogMat.uniforms.uTime.value = t
-      fogMat.uniforms.uIntensity.value = THREE.MathUtils.clamp(0.2 + loud * 0.8 + (latest?.beat ? 0.5 : 0), 0, accessibility.epilepsySafe ? 0.6 : 1.0)
-      ;(fogMat.uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.45))
+      fogMat.uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
+      ;(fogMat.uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
 
       // Floor ripple decay
       if (cfg.fx.floorRipple) {
         floorMat.uniforms.uTime.value = t
         floorMat.uniforms.uRippleAmp.value = THREE.MathUtils.lerp(floorMat.uniforms.uRippleAmp.value, 0.0, 0.1)
-        floorMat.uniforms.uRippleRadius.value += dt * (0.3 + low * 1.2)
-        floorMat.uniforms.uRippleDecay.value = 10.0 + high * 8.0
+        floorMat.uniforms.uRippleRadius.value += dt * (0.25 + low * 0.9)
+        floorMat.uniforms.uRippleDecay.value = 9.0 + high * 6.0
       }
 
       // Toggle floor visibility according to mosaic setting
@@ -723,28 +558,20 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       if (cfg.fx.chimneySmoke) {
         smokeSprites.forEach((s, i) => {
           const mat = s.material as THREE.SpriteMaterial
-          s.position.y += dt * (0.35 + loud * 1.5)
-          s.position.x += Math.sin(t * 0.5 + i) * 0.001
-          s.position.z += Math.cos(t * 0.45 + i * 0.7) * 0.001
-          s.scale.setScalar(0.35 + Math.min(1.2, t * 0.02 + loud * 0.3))
-          mat.opacity = Math.min(0.55, (mat.opacity ?? 0) + dt * 0.25)
-          if (s.position.y > 6) {
-            resetSmoke(s, smokeEmitters[i%smokeEmitters.length], false)
-          }
+          s.position.y += dt * (0.28 + loud * 1.0)
+          s.position.x += Math.sin(t * 0.4 + i) * 0.001
+          s.position.z += Math.cos(t * 0.35 + i * 0.7) * 0.001
+          s.scale.setScalar(0.3 + Math.min(1.0, t * 0.02 + loud * 0.25))
+          mat.opacity = Math.min(0.4, (mat.opacity ?? 0) + dt * 0.2)
+          if (s.position.y > 6) resetSmoke(s, smokeEmitters[i%smokeEmitters.length], false)
         })
       }
 
-      // Starfield subtle drift
-      if (starfield) {
-        starfield.rotation.y += dt * 0.02
-        starfield.rotation.x = Math.sin(t * 0.03) * 0.02
-      }
-
-      // Lyrics marquee scroll and opacity by loudness
+      // Lyrics marquee
       if (cfg.fx.lyricsMarquee && marqueeMat) {
-        marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * (0.06 + loud * 0.6)) % 1
-        const baseOpacity = stale ? 0.45 : 0.2
-        marqueeMat.uniforms.uOpacity.value = THREE.MathUtils.clamp(baseOpacity + loud * 0.9, 0, 1)
+        marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * (0.045 + loud * 0.35)) % 1
+        const baseOpacity = stale ? 0.35 : 0.18
+        marqueeMat.uniforms.uOpacity.value = THREE.MathUtils.clamp(baseOpacity + loud * 0.6, 0, 0.8)
         ;(marqueeMat.uniforms.uTint.value as THREE.Color).copy(accent)
       } else if (marqueeMat) {
         marqueeMat.uniforms.uOpacity.value = 0.0
@@ -752,57 +579,39 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
       // Camera auto path
       if (cfg.camera.autoPath && !userInteracting) {
-        const baseSpeed = (cfg.orbitSpeed ?? 0.55) * (stale ? 0.15 : 1.0)
-        angle += dt * (baseSpeed + low * 1.0 + (latest?.beatStrength ?? 0) * 1.3)
-        const radius = THREE.MathUtils.clamp((cfg.orbitRadius ?? 8.0) + Math.sin((latest?.phases.bar ?? 0) * Math.PI * 2) * 0.25, 5.0, 13.0)
-        const elev = (cfg.orbitElev ?? 0.08)
+        const baseSpeed = (cfg.orbitSpeed ?? 0.35) * (stale ? 0.15 : 1.0)
+        angle += dt * (baseSpeed + low * 0.7 + (latest?.beatStrength ?? 0) * 0.9)
+        const radius = THREE.MathUtils.clamp((cfg.orbitRadius ?? 9.5) + Math.sin((latest?.phases.bar ?? 0) * Math.PI * 2) * 0.2, 6.0, 12.0)
+        const elev = (cfg.orbitElev ?? 0.06)
         const pos = pathPoint(cfg.path, angle, radius)
-        camera.position.set(pos.x, Math.sin(elev) * (radius * 0.6) + 2.6 + (cfg.camBob || 0) * (0.0 + low * 0.35), pos.z)
+        camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + (cfg.camBob || 0) * (0.0 + low * 0.2), pos.z)
         camera.lookAt(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
         controls.target.set(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
       }
 
-      // Post: bloom breathing
+      // No bloom breathing in Minimal (respect panel if toggled)
       if (cfg.fx.bloomBreath) {
-        const strength = THREE.MathUtils.clamp(0.7 + high * 1.2 + (latest?.beat ? 0.4 : 0), 0, accessibility.epilepsySafe ? 1.0 : 2.2)
-        const threshold = THREE.MathUtils.clamp(0.2 + (1.0 - high) * 0.3, 0.05, 0.6)
-        try { (comp as any).updatePost?.({ bloom: true, bloomStrength: strength, bloomRadius: 0.3, bloomThreshold: threshold, fxaa: true, vignette: true, vignetteStrength: 0.55, filmGrain: true, filmGrainStrength: 0.3 }) } catch {}
-      }
-
-      // Ground rings update
-      for (let i= rings.length - 1; i>=0; i--) {
-        const r = rings[i]
-        r.scale.multiplyScalar(1 + dt * (1.6 + low * 2.0))
-        const m = r.material as THREE.MeshBasicMaterial
-        m.opacity *= (1.0 - dt * (0.6 + high * 1.0))
-        if (m.opacity < 0.03) {
-          scene.remove(r)
-          rings.splice(i, 1)
-          ringPool.push(r)
-        }
+        const strength = THREE.MathUtils.clamp(0.55 + high * 0.9 + (latest?.beat ? 0.25 : 0), 0, accessibility.epilepsySafe ? 0.9 : 1.4)
+        const threshold = THREE.MathUtils.clamp(0.3 + (1.0 - high) * 0.25, 0.08, 0.55)
+        try { (comp as any).updatePost?.({ bloom: true, bloomStrength: strength, bloomRadius: 0.25, bloomThreshold: threshold, fxaa: true, vignette: true, vignetteStrength: 0.45, filmGrain: false, filmGrainStrength: 0.0, motionBlur: false }) } catch {}
       }
 
       // Budget on stale
-      ;(grid.material as THREE.Material).opacity = 0.08 * (stale ? 0.6 : 1.0)
+      ;(grid.material as THREE.Material).opacity = 0.05 * (stale ? 0.6 : 1.0)
 
       controls.update()
       comp.composer.render()
 
-      // Fallback
+      // Fallback to thin lines if fat lines fail to draw
       frames++
       if (!fallbackArmed && frames > 10) {
         const dc = (renderer.info.render.calls || 0)
-        if (dc <= 1) {
-          fallbackArmed = true
-          fatLines.visible = false
-          thinLines.visible = true
-        }
+        if (dc <= 1) { fallbackArmed = true; fatLines.visible = false; thinLines.visible = true }
       }
     }
-    // Camera path
     type Path = 'Circle'|'Ellipse'|'Lemniscate'|'Manual'
     const pathPoint = (path: Path, a: number, r: number) => {
-      if (path === 'Ellipse') return new THREE.Vector3(Math.sin(a) * r * 1.2, 0, Math.cos(a) * r * 0.85)
+      if (path === 'Ellipse') return new THREE.Vector3(Math.sin(a) * r * 1.08, 0, Math.cos(a) * r * 0.92)
       if (path === 'Lemniscate') { const s = Math.sin(a), c = Math.cos(a), d = 1 + s*s; return new THREE.Vector3((r * c) / d, 0, (r * s * c) / d) }
       return new THREE.Vector3(Math.sin(a) * r, 0, Math.cos(a) * r)
     }
@@ -813,7 +622,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       cancelAnimationFrame(raf)
       clearInterval(albumIv)
       window.removeEventListener('resize', updateSizes)
-      offFrame?.(); offBeat?.(); offBar?.()
+      offFrame?.(); offBeat?.()
       controls.dispose()
       floorTex?.dispose()
       marqueeTex?.dispose?.()
@@ -832,29 +641,21 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     }
 
     // Helpers
-
     async function estimateTextureLuminance(tex: THREE.Texture): Promise<number> {
       const img = tex.image as HTMLImageElement | HTMLCanvasElement | ImageBitmap
       const w = 32, h = 32
-      const c = document.createElement('canvas')
-      c.width = w; c.height = h
-      const g = c.getContext('2d')
-      if (!g) return 0.6
-      try {
-        g.drawImage(img as any, 0, 0, w, h)
-      } catch { return 0.6 }
+      const c = document.createElement('canvas'); c.width = w; c.height = h
+      const g = c.getContext('2d'); if (!g) return 0.6
+      try { g.drawImage(img as any, 0, 0, w, h) } catch { return 0.6 }
       const data = g.getImageData(0, 0, w, h).data
       let sum = 0
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i], gr = data[i + 1], b = data[i + 2]
-        sum += (0.2126 * r + 0.7152 * gr + 0.0722 * b) / 255
-      }
+      for (let i = 0; i < data.length; i += 4) { const r = data[i], gr = data[i + 1], b = data[i + 2]; sum += (0.2126*r + 0.7152*gr + 0.0722*b) / 255 }
       return sum / (w * h)
     }
 
     function buildMansionEdges(): Float32Array {
       const out: number[] = []
-      const y0 = 0.0, y1 = 1.2, y2 = 2.35, y3 = 3.5 // floors
+      const y0 = 0.0, y1 = 1.2, y2 = 2.35, y3 = 3.5
       const roofC = 4.5, roofW = 4.2
       addStackedBlock(-2.2, 2.2, -1.3, 1.3, [y0, y1, y2, y3])
       addStackedBlock(-4.2, -2.2, -1.6, 1.6, [y0, y1, y2, y3])
@@ -872,10 +673,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
       function E(ax:number, ay:number, az:number, bx:number, by:number, bz:number) { out.push(ax, ay, az, bx, by, bz) }
       function rect(minX:number, maxX:number, y:number, minZ:number, maxZ:number) {
-        E(minX, y, minZ, maxX, y, minZ)
-        E(maxX, y, minZ, maxX, y, maxZ)
-        E(maxX, y, maxZ, minX, y, maxZ)
-        E(minX, y, maxZ, minX, y, minZ)
+        E(minX, y, minZ, maxX, y, minZ); E(maxX, y, minZ, maxX, y, maxZ); E(maxX, y, maxZ, minX, y, maxZ); E(minX, y, maxZ, minX, y, minZ)
       }
       function addStackedBlock(minX:number, maxX:number, minZ:number, maxZ:number, levels:number[]) {
         for (const y of levels) rect(minX, maxX, y, minZ, maxZ)
@@ -883,38 +681,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         for (const [cx, cz] of corners) for (let i=0;i<levels.length-1;i++) E(cx, levels[i], cz, cx, levels[i+1], cz)
         const spanX = maxX - minX, spanZ = maxZ - minZ
         const yb = levels[0], yt = levels[levels.length-1]
-        for (let t=1;t<=3;t++) {
-          const x = minX + (spanX * t)/4
-          E(x, yb, maxZ, x, yt, maxZ) // front
-          E(x, yb, minZ, x, yt, minZ) // back
-        }
-        for (let t=1;t<=3;t++) {
-          const z = minZ + (spanZ * t)/4
-          E(minX, yb, z, minX, yt, z)
-          E(maxX, yb, z, maxX, yt, z)
-        }
+        for (let t=1;t<=3;t++) { const x = minX + (spanX * t)/4; E(x, yb, maxZ, x, yt, maxZ); E(x, yb, minZ, x, yt, minZ) }
+        for (let t=1;t<=3;t++) { const z = minZ + (spanZ * t)/4; E(minX, yb, z, minX, yt, z); E(maxX, yb, z, maxX, yt, z) }
       }
       function addGabledRoof(minX:number, maxX:number, minZ:number, maxZ:number, topY:number, apexY:number, ridgeAxis:'x'|'z') {
         rect(minX, maxX, topY, minZ, maxZ)
         let r1:THREE.Vector3, r2:THREE.Vector3
-        if (ridgeAxis === 'z') {
-          const cx = (minX+maxX)*0.5
-          r1 = new THREE.Vector3(cx, apexY, minZ)
-          r2 = new THREE.Vector3(cx, apexY, maxZ)
-        } else {
-          const cz = (minZ+maxZ)*0.5
-          r1 = new THREE.Vector3(minX, apexY, cz)
-          r2 = new THREE.Vector3(maxX, apexY, cz)
-        }
+        if (ridgeAxis === 'z') { const cx = (minX+maxX)*0.5; r1 = new THREE.Vector3(cx, apexY, minZ); r2 = new THREE.Vector3(cx, apexY, maxZ) }
+        else { const cz = (minZ+maxZ)*0.5; r1 = new THREE.Vector3(minX, apexY, cz); r2 = new THREE.Vector3(maxX, apexY, cz) }
         E(r1.x, r1.y, r1.z, r2.x, r2.y, r2.z)
-        const c = [
-          new THREE.Vector3(minX, topY, minZ), new THREE.Vector3(maxX, topY, minZ),
-          new THREE.Vector3(maxX, topY, maxZ), new THREE.Vector3(minX, topY, maxZ),
-        ]
-        E(c[0].x, c[0].y, c[0].z, r1.x, r1.y, r1.z)
-        E(c[1].x, c[1].y, c[1].z, r1.x, r1.y, r1.z)
-        E(c[2].x, c[2].y, c[2].z, r2.x, r2.y, r2.z)
-        E(c[3].x, c[3].y, c[3].z, r2.x, r2.y, r2.z)
+        const c = [ new THREE.Vector3(minX, topY, minZ), new THREE.Vector3(maxX, topY, minZ), new THREE.Vector3(maxX, topY, maxZ), new THREE.Vector3(minX, topY, maxZ) ]
+        E(c[0].x, c[0].y, c[0].z, r1.x, r1.y, r1.z); E(c[1].x, c[1].y, c[1].z, r1.x, r1.y, r1.z)
+        E(c[2].x, c[2].y, c[2].z, r2.x, r2.y, r2.z); E(c[3].x, c[3].y, c[3].z, r2.x, r2.y, r2.z)
       }
       function addChimney(x:number, y:number, z:number) {
         const w=0.24, d=0.24, h=0.7
@@ -943,12 +721,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const LW = { minX:-4.2, maxX:-2.2, minZ:-1.6, maxZ: 1.6 }
         const RW = { minX: 2.2, maxX: 4.2, minZ:-1.6, maxZ: 1.6 }
         const faces = [
-          { minX: CF.minX, maxX: CF.maxX, z: CF.maxZ },
-          { minX: CF.minX, maxX: CF.maxX, z: CF.minZ },
-          { minX: LW.minX, maxX: LW.maxX, z: LW.maxZ },
-          { minX: LW.minX, maxX: LW.maxX, z: LW.minZ },
-          { minX: RW.minX, maxX: RW.maxX, z: RW.maxZ },
-          { minX: RW.minX, maxX: RW.maxX, z: RW.minZ },
+          { minX: CF.minX, maxX: CF.maxX, z: CF.maxZ }, { minX: CF.minX, maxX: CF.maxX, z: CF.minZ },
+          { minX: LW.minX, maxX: LW.maxX, z: LW.maxZ }, { minX: LW.minX, maxX: LW.maxX, z: LW.minZ },
+          { minX: RW.minX, maxX: RW.maxX, z: RW.maxZ }, { minX: RW.minX, maxX: RW.maxX, z: RW.minZ },
         ]
         for (const f of faces) for (const [yb, yt] of levels) {
           const cols = 6, pad = 0.18
@@ -957,8 +732,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             const x1 = THREE.MathUtils.lerp(f.minX+pad, f.maxX-pad, (c+0.9)/cols)
             E(x0, yb, f.z, x1, yb, f.z); E(x1, yb, f.z, x1, yt, f.z); E(x1, yt, f.z, x0, yt, f.z); E(x0, yt, f.z, x0, yb, f.z)
             const xm = (x0+x1)/2, ym = (yb+yt)/2
-            E(xm, yb, f.z, xm, yt, f.z)
-            E(x0, ym, f.z, x1, ym, f.z)
+            E(xm, yb, f.z, xm, yt, f.z); E(x0, ym, f.z, x1, ym, f.z)
           }
         }
         const sides = [{ x:-2.2, minZ:CF.minZ, maxZ:CF.maxZ },{ x: 2.2, minZ:CF.minZ, maxZ:CF.maxZ }]
@@ -982,10 +756,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const RW = { minX: 2.2, maxX: 4.0, minZ:-1.4, maxZ:1.4 }
       const addFace = (minX:number, maxX:number, z:number, out:THREE.Vector3, cols:number, side:'front'|'back') => {
         for (let s=0; s<storyY.length; s++) {
-          for (let i=0;i<cols;i++) {
-            const x = THREE.MathUtils.lerp(minX+0.22, maxX-0.22, (i+0.5)/cols)
-            add(new THREE.Vector3(x, storyY[s], z), out, s, i, side)
-          }
+          for (let i=0;i<cols;i++) { const x = THREE.MathUtils.lerp(minX+0.22, maxX-0.22, (i+0.5)/cols); add(new THREE.Vector3(x, storyY[s], z), out, s, i, side) }
         }
       }
       addFace(CF.minX, CF.maxX, CF.maxZ+0.001, new THREE.Vector3(0,0, 1), 6, 'front')
@@ -994,7 +765,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       addFace(LW.minX, LW.maxX, LW.minZ-0.001, new THREE.Vector3(0,0,-1), 4, 'back')
       addFace(RW.minX, RW.maxX, RW.maxZ+0.001, new THREE.Vector3(0,0, 1), 4, 'front')
       addFace(RW.minX, RW.maxX, RW.minZ-0.001, new THREE.Vector3(0,0,-1), 4, 'back')
-      // sides
       for (let s=0; s<storyY.length; s++) {
         for (let i=0;i<4;i++) {
           const z = THREE.MathUtils.lerp(CF.minZ+0.1, CF.maxZ-0.1, (i+0.5)/4)
@@ -1006,26 +776,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
     function createSoftCircleTexture(): THREE.Texture | null {
       try {
-        const c = document.createElement('canvas')
-        c.width = c.height = 64
+        const c = document.createElement('canvas'); c.width = c.height = 64
         const g = c.getContext('2d')!
         const grd = g.createRadialGradient(32,32,2, 32,32,32)
-        grd.addColorStop(0, 'rgba(255,255,255,0.9)')
-        grd.addColorStop(0.5, 'rgba(255,255,255,0.25)')
-        grd.addColorStop(1, 'rgba(255,255,255,0.0)')
-        g.fillStyle = grd
-        g.fillRect(0,0,64,64)
-        const tex = new THREE.CanvasTexture(c)
-        tex.colorSpace = THREE.SRGBColorSpace
+        grd.addColorStop(0, 'rgba(255,255,255,0.9)'); grd.addColorStop(0.5, 'rgba(255,255,255,0.25)'); grd.addColorStop(1, 'rgba(255,255,255,0.0)')
+        g.fillStyle = grd; g.fillRect(0,0,64,64)
+        const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace
         return tex
       } catch { return null }
     }
-
     function resetSmoke(s: THREE.Sprite, origin: THREE.Vector3, instant = false) {
-      s.position.copy(origin)
-      s.scale.setScalar(0.2 + Math.random()*0.2)
-      const mat = s.material as THREE.SpriteMaterial
-      mat.opacity = instant ? Math.random()*0.4 : 0
+      s.position.copy(origin); s.scale.setScalar(0.2 + Math.random()*0.2)
+      const mat = s.material as THREE.SpriteMaterial; mat.opacity = instant ? Math.random()*0.35 : 0
     }
   }, [cfg, quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
@@ -1037,10 +799,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   )
 }
 
-/**
- * Lightweight in-component settings panel (local to 3D scene).
- * Keeps UI independent from WireframeHouse.tsx and persists to localStorage.
- */
 function Wire3DPanel(props: {
   open: boolean
   cfg: LocalCfg
@@ -1062,24 +820,16 @@ function Wire3DPanel(props: {
   )
 
   return (
-    <div data-panel="wireframe3d" style={{
-      position:'absolute', top:12, right:12, zIndex:10,
-      userSelect:'none', pointerEvents:'auto'
-    }}>
-      <button onClick={(e) => { e.stopPropagation(); onToggle() }} style={{
-        padding:'6px 10px', fontSize:12, borderRadius:6, border:'1px solid #2b2f3a',
-        background:'rgba(10,12,16,0.75)', color:'#cfe7ff', cursor:'pointer'
-      }}>
+    <div data-panel="wireframe3d" style={{ position:'absolute', top:12, right:12, zIndex:10, userSelect:'none', pointerEvents:'auto' }}>
+      <button onClick={(e) => { e.stopPropagation(); onToggle() }} style={btnStyle}>
         {open ? 'Close 3D Settings' : '3D Settings'}
       </button>
       {open && (
-        <div style={{
-          width: 300, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
-          background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4
-        }}>
+        <div style={{ width: 300, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
+          background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
           <Card title="Camera">
             <Row label={`FOV: ${cfg.camera.fov.toFixed(0)}`}>
-              <input type="range" min={30} max={95} step={1} value={cfg.camera.fov}
+              <input type="range" min={30} max={85} step={1} value={cfg.camera.fov}
                      onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, fov: +e.target.value } }))} />
             </Row>
             <Row label={`Orbit speed: ${cfg.orbitSpeed.toFixed(2)}`}>
@@ -1087,40 +837,35 @@ function Wire3DPanel(props: {
                      onChange={e => onChange({ ...cfg, orbitSpeed: +e.target.value })} />
             </Row>
             <Row label={`Orbit radius: ${cfg.orbitRadius.toFixed(1)}`}>
-              <input type="range" min={5} max={13} step={0.1} value={cfg.orbitRadius}
+              <input type="range" min={6} max={12} step={0.1} value={cfg.orbitRadius}
                      onChange={e => onChange({ ...cfg, orbitRadius: +e.target.value })} />
             </Row>
             <Row label={`Elevation: ${cfg.orbitElev.toFixed(2)}`}>
-              <input type="range" min={0.02} max={0.25} step={0.01} value={cfg.orbitElev}
+              <input type="range" min={0.03} max={0.2} step={0.01} value={cfg.orbitElev}
                      onChange={e => onChange({ ...cfg, orbitElev: +e.target.value })} />
             </Row>
             <Row label={`Auto path`}>
               <input type="checkbox" checked={cfg.camera.autoPath}
                      onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoPath: e.target.checked } }))}/>
             </Row>
-            <Row label={`Controls auto-rotate`}>
-              <input type="checkbox" checked={cfg.camera.autoRotate}
-                     onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoRotate: e.target.checked } }))}/>
-            </Row>
           </Card>
 
           <Card title="Wireframe">
             <Row label={`Line width: ${cfg.lineWidthPx.toFixed(2)} px`}>
-              <input type="range" min={0.5} max={6} step={0.1} value={cfg.lineWidthPx}
+              <input type="range" min={0.8} max={4} step={0.1} value={cfg.lineWidthPx}
                      onChange={e => onChange({ ...cfg, lineWidthPx: +e.target.value })} />
             </Row>
           </Card>
 
           <Card title="Effects">
-            <Row label="Beams"><input type="checkbox" checked={cfg.fx.beams} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, beams: e.target.checked } })}/></Row>
-            <Row label="Ground rings"><input type="checkbox" checked={cfg.fx.groundRings} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, groundRings: e.target.checked } })}/></Row>
+            <Row label="Window flicker"><input type="checkbox" checked={cfg.fx.windowEQ} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, windowEQ: e.target.checked } })}/></Row>
             <Row label="Floor ripple"><input type="checkbox" checked={cfg.fx.floorRipple} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, floorRipple: e.target.checked } })}/></Row>
-            <Row label="Window EQ"><input type="checkbox" checked={cfg.fx.windowEQ} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, windowEQ: e.target.checked } })}/></Row>
-            <Row label="Chimney smoke"><input type="checkbox" checked={cfg.fx.chimneySmoke} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, chimneySmoke: e.target.checked } })}/></Row>
+            <Row label="Mosaic floor"><input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, mosaicFloor: e.target.checked } })}/></Row>
+            <Row label="Beams"><input type="checkbox" checked={cfg.fx.beams} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, beams: e.target.checked } })}/></Row>
             <Row label="Starfield"><input type="checkbox" checked={cfg.fx.starfield} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, starfield: e.target.checked } })}/></Row>
+            <Row label="Chimney smoke"><input type="checkbox" checked={cfg.fx.chimneySmoke} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, chimneySmoke: e.target.checked } })}/></Row>
             <Row label="Bloom breathing"><input type="checkbox" checked={cfg.fx.bloomBreath} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, bloomBreath: e.target.checked } })}/></Row>
             <Row label="Lyrics marquee"><input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, lyricsMarquee: e.target.checked } })}/></Row>
-            <Row label="Mosaic floor"><input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, mosaicFloor: e.target.checked } })}/></Row>
           </Card>
 
           <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>

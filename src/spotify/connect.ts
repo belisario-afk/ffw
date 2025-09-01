@@ -1,6 +1,4 @@
-// Helpers to transfer playback to the Web Playback SDK device.
-// Uses a global token provider to avoid importing private internals.
-
+// Transfer playback to a Spotify device ID via Web API.
 type Features = {
   deviceId: string
   play?: boolean

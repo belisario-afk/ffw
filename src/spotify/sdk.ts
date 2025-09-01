@@ -1,5 +1,4 @@
 // Load Spotify Web Playback SDK if it's not present.
-// Resolves when window.Spotify is available and onSpotifyWebPlaybackSDKReady fired.
 export async function loadWebPlaybackSDK(): Promise<void> {
   if ((window as any).Spotify) return
 

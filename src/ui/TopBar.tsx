@@ -4,7 +4,7 @@ import { ensurePlayerConnected, hasSpotifyTokenProvider } from '../spotify/playe
 import { transferPlaybackToDevice } from '../spotify/connect'
 
 type Props = {
-  activeVisualKey: string // e.g., 'wireframehouse' | 'wireframe3d'
+  activeVisualKey: string
   className?: string
 }
 
@@ -25,34 +25,20 @@ export default function TopBar({ activeVisualKey, className }: Props) {
     e.preventDefault()
     e.stopPropagation()
     setStatus('')
-
     try {
       if (!hasSpotifyTokenProvider()) {
-        setStatus('Sign in required: no Spotify token provider.')
+        setStatus('Sign in required (no Spotify token).')
         console.warn('TopBar: Missing Spotify token provider.')
         return
       }
-
-      // Load SDK if needed
       setStatus('Loading Spotify SDK…')
       await loadWebPlaybackSDK()
 
-      // Connect player
       setStatus('Connecting player…')
-      const { player, deviceId } = await ensurePlayerConnected({
-        deviceName: 'FFw visualizer',
-        setInitialVolume: false
-      })
+      const { player, deviceId } = await ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
 
-      // Activate audio element (user gesture requirement)
-      try {
-        // Newer SDKs require activation to comply with autoplay policy
-        await (player as any).activateElement?.()
-      } catch (err) {
-        console.warn('activateElement failed or not supported:', err)
-      }
+      try { await (player as any).activateElement?.() } catch {}
 
-      // Wait for deviceId if not present yet
       let id = deviceId as string | null
       if (!id) {
         id = await new Promise<string | null>((resolve) => {
@@ -66,15 +52,13 @@ export default function TopBar({ activeVisualKey, className }: Props) {
       }
 
       if (!id) {
-        setStatus('Player connected, but device ID not available yet. Open Spotify device picker to select “FFw visualizer”.')
+        setStatus('Player connected. Open Spotify app/device picker and select “FFw visualizer”.')
         return
       }
 
-      // Transfer playback to the browser device
       setStatus('Transferring playback…')
       await transferPlaybackToDevice({ deviceId: id, play: true })
-
-      setStatus('Browser playback enabled on “FFw visualizer”.')
+      setStatus('Browser playback active on “FFw visualizer”.')
     } catch (err: any) {
       console.error('Enable browser playback failed:', err)
       setStatus(err?.message || 'Failed to enable browser playback')

@@ -5,6 +5,7 @@ import Callback from './auth/Callback'
 import PlayerController from './controllers/PlayerController'
 import BlankScene from './visuals/scenes/BlankScene'
 const WireframeHouse = React.lazy(() => import('./visuals/scenes/WireframeHouse'))
+const WireframeHouse3D = React.lazy(() => import('./visuals/scenes/WireframeHouse3D'))
 import Popup from './ui/Popup'
 import QualityPanel from './ui/QualityPanel'
 import VJPanel from './ui/VJPanel'
@@ -128,6 +129,17 @@ export default function App() {
                   }}
                   settings={houseSettings}
                 />
+              ) : scene === 'Wireframe House 3D' ? (
+                <WireframeHouse3D
+                  auth={auth}
+                  quality={quality}
+                  accessibility={{
+                    epilepsySafe: accessibility.epilepsySafe,
+                    reducedMotion: accessibility.reducedMotion,
+                    highContrast: accessibility.highContrast
+                  }}
+                  settings={houseSettings}
+                />
               ) : (
                 <BlankScene auth={auth} quality={quality} accessibility={accessibility} />
               )}
@@ -141,10 +153,11 @@ export default function App() {
             <label htmlFor="scene" style={{ fontSize: 11, color: 'var(--muted)' }}>Scene</label>
             <select id="scene" value={scene} onChange={(e) => onSceneChange(e.currentTarget.value)} title="Scene selector" aria-label="Scene selector">
               <option value="Blank">Blank</option>
-              <option value="Wireframe House">Wireframe House</option>
+              <option value="Wireframe House">Wireframe House (2D)</option>
+              <option value="Wireframe House 3D">Wireframe House 3D (Three)</option>
             </select>
 
-            {scene === 'Wireframe House' && (
+            {(scene === 'Wireframe House' || scene === 'Wireframe House 3D') && (
               <button className="btn" onClick={() => setPanel('scene')} title="Scene settings" aria-label="Scene settings">⚙️</button>
             )}
 

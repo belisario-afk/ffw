@@ -11,11 +11,7 @@ import { getPlaybackState } from '../../spotify/api'
 import { cacheAlbumArt } from '../../utils/idb'
 import { ensurePlayerConnected, hasSpotifyTokenProvider, setSpotifyTokenProvider } from '../../spotify/player'
 import { fetchLyrics, type SyncedLine } from '../../lyrics/provider'
-
-// Inline auth UI so you can sign in even if a TopBar isn’t mounted
-import { bootstrapAuthFromHash, getAccessToken, ensureAuth } from '../../auth/spotifyAuth'
-import { loadWebPlaybackSDK } from '../../spotify/sdk'
-import { transferPlaybackToDevice } from '../../spotify/connect'
+import { LyricBillboard } from '../components/LyricBillboard'
 
 type Props = {
   auth: AuthState | null
@@ -68,7 +64,7 @@ function defaults(initial?: any): LocalCfg {
     orbitSpeed: initial?.orbitSpeed ?? 0.35,
     orbitRadius: initial?.orbitRadius ?? 9.5,
     orbitElev: initial?.orbitElev ?? 0.06,
-    camBob: initial?.camBob ?? 0.12, // a touch higher so it’s noticeable
+    camBob: initial?.camBob ?? 0.12,
     lineWidthPx: initial?.lineWidthPx ?? 1.8,
     camera: {
       fov: clamp(initial?.camera?.fov ?? 50, 30, 85),
@@ -111,34 +107,23 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Inline auth mini-UI
-  const [token, setToken] = useState<string | null>(null)
-  useEffect(() => {
-    bootstrapAuthFromHash()
-    const t = getAccessToken()
-    setToken(t)
-    if (t) { try { setSpotifyTokenProvider(async () => t) } catch {} }
-  }, [])
-
   // stable refs
   const angleRef = useRef(0)
   const syncedRef = useRef<SyncedLine[] | null>(null)
   const currentLineRef = useRef<number>(-1)
   const pbClock = useRef<{ playing: boolean; startedAt: number; offsetMs: number }>({ playing: false, startedAt: 0, offsetMs: 0 })
 
-  // also accept token from props.auth
   useEffect(() => {
-    const t = (auth as any)?.accessToken
-    if (t) {
-      try { setSpotifyTokenProvider(async () => t) } catch {}
-      setToken(t)
-    }
+    const token = (auth as any)?.accessToken
+    if (token) { try { setSpotifyTokenProvider(async () => token) } catch {} }
   }, [auth])
 
   useEffect(() => {
     if (hasSpotifyTokenProvider()) {
       ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
         .catch(e => console.warn('Spotify ensurePlayerConnected (3D) failed:', e))
+    } else {
+      console.warn('WireframeHouse3D: Spotify token provider not set. Skipping player connect.')
     }
   }, [])
 
@@ -344,8 +329,19 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       scene.add(windowGroup)
     }
 
-    // Starfield — always create so the toggle works post-mount
-    const starfield = (() => {
+    // 3D Lyric Billboard (troika-three-text)
+    const billboard = new LyricBillboard({
+      baseColor: 0xffffff,
+      outlineColor: accent2.getHex(),
+      highlightColor: accent.getHex(),
+      fontSize: 0.36
+    })
+    billboard.group.position.set(0, 2.95, 1.05)
+    scene.add(billboard.group)
+
+    // Optional starfield (created once)
+    let starfield: THREE.Points | null = null
+    {
       const g = new THREE.BufferGeometry()
       const N = 900
       const positions = new Float32Array(N * 3)
@@ -360,11 +356,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
       g.setAttribute('position', new THREE.BufferAttribute(positions, 3))
       const m = new THREE.PointsMaterial({ color: 0xeaf3ff, size: 0.7, sizeAttenuation: true, transparent: true, opacity: 0.45, depthWrite: false })
-      const s = new THREE.Points(g, m)
-      s.visible = !!cfgRef.current.fx.starfield
-      scene.add(s)
-      return s
-    })()
+      starfield = new THREE.Points(g, m)
+      starfield.visible = !!cfgRef.current.fx.starfield
+      scene.add(starfield)
+    }
 
     // Haze
     const fogMat = (() => {
@@ -387,10 +382,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       return mat
     })()
 
-    // Lyrics marquee — always create so toggle works
+    // Lyrics marquee (keep as fallback/secondary)
     let marqueeMat: THREE.ShaderMaterial | null = null
     let marqueeTex: THREE.Texture | null = null
-    let marqueeText = 'FFw Visualizer'
+    let marqueeText = ''
     const setupMarquee = (text: string, opacity = 0.8) => {
       const canvas = document.createElement('canvas')
       canvas.width = 2048; canvas.height = 128
@@ -416,7 +411,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
       if (!marqueeMat) {
         marqueeMat = new THREE.ShaderMaterial({
-          uniforms: { tText: { value: marqueeTex }, uScroll: { value: 0 }, uOpacity: { value: opacity }, uTint: { value: new THREE.Color(0xffffff) } },
+          uniforms: {
+            tText: { value: marqueeTex },
+            uScroll: { value: 0 },
+            uOpacity: { value: opacity },
+            uTint: { value: new THREE.Color(0xffffff) },
+          },
           transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
           vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
           fragmentShader: `
@@ -439,8 +439,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         marqueeMat.needsUpdate = true
       }
     }
-    // initialize once (opacity 0 if user disabled)
-    setupMarquee(marqueeText, cfgRef.current.fx.lyricsMarquee ? 0.85 : 0.0)
+    if (cfgRef.current.fx.lyricsMarquee) { marqueeText = 'FFw Visualizer'; setupMarquee(marqueeText, 0.85) }
 
     // Covers + lyrics
     let floorTex: THREE.Texture | null = null
@@ -500,7 +499,16 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           } catch {}
           syncedRef.current = synced || null
           currentLineRef.current = -1
-          if (line && line !== marqueeText) { marqueeText = line; setupMarquee(line, cfgRef.current.fx.lyricsMarquee ? 0.9 : 0.0) }
+          if (line && line !== marqueeText) { marqueeText = line; setupMarquee(line, 0.9) }
+
+          // Initialize billboard with first visible line
+          if (synced?.length) {
+            const first = synced[0]?.text || line
+            billboard.setLineNow(first)
+            if (synced[1]?.text) billboard.prepareNext(synced[1].text)
+          } else if (line) {
+            billboard.setLineNow(line)
+          }
         }
       } catch {}
     }
@@ -568,6 +576,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.2, 0, 0.2))
       fatMat.color.set(accent); thinMat.color.set(accent)
 
+      // update billboard colors to match palette
+      billboard.setColors(
+        accent.clone().multiplyScalar(0.9),
+        accent2.clone().multiplyScalar(1.0),
+        accent.clone().multiplyScalar(1.0)
+      )
+      billboard.setVisible(!!cfgC.fx.lyricsMarquee)
+
       // lines
       const px = cfgC.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
       setLinePixels(px)
@@ -586,41 +602,63 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       mosaicGroup.visible = !!cfgC.fx.mosaicFloor && coverTextures.length > 0
       floorMesh.visible = !mosaicGroup.visible
 
-      // lyrics (synced if available)
-      if (marqueeMat) {
-        if (cfgC.fx.lyricsMarquee) {
-          const lines = syncedRef.current
-          if (lines?.length) {
-            const pb = pbClock.current
-            const ms = pb.playing ? (Date.now() - pb.startedAt) : pb.offsetMs
-            let idx = currentLineRef.current
-            if (idx < 0 || idx >= lines.length || ms < lines[idx].timeMs || (idx < lines.length - 1 && ms >= lines[idx + 1].timeMs)) {
-              // binary search
-              let lo = 0, hi = lines.length - 1, found = 0
-              while (lo <= hi) {
-                const midIdx = (lo + hi) >> 1
-                if (lines[midIdx].timeMs <= ms) { found = midIdx; lo = midIdx + 1 } else { hi = midIdx - 1 }
-              }
-              idx = found
-              if (idx !== currentLineRef.current) {
-                currentLineRef.current = idx
-                const text = lines[idx].text || ''
-                if (text && text !== marqueeText) { marqueeText = text; setupMarquee(text, 0.92) }
-              }
-            }
-            marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.03) % 1
-          } else {
-            marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.045) % 1
-            marqueeMat.uniforms.uOpacity.value = 0.85
+      // lyrics timing -> billboard progress and swapping
+      const lines = syncedRef.current
+      if (cfgC.fx.lyricsMarquee && lines?.length) {
+        const pb = pbClock.current
+        const ms = pb.playing ? (Date.now() - pb.startedAt) : pb.offsetMs
+
+        // Compute current line idx via binary search
+        let idx = currentLineRef.current
+        if (idx < 0 || idx >= lines.length || ms < lines[idx].timeMs || (idx < lines.length - 1 && ms >= lines[idx + 1].timeMs)) {
+          let lo = 0, hi = lines.length - 1, found = 0
+          while (lo <= hi) {
+            const midIdx = (lo + hi) >> 1
+            if (lines[midIdx].timeMs <= ms) { found = midIdx; lo = midIdx + 1 } else { hi = midIdx - 1 }
           }
-          ;(marqueeMat.uniforms.uTint.value as THREE.Color).copy(accent)
-        } else {
-          marqueeMat.uniforms.uOpacity.value = 0.0
+          idx = found
+          if (idx !== currentLineRef.current) {
+            currentLineRef.current = idx
+            const text = lines[idx].text || ''
+            if (text) {
+              // Queue next, then begin swap to new current
+              const nextText = lines[idx + 1]?.text || ''
+              billboard.prepareNext(nextText)
+              // We set the next as the new line; to ensure immediate visible content, if current is empty initialize:
+              if (idx === 0 && !text) {
+                billboard.setLineNow(text)
+              } else {
+                // Set new line immediately on next layer then swap
+                billboard.prepareNext(text).then(() => billboard.beginSwap())
+              }
+              // Keep marquee updated too
+              if (marqueeMat && text !== marqueeText) { marqueeText = text; setupMarquee(text, 0.92) }
+            }
+          }
+        }
+
+        // Progress within current line [0..1]
+        const curStart = lines[idx]?.timeMs ?? ms
+        const nextStart = lines[idx + 1]?.timeMs ?? (curStart + 2500)
+        const dur = Math.max(300, nextStart - curStart)
+        const prog = THREE.MathUtils.clamp((ms - curStart) / dur, 0, 1)
+        billboard.setProgress(prog)
+
+        // Scroll marquee slowly as well
+        if (marqueeMat) marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.03) % 1
+      } else {
+        // Fallback marquee motion
+        if (marqueeMat) {
+          marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.045) % 1
+          marqueeMat.uniforms.uOpacity.value = cfgC.fx.lyricsMarquee ? 0.85 : 0.0
         }
       }
 
-      // camera autopilot + bob (bob visible; works live)
-      const bob = Math.sin(t * 1.4) * cfgC.camBob // visible amplitude from slider
+      // Animate billboard transitions
+      billboard.update(dt)
+
+      // camera autopilot + bob
+      const bob = Math.sin(t * 1.4) * cfgC.camBob
       if (cfgC.camera.autoPath && !userInteracting) {
         const baseSpeed = cfgC.orbitSpeed
         const audioBoost = 0.4 * (low + mid + high)
@@ -632,7 +670,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
         controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
       } else {
-        // manual: only add bob on Y to avoid fighting user controls
         camera.position.y += (bob - (camera as any).__lastBobY || 0)
         ;(camera as any).__lastBobY = bob
       }
@@ -664,6 +701,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.dispose()
       floorTex?.dispose()
       marqueeTex?.dispose?.()
+      billboard.dispose()
       scene.traverse(obj => {
         const any = obj as any
         if (any.geometry?.dispose) any.geometry.dispose()
@@ -777,44 +815,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
-  // Inline auth UI handlers
-  const signIn = () => ensureAuth()
-  const playInBrowser = async () => {
-    try {
-      const t = getAccessToken()
-      if (!t) { alert('Sign in with Spotify first'); return }
-      await loadWebPlaybackSDK()
-      const { player, deviceId } = await ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
-      try { await (player as any).activateElement?.() } catch {}
-      let id = deviceId as string | null
-      if (!id) {
-        id = await new Promise<string | null>((resolve) => {
-          const onReady = ({ device_id }: any) => resolve(device_id || null)
-          try { (player as any).addListener?.('ready', onReady) } catch { resolve(null) }
-          setTimeout(() => resolve(null), 4000)
-        })
-      }
-      if (!id) { alert('Player connected. Select “FFw visualizer” in your Spotify app.'); return }
-      await transferPlaybackToDevice({ deviceId: id, play: true })
-      setToken(t)
-    } catch (e: any) {
-      console.error(e)
-      alert(e?.message || 'Failed to enable browser playback')
-    }
-  }
-
   return (
     <div data-visual="wireframe3d" style={{ position: 'relative', width: '100%', height: '100%' }}>
-      {/* Inline auth UI if no TopBar */}
-      <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 50, display: 'flex', gap: 8, pointerEvents: 'auto' }}>
-        {!token ? (
-          <button onClick={signIn} style={btnStyle}>Sign in with Spotify</button>
-        ) : (
-          <button onClick={playInBrowser} style={btnStyle}>▶ Play in Browser</button>
-        )}
-        <button onClick={() => setPanelOpen(o => !o)} style={btnStyle}>{panelOpen ? 'Close 3D Settings' : '3D Settings'}</button>
-      </div>
-
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} aria-label="Wireframe House 3D" />
       <Wire3DPanel open={panelOpen} cfg={cfg} onToggle={() => setPanelOpen(o => !o)} onChange={setCfg} />
     </div>
@@ -842,53 +844,59 @@ function Wire3DPanel(props: {
   )
 
   return (
-    <div data-panel="wireframe3d" style={{ position:'absolute', top:44, right:12, zIndex:10, userSelect:'none', pointerEvents:'auto', display: open ? 'block' : 'none' }}>
-      <div style={{ width: 300, padding:12, border:'1px solid #2b2f3a', borderRadius:8, background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
-        <Card title="Camera">
-          <Row label={`FOV: ${cfg.camera.fov.toFixed(0)}`}>
-            <input type="range" min={30} max={85} step={1} value={cfg.camera.fov}
-                   onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, fov: +e.target.value } }))} />
-          </Row>
-          <Row label={`Orbit speed: ${cfg.orbitSpeed.toFixed(2)}`}>
-            <input type="range" min={0.05} max={2} step={0.01} value={cfg.orbitSpeed}
-                   onChange={e => onChange(prev => ({ ...prev, orbitSpeed: +e.target.value }))} />
-          </Row>
-          <Row label={`Orbit radius: ${cfg.orbitRadius.toFixed(1)}`}>
-            <input type="range" min={6} max={12} step={0.1} value={cfg.orbitRadius}
-                   onChange={e => onChange(prev => ({ ...prev, orbitRadius: +e.target.value }))} />
-          </Row>
-          <Row label={`Elevation: ${cfg.orbitElev.toFixed(2)}`}>
-            <input type="range" min={0.03} max={0.2} step={0.01} value={cfg.orbitElev}
-                   onChange={e => onChange(prev => ({ ...prev, orbitElev: +e.target.value }))} />
-          </Row>
-          <Row label={`Camera bob: ${cfg.camBob.toFixed(2)}`}>
-            <input type="range" min={0} max={0.6} step={0.01} value={cfg.camBob}
-                   onChange={e => onChange(prev => ({ ...prev, camBob: +e.target.value }))} />
-          </Row>
-          <Row label={`Auto path`}>
-            <input type="checkbox" checked={cfg.camera.autoPath}
-                   onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoPath: e.target.checked } }))}/>
-          </Row>
-        </Card>
+    <div data-panel="wireframe3d" style={{ position:'absolute', top:12, right:12, zIndex:10, userSelect:'none', pointerEvents:'auto' }}>
+      <button onClick={(e) => { e.stopPropagation(); onToggle() }} style={btnStyle}>
+        {open ? 'Close 3D Settings' : '3D Settings'}
+      </button>
+      {open && (
+        <div style={{ width: 300, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
+          background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
+          <Card title="Camera">
+            <Row label={`FOV: ${cfg.camera.fov.toFixed(0)}`}>
+              <input type="range" min={30} max={85} step={1} value={cfg.camera.fov}
+                     onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, fov: +e.target.value } }))} />
+            </Row>
+            <Row label={`Orbit speed: ${cfg.orbitSpeed.toFixed(2)}`}>
+              <input type="range" min={0.05} max={2} step={0.01} value={cfg.orbitSpeed}
+                     onChange={e => onChange(prev => ({ ...prev, orbitSpeed: +e.target.value }))} />
+            </Row>
+            <Row label={`Orbit radius: ${cfg.orbitRadius.toFixed(1)}`}>
+              <input type="range" min={6} max={12} step={0.1} value={cfg.orbitRadius}
+                     onChange={e => onChange(prev => ({ ...prev, orbitRadius: +e.target.value }))} />
+            </Row>
+            <Row label={`Elevation: ${cfg.orbitElev.toFixed(2)}`}>
+              <input type="range" min={0.03} max={0.2} step={0.01} value={cfg.orbitElev}
+                     onChange={e => onChange(prev => ({ ...prev, orbitElev: +e.target.value }))} />
+            </Row>
+            <Row label={`Camera bob: ${cfg.camBob.toFixed(2)}`}>
+              <input type="range" min={0} max={0.6} step={0.01} value={cfg.camBob}
+                     onChange={e => onChange(prev => ({ ...prev, camBob: +e.target.value }))} />
+            </Row>
+            <Row label={`Auto path`}>
+              <input type="checkbox" checked={cfg.camera.autoPath}
+                     onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoPath: e.target.checked } }))}/>
+            </Row>
+          </Card>
 
-        <Card title="Wireframe">
-          <Row label={`Line width: ${cfg.lineWidthPx.toFixed(2)} px`}>
-            <input type="range" min={0.8} max={4} step={0.1} value={cfg.lineWidthPx}
-                   onChange={e => onChange(prev => ({ ...prev, lineWidthPx: +e.target.value }))} />
-          </Row>
-        </Card>
+          <Card title="Wireframe">
+            <Row label={`Line width: ${cfg.lineWidthPx.toFixed(2)} px`}>
+              <input type="range" min={0.8} max={4} step={0.1} value={cfg.lineWidthPx}
+                     onChange={e => onChange(prev => ({ ...prev, lineWidthPx: +e.target.value }))} />
+            </Row>
+          </Card>
 
-        <Card title="Effects">
-          <Row label="Mosaic floor"><input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, mosaicFloor: e.target.checked } }))}/></Row>
-          <Row label="Starfield"><input type="checkbox" checked={cfg.fx.starfield} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, starfield: e.target.checked } }))}/></Row>
-          <Row label="Lyrics marquee"><input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, lyricsMarquee: e.target.checked } }))}/></Row>
-        </Card>
+          <Card title="Effects">
+            <Row label="Mosaic floor"><input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, mosaicFloor: e.target.checked } }))}/></Row>
+            <Row label="Starfield"><input type="checkbox" checked={cfg.fx.starfield} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, starfield: e.target.checked } }))}/></Row>
+            <Row label="Lyrics marquee"><input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, lyricsMarquee: e.target.checked } }))}/></Row>
+          </Card>
 
-        <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
-          <button onClick={() => onChange(defaults())} style={btnStyle}>Reset</button>
-          <button onClick={onToggle} style={btnStyle}>Close</button>
+          <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
+            <button onClick={() => onChange(defaults())} style={btnStyle}>Reset</button>
+            <button onClick={onToggle} style={btnStyle}>Close</button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }

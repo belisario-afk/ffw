@@ -81,13 +81,10 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
   useEffect(() => {
     const base = 1.2, h = 0.9, roofH = 0.95
     const verts: Vec3[] = [
-      // floor
       { x: -base, y: 0, z: -base }, { x:  base, y: 0, z: -base },
       { x:  base, y: 0, z:  base }, { x: -base, y: 0, z:  base },
-      // walls top
       { x: -base, y:  h, z: -base }, { x:  base, y:  h, z: -base },
       { x:  base, y:  h, z:  base }, { x: -base, y:  h, z:  base },
-      // roof apex
       { x: 0, y: h + roofH, z: 0 }
     ]
     const edges: Edge[] = [
@@ -135,24 +132,19 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
   // Subscribe to bar/section events for cinematic cuts
   useEffect(() => {
     const offBar = reactivityBus.on('bar', () => {
-      // subtle punch on bar
       beatIntensityRef.current = Math.min(1, beatIntensityRef.current + 0.25)
     })
     const offSec = reactivityBus.on('section', (_name) => {
-      // Cycle camera presets on section changes
       presetRef.current = (presetRef.current + 1) % 3
       if (presetRef.current === 0) {
-        // Wide slow orbit
         targetCam(camRadiusRef, 6.2, 0.08)
         targetElev(camElevRef, -0.08)
         camSpeedMulRef.current = 0.8
       } else if (presetRef.current === 1) {
-        // Close low sweep
         targetCam(camRadiusRef, 4.6, 0.12)
         targetElev(camElevRef, -0.02)
         camSpeedMulRef.current = 1.2
       } else {
-        // Medium high angle
         targetCam(camRadiusRef, 5.4, 0.1)
         targetElev(camElevRef, 0.04)
         camSpeedMulRef.current = 1.0
@@ -178,7 +170,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
         if (aEl) { analyzer.attachMedia(aEl); await analyzer.resume() }
         analyzer.run()
 
-        // Album palette
+        // Album palette bootstrap on first load
         const s = await getPlaybackState().catch(() => null)
         if (s?.item?.album?.images?.length) {
           const url = s.item.album.images[0].url as string
@@ -264,7 +256,6 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
         vel[i].z += dir.z * power * (0.8 + Math.random() * 0.2)
       }
 
-      // FX on beat
       if (settings.partyRings) ringsRef.current.push({ r: 0, w: 0.35, a: 0.6 })
       if (settings.confetti) {
         const count = 80
@@ -362,7 +353,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     g.fill()
     g.globalCompositeOperation = 'source-over'
 
-    // Fallback badge (optional visual aid): shows when frames are stale
+    // Fallback badge
     const usingFallback = !f || (performance.now() - (f.t || 0)) > 200
     if (usingFallback) {
       g.fillStyle = 'rgba(255,255,255,0.08)'

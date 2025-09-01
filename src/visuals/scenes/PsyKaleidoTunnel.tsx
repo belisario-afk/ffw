@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { createRenderer, createComposer } from '../../three/Renderer'
 import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
 import { getPlaybackState } from '../../spotify/api'
+import { cacheAlbumArt } from '../../utils/idb'
 
 type Props = {
   auth: any
@@ -19,7 +20,7 @@ type Cfg = {
   exposure: number
 }
 
-const LS_KEY = 'ffw.kaleido.cfg.v3'
+const LS_KEY = 'ffw.kaleido.cfg.v4'
 
 export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -61,26 +62,25 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       motionBlur: false
     })
 
-    // Prevent post-unmount updates
     let running = true
 
     // Audio frame
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Album tint (updated periodically)
+    // Album tint (CORS-safe via cacheAlbumArt)
     const albumTint = new THREE.Color(0.55, 0.7, 1.0)
     const sampleAlbumTint = async () => {
       try {
         const s = await getPlaybackState().catch(() => null)
         const url = (s?.item?.album?.images?.[0]?.url as string) || ''
         if (!url) return
+        const blobUrl = await cacheAlbumArt(url).catch(() => url)
         const img = await new Promise<HTMLImageElement>((res, rej) => {
           const im = new Image()
-          im.crossOrigin = 'anonymous'
           im.onload = () => res(im)
           im.onerror = rej
-          im.src = url
+          im.src = blobUrl
         })
         const c = document.createElement('canvas'); const w = 32, h = 32; c.width = w; c.height = h
         const g = c.getContext('2d'); if (!g) return
@@ -97,11 +97,11 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     sampleAlbumTint()
     const albumIv = window.setInterval(sampleAlbumTint, 8000)
 
-    // Tunnel geometry (camera stays inside)
+    // Tunnel geometry
     const radius = 14
     const tunnelLen = 160
     const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 256, 1, true)
-    tunnel.rotateZ(Math.PI * 0.5) // shift seam away from view
+    tunnel.rotateZ(Math.PI * 0.5) // move seam
 
     const uniforms: Record<string, any> = {
       uTime: { value: 0 },
@@ -114,7 +114,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       uScroll: { value: 0.0 },
       uSafe: { value: (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0 },
       uContrastBoost: { value: accessibility.highContrast ? 1.0 : 0.0 },
-      uAlbumTint: { value: albumTint.clone() },
+      uAlbumTint: { value: new THREE.Color().copy(albumTint) },
       uExposure: { value: cfgRef.current.exposure }
     }
     uniformsRef.current = uniforms
@@ -181,31 +181,35 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           float spokes = sin((uv.x*56.0 + warp*8.0) + time*4.5 * (0.4 + 0.9*audio.z));
           float field = smoothstep(-1.0, 1.0, rings*spokes);
 
-          float sat = clamp(0.45 + intensity*0.30 + audio.z*0.3 + cboost*0.2, 0.0, 1.3);
-          float brt = clamp(0.36 + loud*0.42 + audio.x*0.18, 0.0, 1.6);
+          float sat = clamp(0.45 + intensity*0.30 + audio.z*0.3 + cboost*0.2, 0.0, 1.25);
+          float brt = clamp(0.34 + loud*0.4 + audio.x*0.18, 0.0, 1.5);
           float hueShift = 0.12*intensity + 0.10*audio.y + 0.04*loud + 0.06*sin(time*0.3);
 
           vec3 colA = palette(fract(field*0.25 + hueShift), vec3(0.52,0.32,0.89), vec3(0.45,0.55,0.45), vec3(1.0,0.7,0.4), vec3(0.0,0.2,0.4));
           vec3 colB = palette(fract(field*0.5 + hueShift*1.4), vec3(0.18,0.45,0.96), vec3(0.55,0.45,0.45), vec3(0.8,0.9,0.5), vec3(0.2,0.0,0.6));
           vec3 col = mix(colA, colB, 0.45 + 0.25*audio.y);
 
+          // chroma split
           float off = 0.002 * chroma * (0.4 + 0.6*intensity);
           float fR = smoothstep(0.25, 0.75, fbm((uv + vec2(off,0.0))*4.0 + time*0.06));
           float fG = smoothstep(0.25, 0.75, fbm((uv + vec2(0.0,off))*4.0 - time*0.04));
           float fB = smoothstep(0.25, 0.75, fbm((uv + vec2(-off,off))*4.0 + time*0.02));
           vec3 chrom = vec3(fR, fG, fB);
-          col = mix(col, chrom, 0.22 * chroma);
+          col = mix(col, chrom, 0.2 * chroma);
 
-          float flash = 0.32*loud + 0.4*audio.z + 0.22*audio.y;
+          // flash clamp
+          float flash = 0.3*loud + 0.38*audio.z + 0.2*audio.y;
           float maxFlash = mix(1.0, 0.35, safe);
           flash = min(flash, maxFlash);
-          col *= (0.8 + 0.6*flash);
+          col *= (0.8 + 0.55*flash);
 
+          // album tint
           col = mix(col, album, 0.18 + 0.16*audio.y);
 
+          // exposure + reinhard
           col *= mix(0.6, 1.35, clamp(exposure, 0.0, 1.2));
-          col = col / (1.0 + col);  // Reinhard tonemapping
-          col = pow(col, vec3(0.95)); // mild gamma
+          col = col / (1.0 + col);
+          col = pow(col, vec3(0.95));
           return clamp(col, 0.0, 1.0);
         }
 
@@ -221,7 +225,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     tunnelMesh.position.set(0, 0, 0)
     scene.add(tunnelMesh)
 
-    // Particles (comet flecks)
+    // Particles
     const makeParticles = (density: number) => {
       const count = Math.floor(1500 * THREE.MathUtils.clamp(density, 0.1, 2.0))
       const geo = new THREE.BufferGeometry()
@@ -266,7 +270,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       if (!u) return
 
       const dt = Math.min(0.05, clock.getDelta())
-      u.uTime.value = clock.elapsedTime
+      if (u.uTime) u.uTime.value = clock.elapsedTime
 
       // Audio
       const low = latest?.bands.low ?? 0.06
@@ -275,29 +279,31 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       const loud = latest?.loudness ?? 0.12
       const beat = latest?.beat ? 1.0 : 0.0
 
-      // Safety clamps + live cfg
+      // Safety + live cfg clamps
       const safe = (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0
-      const rawIntensity = Math.max(0, Math.min(1.2, cfgRef.current.intensity || 0))
-      const rawSpeed = Math.max(0, Math.min(1.5, cfgRef.current.speed || 0))
+      const rawIntensity = Math.max(0, Math.min(1.2, cfgRef.current.intensity ?? 0))
+      const rawSpeed = Math.max(0, Math.min(1.5, cfgRef.current.speed ?? 0))
       const kIntensity = THREE.MathUtils.lerp(rawIntensity, Math.min(rawIntensity, 0.55), safe)
       const kSpeed = THREE.MathUtils.lerp(rawSpeed, Math.min(rawSpeed, 0.35), safe)
-      const slices = Math.max(1, Math.round(cfgRef.current.slices || 1))
-      const chroma = Math.max(0, Math.min(1, cfgRef.current.chroma || 0))
-      const exposure = Math.max(0, Math.min(1.2, cfgRef.current.exposure || 0.7))
+      const slices = Math.max(1, Math.round(cfgRef.current.slices ?? 1))
+      const chroma = Math.max(0, Math.min(1, cfgRef.current.chroma ?? 0))
+      const exposure = Math.max(0, Math.min(1.2, cfgRef.current.exposure ?? 0.7))
 
-      u.uSafe.value = safe
-      u.uContrastBoost.value = accessibility.highContrast ? 1.0 : 0.0
-      u.uAudio.value.set(low, mid, high)
-      u.uLoud.value = loud
-      u.uBeat.value = beat
-      u.uSlices.value = slices
-      u.uIntensity.value = kIntensity
-      u.uChroma.value = chroma
-      u.uExposure.value = exposure
-      u.uScroll.value += dt * (0.18 + 0.8 * kSpeed + 0.35 * loud)
-      ;(u.uAlbumTint.value as THREE.Color)?.copy(albumTint)
+      if (u.uSafe) u.uSafe.value = safe
+      if (u.uContrastBoost) u.uContrastBoost.value = accessibility.highContrast ? 1.0 : 0.0
+      if (u.uAudio) u.uAudio.value.set(low, mid, high)
+      if (u.uLoud) u.uLoud.value = loud
+      if (u.uBeat) u.uBeat.value = beat
+      if (u.uSlices) u.uSlices.value = slices
+      if (u.uIntensity) u.uIntensity.value = kIntensity
+      if (u.uChroma) u.uChroma.value = chroma
+      if (u.uExposure) u.uExposure.value = exposure
+      if (u.uScroll) u.uScroll.value += dt * (0.18 + 0.8 * kSpeed + 0.35 * loud)
 
-      // Particle motion toward camera
+      const albumU: THREE.Color | undefined = u.uAlbumTint?.value
+      if (albumU) albumU.copy(albumTint)
+
+      // Particles
       const pts = particlesRef.current
       if (pts) {
         const pos = pts.geometry.getAttribute('position') as THREE.BufferAttribute | undefined
@@ -322,7 +328,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       }
 
       // Rebuild particles only if density changed a lot
-      const desired = Math.floor(1500 * THREE.MathUtils.clamp(cfgRef.current.particleDensity || 0.9, 0.1, 2.0))
+      const desired = Math.floor(1500 * THREE.MathUtils.clamp(cfgRef.current.particleDensity ?? 0.9, 0.1, 2.0))
       const current = (particlesRef.current?.geometry.getAttribute('position') as THREE.BufferAttribute | undefined)?.count ?? desired
       if (Math.abs(desired - current) > 400) {
         if (particlesRef.current) {
@@ -347,7 +353,12 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       window.clearInterval(albumIv)
       offFrame?.()
       uniformsRef.current = null
-      particlesRef.current = null
+      if (particlesRef.current) {
+        scene.remove(particlesRef.current)
+        particlesRef.current.geometry?.dispose()
+        ;(particlesRef.current.material as THREE.Material)?.dispose()
+        particlesRef.current = null
+      }
       scene.traverse(obj => {
         const any = obj as any
         if (any.geometry?.dispose) any.geometry.dispose()

@@ -14,6 +14,7 @@ import { getFPS } from './utils/fps'
 import { detectGPUInfo } from './utils/gpu'
 import { HousePanel, defaultHouseSettings, type HouseSettings } from './ui/HousePanel'
 import { initTransitionManager, requestSceneChange } from './visuals/TransitionManager'
+import { startReactivityOrchestrator } from './audio/ReactivityOrchestrator'
 
 type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
 
@@ -36,8 +37,6 @@ export default function App() {
   })
   const [theme, setThemeState] = useState<ThemeName>(getTheme())
   const [scene, setScene] = useState<string>(() => localStorage.getItem('ffw_scene') || 'Blank')
-
-  // Merge saved scene settings with defaults so new options get sane values
   const [houseSettings, setHouseSettings] = useState<HouseSettings>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('ffw_house_settings') || '{}')
@@ -76,12 +75,11 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [auth])
 
-  // Persist scene settings
   useEffect(() => {
     localStorage.setItem('ffw_house_settings', JSON.stringify(houseSettings))
   }, [houseSettings])
 
-  // Initialize beat-synced transition manager
+  // Initialize beat-synced transitions
   useEffect(() => {
     initTransitionManager((name) => {
       setScene(name)
@@ -89,14 +87,17 @@ export default function App() {
     })
   }, [])
 
+  // Start reactivity orchestrator once (loads analysis, schedules bars/sections)
+  useEffect(() => {
+    const stop = startReactivityOrchestrator()
+    return () => stop()
+  }, [])
+
   function handleLogin() { loginWithSpotify({ scopes: defaultScopes() }) }
   function handleSignOut() { signOut(); setAuth(null); navigate('/'); location.reload() }
 
   function onThemeChange(t: ThemeName) { setThemeState(t); setTheme(t) }
-  function onSceneChange(v: string) {
-    // Switch on next beat (fallback after ~1.2s if no audio)
-    requestSceneChange(v, { waitForBeat: true, timeoutMs: 1200 })
-  }
+  function onSceneChange(v: string) { requestSceneChange(v, { waitForBeat: true, timeoutMs: 1200 }) }
 
   return (
     <div className="app-shell" role="application" aria-label="FFW Visualizer">

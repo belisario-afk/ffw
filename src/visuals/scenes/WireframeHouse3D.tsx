@@ -15,7 +15,6 @@ type Props = {
   auth: AuthState | null
   quality: { renderScale: 1 | 1.25 | 1.5 | 1.75 | 2, msaa: 0 | 2 | 4 | 8, bloom: boolean, motionBlur: boolean }
   accessibility: { epilepsySafe: boolean, reducedMotion: boolean, highContrast: boolean }
-  // settings prop is still accepted but this component now manages its own panel/state (used as initial)
   settings?: any
 }
 
@@ -45,7 +44,6 @@ type LocalCfg = {
     autoPath: boolean
     target: { x:number, y:number, z:number }
   }
-  // New FX toggles
   fx: {
     beams: boolean
     groundRings: boolean
@@ -54,6 +52,10 @@ type LocalCfg = {
     chimneySmoke: boolean
     starfield: boolean
     bloomBreath: boolean
+    // New
+    lyricsMarquee: boolean
+    mosaicFloor: boolean
+    keyTint: boolean
   }
 }
 
@@ -96,7 +98,11 @@ function defaults(initial?: any): LocalCfg {
       windowEQ: initial?.fx?.windowEQ ?? true,
       chimneySmoke: initial?.fx?.chimneySmoke ?? true,
       starfield: initial?.fx?.starfield ?? true,
-      bloomBreath: initial?.fx?.bloomBreath ?? true
+      bloomBreath: initial?.fx?.bloomBreath ?? true,
+      // New defaults
+      lyricsMarquee: initial?.fx?.lyricsMarquee ?? true,
+      mosaicFloor: initial?.fx?.mosaicFloor ?? true,
+      keyTint: initial?.fx?.keyTint ?? true
     }
   }
 }
@@ -208,7 +214,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     grid.position.y = 0
     scene.add(grid)
 
-    // Album floor — ShaderMaterial: album texture + dim + ripple
+    // Album floor — single cover shader
     const floorSize = 22
     const floorGeom = new THREE.PlaneGeometry(floorSize, floorSize, 1, 1)
     const floorMat = new THREE.ShaderMaterial({
@@ -239,7 +245,6 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         uniform float uRippleAmp, uRippleRadius, uRippleDecay;
         void main() {
           vec2 uv = vUv;
-          // Ripple: radial from center
           if (uRippleAmp > 0.0) {
             vec2 p = uv - 0.5;
             float r = length(p);
@@ -256,6 +261,29 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     floorMesh.rotation.x = -Math.PI / 2
     floorMesh.position.y = 0.001
     scene.add(floorMesh)
+
+    // Mosaic floor (tiles of album covers). Visible when cfg.fx.mosaicFloor
+    const mosaicGroup = new THREE.Group()
+    const tiles: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
+    const tileN = 8
+    const tileSize = floorSize / tileN
+    for (let y = 0; y < tileN; y++) {
+      for (let x = 0; x < tileN; x++) {
+        const g = new THREE.PlaneGeometry(tileSize, tileSize)
+        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, map: null, transparent: true, opacity: 0.95, depthWrite: false })
+        const mesh = new THREE.Mesh(g, m)
+        mesh.rotation.x = -Math.PI / 2
+        mesh.position.set(
+          (x + 0.5) * tileSize - floorSize / 2,
+          0.0025,
+          (y + 0.5) * tileSize - floorSize / 2
+        )
+        mosaicGroup.add(mesh)
+        tiles.push(mesh)
+      }
+    }
+    mosaicGroup.visible = !!cfg.fx.mosaicFloor
+    scene.add(mosaicGroup)
 
     // Mansion edges (fat lines + fallback)
     const mansionPositions = buildMansionEdges()
@@ -309,7 +337,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       scene.add(starfield)
     }
 
-    // Party beams (additive rotating planes)
+    // Party beams
     const beamGroup = new THREE.Group()
     if (cfg.fx.beams) {
       const beamGeom = new THREE.PlaneGeometry(0.08, 7.5)
@@ -329,7 +357,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       scene.add(beamGroup)
     }
 
-    // Ground pulse rings (spawn on beat)
+    // Ground pulse rings
     const rings: THREE.Mesh[] = []
     let ringPool: THREE.Mesh[] = []
     const emitRing = () => {
@@ -353,7 +381,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       }
     }
 
-    // Windows (emissive planes) + optional EQ behavior
+    // Windows (emissive planes)
     const windowGroup = new THREE.Group()
     const windowMeta: { mesh: THREE.Mesh, story: number, col: number, side: 'front'|'back'|'left'|'right' }[] = []
     {
@@ -370,7 +398,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       scene.add(windowGroup)
     }
 
-    // Chimney smoke (lightweight particles)
+    // Chimney smoke
     const smokeGroup = new THREE.Group()
     let smokeTex: THREE.Texture | null = createSoftCircleTexture()
     const smokeEmitters = [
@@ -435,32 +463,144 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       return mesh
     })()
 
-    // Album cover loader + brightness compensation feeding floor shader
+    // Lyrics Marquee (balcony fascia): scrolling text texture
+    let marqueeMat: THREE.ShaderMaterial | null = null
+    let marqueeTex: THREE.Texture | null = null
+    let marqueeMesh: THREE.Mesh | null = null
+    let marqueeText = ''
+    const setupMarquee = (text: string) => {
+      const canvas = document.createElement('canvas')
+      canvas.width = 2048
+      canvas.height = 128
+      const g = canvas.getContext('2d')!
+      g.clearRect(0,0,canvas.width,canvas.height)
+      g.fillStyle = '#ffffff'
+      g.font = 'bold 72px system-ui, sans-serif'
+      g.textBaseline = 'middle'
+      const gap = 80
+      const metrics = g.measureText(text)
+      const w = Math.max(metrics.width + gap, 400)
+      let x = 0
+      while (x < canvas.width + w) {
+        g.fillText(text, x, canvas.height/2)
+        x += w
+      }
+      const tex = new THREE.CanvasTexture(canvas)
+      tex.wrapS = THREE.RepeatWrapping
+      tex.wrapT = THREE.ClampToEdgeWrapping
+      tex.repeat.set(2, 1)
+      tex.colorSpace = THREE.SRGBColorSpace
+      marqueeTex?.dispose()
+      marqueeTex = tex
+
+      if (!marqueeMat) {
+        marqueeMat = new THREE.ShaderMaterial({
+          uniforms: {
+            tText: { value: marqueeTex },
+            uScroll: { value: 0 },
+            uOpacity: { value: 0.0 },
+            uTint: { value: new THREE.Color(0xffffff) }
+          },
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          vertexShader: `
+            varying vec2 vUv;
+            void main(){
+              vUv = uv;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+            }
+          `,
+          fragmentShader: `
+            precision highp float;
+            varying vec2 vUv;
+            uniform sampler2D tText;
+            uniform float uScroll;
+            uniform float uOpacity;
+            uniform vec3 uTint;
+            void main(){
+              vec2 uv = vUv;
+              uv.x = fract(uv.x + uScroll);
+              vec4 c = texture2D(tText, uv);
+              gl_FragColor = vec4(c.rgb * uTint, c.a * uOpacity);
+            }
+          `
+        })
+        const geom = new THREE.PlaneGeometry(3.8, 0.22)
+        marqueeMesh = new THREE.Mesh(geom, marqueeMat)
+        marqueeMesh.position.set(0, 2.48, 1.305) // just in front of balcony rail/front face
+        scene.add(marqueeMesh)
+      } else {
+        marqueeMat.uniforms.tText.value = marqueeTex
+        marqueeMat.needsUpdate = true
+      }
+    }
+
+    // Album cover loader + brightness compensation feeding floor shader + mosaic source
     let floorTex: THREE.Texture | null = null
+    const coverTextures: THREE.Texture[] = []
+    let currentTrackId: string | null = null
+    let currentFeatures: { key?: number, mode?: 0|1 } | null = null
+
     const loadAlbumCover = async () => {
       try {
         const s = await getPlaybackState().catch(() => null)
         const url = (s?.item?.album?.images?.[0]?.url as string) || null
-        if (!url) return
-        const blobUrl = await cacheAlbumArt(url).catch(() => url)
-        const tex = await new Promise<THREE.Texture>((resolve, reject) => {
-          new THREE.TextureLoader().load(blobUrl, t => resolve(t), undefined, reject)
-        })
-        tex.colorSpace = THREE.SRGBColorSpace
-        tex.anisotropy = renderer.capabilities.getMaxAnisotropy()
-        tex.minFilter = THREE.LinearMipmapLinearFilter
-        tex.magFilter = THREE.LinearFilter
-        tex.generateMipmaps = true
+        const id = (s?.item?.id as string) || null
+        const title = (s?.item?.name as string) || ''
+        const artist = (s?.item?.artists?.[0]?.name as string) || ''
+        if (url) {
+          const blobUrl = await cacheAlbumArt(url).catch(() => url)
+          const tex = await new Promise<THREE.Texture>((resolve, reject) => {
+            new THREE.TextureLoader().load(blobUrl, t => resolve(t), undefined, reject)
+          })
+          tex.colorSpace = THREE.SRGBColorSpace
+          tex.anisotropy = renderer.capabilities.getMaxAnisotropy()
+          tex.minFilter = THREE.LinearMipmapLinearFilter
+          tex.magFilter = THREE.LinearFilter
+          tex.generateMipmaps = true
 
-        const brightness = await estimateTextureLuminance(tex).catch(() => 0.6)
-        const dim = clamp(1.05 - brightness * 0.5, 0.55, 0.95)
-        floorMat.uniforms.uDim.value = dim
-        floorMat.uniforms.uOpacity.value = clamp(0.95 - (brightness - 0.6) * 0.25, 0.7, 0.95)
+          // Brightness → dim/opacity
+          const brightness = await estimateTextureLuminance(tex).catch(() => 0.6)
+          const dim = clamp(1.05 - brightness * 0.5, 0.55, 0.95)
+          floorMat.uniforms.uDim.value = dim
+          floorMat.uniforms.uOpacity.value = clamp(0.95 - (brightness - 0.6) * 0.25, 0.7, 0.95)
 
-        floorTex?.dispose()
-        floorTex = tex
-        floorMat.uniforms.tAlbum.value = tex
-        floorMat.needsUpdate = true
+          floorTex?.dispose()
+          floorTex = tex
+          floorMat.uniforms.tAlbum.value = tex
+          floorMat.needsUpdate = true
+
+          // Add to mosaic pool
+          coverTextures.push(tex)
+          // Seed mosaic tiles if empty
+          if (cfg.fx.mosaicFloor && tiles.length) {
+            for (let i=0;i<tiles.length;i++) {
+              const m = tiles[i].material
+              if (!m.map) m.map = tex
+              m.needsUpdate = true
+            }
+          }
+        }
+
+        // Lyrics marquee text
+        const text = title && artist ? `${title} — ${artist}` : (title || artist || '')
+        if (cfg.fx.lyricsMarquee && text && text !== marqueeText) {
+          marqueeText = text
+          setupMarquee(text)
+        }
+
+        // Key-aware: fetch features if provider exists (optional window hook)
+        if (cfg.fx.keyTint && id && id !== currentTrackId) {
+          currentTrackId = id
+          currentFeatures = null
+          try {
+            const hook = (window as any).__ffw__getAudioFeatures
+            if (typeof hook === 'function') {
+              currentFeatures = await hook(id) // should return { key: 0..11, mode: 0|1 }
+            }
+          } catch {}
+        }
       } catch {}
     }
     loadAlbumCover()
@@ -475,6 +615,13 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         floorMat.uniforms.uRippleAmp.value = 1.0
         floorMat.uniforms.uRippleRadius.value = 0.05
         floorMat.uniforms.uRippleDecay.value = 10.0
+      }
+      // Mosaic: swap a random tile to current cover
+      if (cfg.fx.mosaicFloor && floorTex && tiles.length) {
+        const idx = Math.floor(Math.random() * tiles.length)
+        const mat = tiles[idx].material
+        mat.map = floorTex
+        mat.needsUpdate = true
       }
     })
     const offBar = reactivityBus.on('bar', () => {
@@ -503,6 +650,11 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     let frames = 0
     let fallbackArmed = false
 
+    // Key‑tint helpers
+    const warm = new THREE.Color('#ff9b57') // major
+    const cool = new THREE.Color('#57a6ff') // minor
+    let keyMode: 0|1|null = null // 1=major, 0=minor
+
     const clock = new THREE.Clock()
     let raf = 0
     const animate = () => {
@@ -517,9 +669,20 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       const high = latest?.bands.high ?? 0.12
       const loud = latest?.loudness ?? 0.2
 
-      // Accent color morph by highs
-      accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.8, 0, 1))
-      accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.5, 0, 1))
+      // Determine key mode if features landed
+      if (cfg.fx.keyTint && currentFeatures && keyMode == null) {
+        if (currentFeatures.mode === 1 || currentFeatures.mode === 0) keyMode = currentFeatures.mode
+      }
+
+      // Accent color morph: by key (major warm, minor cool). Fallback to highs if no key.
+      if (cfg.fx.keyTint && keyMode != null) {
+        const target = keyMode === 1 ? warm : cool
+        accent.lerp(target, 0.06)
+        accent2.lerp(target.clone().offsetHSL(0.08, 0, 0), 0.06)
+      } else {
+        accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.8, 0, 1))
+        accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.5, 0, 1))
+      }
       fatMat.color.set(accent)
       thinMat.color.set(accent)
 
@@ -527,7 +690,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       const px = cfg.lineWidthPx * (latest?.beat ? 1.35 : 1.0) * (1.0 + 0.15 * high)
       setLinePixels(px)
 
-      // Windows: EQ-like behavior per story
+      // Windows EQ
       windowMeta.forEach((w, i) => {
         const mat = w.mesh.material as THREE.MeshBasicMaterial
         let energy = 0.4 + 0.6 * mid
@@ -567,6 +730,10 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         floorMat.uniforms.uRippleDecay.value = 10.0 + high * 8.0
       }
 
+      // Toggle floor visibility according to mosaic setting
+      floorMesh.visible = !cfg.fx.mosaicFloor
+      mosaicGroup.visible = !!cfg.fx.mosaicFloor
+
       // Smoke
       if (cfg.fx.chimneySmoke) {
         smokeSprites.forEach((s, i) => {
@@ -586,6 +753,15 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       if (starfield) {
         starfield.rotation.y += dt * 0.02
         starfield.rotation.x = Math.sin(t * 0.03) * 0.02
+      }
+
+      // Lyrics marquee scroll and opacity by loudness
+      if (cfg.fx.lyricsMarquee && marqueeMat) {
+        marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * (0.06 + loud * 0.6)) % 1
+        marqueeMat.uniforms.uOpacity.value = THREE.MathUtils.clamp(0.2 + loud * 0.9, 0, 1)
+        ;(marqueeMat.uniforms.uTint.value as THREE.Color).copy(accent)
+      } else if (marqueeMat) {
+        marqueeMat.uniforms.uOpacity.value = 0.0
       }
 
       // Camera auto path
@@ -654,6 +830,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       offFrame?.(); offBeat?.(); offBar?.()
       controls.dispose()
       floorTex?.dispose()
+      marqueeTex?.dispose?.()
       smokeTex?.dispose?.()
       scene.traverse(obj => {
         const any = obj as any
@@ -722,8 +899,8 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         const yb = levels[0], yt = levels[levels.length-1]
         for (let t=1;t<=3;t++) {
           const x = minX + (spanX * t)/4
-          E(x, yb, maxZ, x, yt, maxZ) // front
-          E(x, yb, minZ, x, yt, minZ) // back
+          E(x, yb, maxZ, x, yt, maxZ)
+          E(x, yb, minZ, x, yt, minZ)
         }
         for (let t=1;t<=3;t++) {
           const z = minZ + (spanZ * t)/4
@@ -956,6 +1133,9 @@ function Wire3DPanel(props: {
             <Row label="Chimney smoke"><input type="checkbox" checked={cfg.fx.chimneySmoke} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, chimneySmoke: e.target.checked } })}/></Row>
             <Row label="Starfield"><input type="checkbox" checked={cfg.fx.starfield} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, starfield: e.target.checked } })}/></Row>
             <Row label="Bloom breathing"><input type="checkbox" checked={cfg.fx.bloomBreath} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, bloomBreath: e.target.checked } })}/></Row>
+            <Row label="Lyrics marquee"><input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, lyricsMarquee: e.target.checked } })}/></Row>
+            <Row label="Mosaic floor"><input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, mosaicFloor: e.target.checked } })}/></Row>
+            <Row label="Key-aware tint"><input type="checkbox" checked={cfg.fx.keyTint} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, keyTint: e.target.checked } })}/></Row>
           </Card>
 
           <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>

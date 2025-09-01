@@ -72,7 +72,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
 
     // Bottom on ground y=0, top of walls y=h, roof apex y=h+roofH
     const verts: Vec3[] = [
-      // bottom rectangle (y=0)
+      // floor rectangle (y=0)
       { x: -base, y: 0, z: -base }, { x:  base, y: 0, z: -base },
       { x:  base, y: 0, z:  base }, { x: -base, y: 0, z:  base },
       // top of walls (y=h)
@@ -198,7 +198,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
   // ====== Helpers ======
 
   function stepPhysics(frame: AnalysisFrame, dt: number) {
-    const [low, mid, high] = energies(frame)
+    const [low] = energies(frame)
 
     // Beat smoothing and camera shake
     const minBeatGap = accessibility.epilepsySafe ? 180 : 120
@@ -207,7 +207,8 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
       lastBeatAtRef.current = now
       beatIntensityRef.current = Math.min(1, beatIntensityRef.current + 0.6 + low * 0.5)
       shakeRef.current = Math.min(1, shakeRef.current + settings.camShake * 0.8)
-      // Explode outward
+
+      // Explode outward slightly
       const power = settings.beatPower * (0.5 + low * 0.9)
       const verts = vertsRef.current, vel = velRef.current
       for (let i = 0; i < verts.length; i++) {
@@ -244,7 +245,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
 
   function drawScene(g: CanvasRenderingContext2D, canvas: HTMLCanvasElement, frame: AnalysisFrame) {
     const { width: W, height: H } = canvas
-    const [low, mid, high] = energies(frame)
+    const [, mid, high] = energies(frame)
 
     // Background
     if (quality.motionBlur && !accessibility.reducedMotion) {
@@ -275,31 +276,35 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     g.fill()
     g.globalCompositeOperation = 'source-over'
 
-    // Camera pose
-    const bob = settings.camBob
-    const orbitY = settings.orbit ? orbitAngleRef.current : Math.sin(performance.now()/1000 * 0.4) * 0.15 * bob
-    const baseElev = settings.orbitElev
-    const camRotY = orbitY
-    const camRotX = baseElev + (Math.cos(performance.now()/1000 * 0.3) * 0.05) * bob
+    // True orbit camera position around the house
+    const radius = Math.max(3.5, settings.orbitRadius)
+    const angle = orbitAngleRef.current
+    const elev = settings.orbitElev
+    const cam: Vec3 = {
+      x: Math.sin(angle) * radius,
+      z: Math.cos(angle) * radius,
+      y: Math.sin(elev) * (radius * 0.5) + 1.2 // slight above ground
+    }
+    const target: Vec3 = { x: 0, y: 0.9, z: 0 } // look slightly above center
+    // Shake
     const t = performance.now()/1000
-    const shakeAmp = shakeRef.current * 0.05
-    const shakeX = shakeAmp * Math.sin(t * 27.3)
-    const shakeY = shakeAmp * Math.cos(t * 31.7)
-    const dist = settings.orbitRadius
+    const shakeAmp = shakeRef.current * 0.06
+    cam.x += shakeAmp * Math.sin(t * 27.3)
+    cam.y += shakeAmp * Math.cos(t * 31.7)
 
-    // Projection helper (upright fix: invert Y when mapping to screen)
-    const proj = (v: Vec3, scale = 1) => projectUpright(v, camRotX + shakeY, camRotY + shakeX, dist, W, H, scale)
+    // Projection helper using view (look-at) transform, Y‑up
+    const proj = (v: Vec3, scale = 1) => projectLookAt(v, cam, target, W, H, scale)
 
     // Floor grid
     if (settings.grid) {
-      drawGrid(g, W, H, proj, { color: withAlpha(accent2, 0.25), parallax: settings.gridParallax, beat: beatIntensityRef.current })
+      drawGrid(g, W, H, proj, { color: withAlpha(accent2, 0.25), beat: beatIntensityRef.current })
     }
 
-    // Party beams (rotating light bars around house)
-    drawPartyBeams(g, W, H, proj, { accent2, high, beat: beatIntensityRef.current })
+    // Party beams
+    drawPartyBeams(g, proj, { accent2, high, beat: beatIntensityRef.current })
 
     // Wireframe (depth sorted) with reactive width/glow and slight scale on beat
-    const scale = 1 + beatIntensityRef.current * 0.06 + low * 0.03
+    const scale = 1 + beatIntensityRef.current * 0.06
     drawWire(g, vertsRef.current, edgesRef.current, proj, {
       accent, accent2,
       glow: quality.bloom ? settings.glow : 0,
@@ -308,9 +313,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     })
 
     // Windows flicker
-    if (settings.windows) {
-      drawWindows(g, windowsRef.current, proj, { accent: accent2, high, beat: beatIntensityRef.current })
-    }
+    if (settings.windows) drawWindows(g, windowsRef.current, proj, { accent: accent2, high, beat: beatIntensityRef.current })
   }
 
   function drawStars(g: CanvasRenderingContext2D, W: number, H: number, stars: {x:number;y:number;z:number;b:number}[], frame: AnalysisFrame) {
@@ -330,7 +333,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
   function drawGrid(
     g: CanvasRenderingContext2D, W: number, H: number,
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
-    opts: { color: string, parallax: number, beat: number }
+    opts: { color: string, beat: number }
   ) {
     const y = 0 // ground plane at y=0
     const span = 8
@@ -357,7 +360,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
   }
 
   function drawPartyBeams(
-    g: CanvasRenderingContext2D, W: number, H: number,
+    g: CanvasRenderingContext2D,
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
     opts: { accent2: string, high: number, beat: number }
   ) {
@@ -422,19 +425,32 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     }
   }
 
-  // Project with upright Y (flip sign when mapping to screen)
-  function projectUpright(v: Vec3, rotX: number, rotY: number, dist: number, W: number, H: number, scale = 1) {
-    const vx = v.x * scale, vy = v.y * scale, vz = v.z * scale
-    const cosY = Math.cos(rotY), sinY = Math.sin(rotY)
-    const cosX = Math.cos(rotX), sinX = Math.sin(rotX)
-    const rx = vx * cosY - vz * sinY
-    const rz = vx * sinY + vz * cosY
-    const ry = vy * cosX - rz * sinX
-    const rzz = vy * sinX + rz * cosX
-    const z = rzz + dist
-    const f = 240 / z
-    // Note the minus for Y to keep world Y-up (fixes upside-down look)
-    return { x: rx * f + W / 2, y: -ry * f + H * 0.7, z }
+  // Look-at projection, Y-up. Returns screen coords (x,y) and depth zFwd.
+  function projectLookAt(v: Vec3, cam: Vec3, target: Vec3, W: number, H: number, scale = 1) {
+    const p = { x: v.x * scale - cam.x, y: v.y * scale - cam.y, z: v.z * scale - cam.z }
+    const up = { x: 0, y: 1, z: 0 }
+    const fwd = norm(sub(target, cam))       // camera forward
+    const right = norm(cross(fwd, up))
+    const up2 = cross(right, fwd)
+
+    // Camera space
+    const cx = dot(right, p)
+    const cy = dot(up2, p)
+    const cz = dot(fwd, p)                   // forward depth; should be > 0
+
+    const persp = 240 / Math.max(0.001, cz)
+    return { x: cx * persp + W / 2, y: -cy * persp + H * 0.65, z: cz }
+  }
+
+  // Math helpers
+  function sub(a: Vec3, b: Vec3): Vec3 { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z } }
+  function dot(a: Vec3, b: Vec3) { return a.x*b.x + a.y*b.y + a.z*b.z }
+  function cross(a: Vec3, b: Vec3): Vec3 {
+    return { x: a.y*b.z - a.z*b.y, y: a.z*b.x - a.x*b.z, z: a.x*b.y - a.y*b.x }
+  }
+  function norm(v: Vec3): Vec3 {
+    const l = Math.hypot(v.x, v.y, v.z) || 1
+    return { x: v.x / l, y: v.y / l, z: v.z / l }
   }
 
   function energies(frame: AnalysisFrame): [number, number, number] {

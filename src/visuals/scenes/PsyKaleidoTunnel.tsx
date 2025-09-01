@@ -11,15 +11,16 @@ type Props = {
 }
 
 /**
- Album-only engine (no synthetic colors)
- - Uses only album cover textures and colors for final color.
- - Supports two shapes: 0 = Vortex Prism (prism-star), 1 = Liquid Mosaic (hex mosaic).
- - Two album textures (current & previous) interlaced and crossfaded on track change.
- - Strong guards: never read any uniform.value; shape switch can't crash.
+ Album-only visuals (no synthetic colors)
+ Two modes:
+  - 0: Vortex Prism (prism-star kaleidoscope)
+  - 1: Liquid Mosaic (hex-ish mosaic)
+ Uses only album textures and derived swatches (avg + top 3).
+ Interlacing/fusion between current and previous album covers.
+ Strong uniform guards: no direct uniform.value reads, and "ensureUniform" recreates missing uniforms to avoid null.value crashes.
 **/
 
 type Cfg = {
-  // Core
   intensity: number
   speed: number
   exposure: number
@@ -27,37 +28,31 @@ type Cfg = {
   gamma: number
   vignette: number
 
-  // Shapes
-  shapeMode: 0 | 1 // 0=Vortex Prism, 1=Liquid Mosaic
-  slices: number // 1..48 (used by prism-star)
-  tileScale: number // mosaic tiling scale
-  tileRound: number // 0..1 soften tiles
+  shapeMode: 0 | 1
+  slices: number
+  tileScale: number
+  tileRound: number
 
-  // Prism/refraction
-  prismDispersion: number // 0..1
-  prismWarp: number // 0..1
+  prismDispersion: number
+  prismWarp: number
 
-  // Album texture mapping
   texScaleU: number
   texScaleV: number
-  texRotate: number // radians
-  albumTexWarp: number // barrel/warp
+  texRotate: number
+  albumTexWarp: number
 
-  // Interlacing/fusion
-  interlaceMode: 0 | 1 | 2 // 0=radial (prism), 1=stripes, 2=checker
+  interlaceMode: 0 | 1 | 2
   interlaceScale: number
-  interlaceStrength: number // 0..1
-  fuseBias: number // 0..1 favor previous vs current during crossfade
+  interlaceStrength: number
+  fuseBias: number
 
-  // Edge accents
-  edgeEmphasis: number // 0..1
+  edgeEmphasis: number
 }
 
 type Preset = { name: string } & Cfg
 
-const LS_KEY = 'ffw.kaleido.albumonly.v2'
+const LS_KEY = 'ffw.kaleido.albumonly.safe.v3'
 
-// Only keep two families: Vortex Prism and Liquid Mosaic (with two advanced variants each)
 const PRESETS: Record<string, Preset> = {
   vortexPrism: {
     name: 'Vortex Prism',
@@ -68,32 +63,14 @@ const PRESETS: Record<string, Preset> = {
     interlaceMode: 0, interlaceScale: 140.0, interlaceStrength: 0.7, fuseBias: 0.4,
     edgeEmphasis: 0.65
   },
-  vortexPrismDeep: {
-    name: 'Vortex Prism (Deep)',
-    intensity: 1.25, speed: 1.15, exposure: 1.06, saturation: 1.25, gamma: 0.94, vignette: 0.66,
-    shapeMode: 0, slices: 32, tileScale: 3.0, tileRound: 0.3,
-    prismDispersion: 1.0, prismWarp: 0.95,
-    texScaleU: 3.4, texScaleV: 5.4, texRotate: 0.42, albumTexWarp: 0.56,
-    interlaceMode: 0, interlaceScale: 180.0, interlaceStrength: 0.8, fuseBias: 0.35,
-    edgeEmphasis: 0.72
-  },
   liquidMosaic: {
     name: 'Liquid Mosaic',
     intensity: 0.95, speed: 0.8, exposure: 0.98, saturation: 1.1, gamma: 0.96, vignette: 0.62,
-    shapeMode: 1, slices: 16, tileScale: 2.4, tileRound: 0.45,
+    shapeMode: 1, slices: 16, tileScale: 2.6, tileRound: 0.45,
     prismDispersion: 0.5, prismWarp: 0.55,
-    texScaleU: 2.0, texScaleV: 3.4, texRotate: -0.2, albumTexWarp: 0.36,
+    texScaleU: 2.2, texScaleV: 3.6, texRotate: -0.2, albumTexWarp: 0.36,
     interlaceMode: 2, interlaceScale: 160.0, interlaceStrength: 0.6, fuseBias: 0.5,
-    edgeEmphasis: 0.5
-  },
-  liquidMosaicGrid: {
-    name: 'Liquid Mosaic (Grid)',
-    intensity: 1.05, speed: 0.9, exposure: 1.0, saturation: 1.15, gamma: 0.95, vignette: 0.64,
-    shapeMode: 1, slices: 20, tileScale: 3.2, tileRound: 0.3,
-    prismDispersion: 0.6, prismWarp: 0.6,
-    texScaleU: 2.6, texScaleV: 4.2, texRotate: 0.25, albumTexWarp: 0.42,
-    interlaceMode: 1, interlaceScale: 220.0, interlaceStrength: 0.7, fuseBias: 0.45,
-    edgeEmphasis: 0.6
+    edgeEmphasis: 0.55
   }
 }
 
@@ -105,9 +82,9 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const tAlbum2Ref = useRef<THREE.Texture | null>(null) // previous
   const has1Ref = useRef(0)
   const has2Ref = useRef(0)
-  const crossRef = useRef(1) // progress of crossfade to current (0->1)
+  const crossRef = useRef(1) // 0->1 crossfade progress
 
-  // Album-derived palette (avg + top3)
+  // Album-derived swatches
   const albAvg = useRef(new THREE.Color('#808080'))
   const albC1 = useRef(new THREE.Color('#77d0ff'))
   const albC2 = useRef(new THREE.Color('#b47bff'))
@@ -117,7 +94,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const matRef = useRef<THREE.ShaderMaterial | null>(null)
   const scrollRef = useRef(0)
 
-  // UI state (presets: only vortex & mosaic)
+  // UI state: keep only two presets requested
   const [panelOpen, setPanelOpen] = useState(false)
   const [selectedPreset, setSelectedPreset] = useState<keyof typeof PRESETS>('vortexPrism')
   const [cfg, setCfg] = useState<Cfg>(() => {
@@ -147,8 +124,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const { renderer, dispose: disposeRenderer } = createRenderer(canvas, quality.renderScale)
     const comp = createComposer(renderer, scene, camera, {
       bloom: quality.bloom,
-      bloomStrength: 0.72,
-      bloomRadius: 0.42,
+      bloomStrength: 0.7,
+      bloomRadius: 0.4,
       bloomThreshold: 0.55,
       fxaa: true,
       vignette: true,
@@ -168,7 +145,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     // Track polling -> load album textures & palette
     let lastTrackId: string | null = null
     function quantizeTopN(data: Uint8ClampedArray, nPick = 3): THREE.Color[] {
-      // Simple 6x6x6 histogram to get top colors (quick and robust)
       const bins = new Map<number, number>()
       const toBin = (r: number, g: number, b: number) => {
         const R = Math.min(5, Math.floor(r / 43))
@@ -192,17 +168,13 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         return new THREE.Color(R / 255, G / 255, B / 255)
       }
       const picks: THREE.Color[] = []
-      for (let i = 0; i < Math.min(nPick, sorted.length); i++) {
-        picks.push(decode(sorted[i][0]))
-      }
-      // Ensure at least 3 picks with separation
+      for (let i = 0; i < Math.min(nPick, sorted.length); i++) picks.push(decode(sorted[i][0]))
       while (picks.length < nPick) {
         const c = picks[picks.length - 1]?.clone() || new THREE.Color(1, 1, 1)
         c.offsetHSL(0.2 * (picks.length), 0.1, 0)
         picks.push(c)
       }
-      const avg = new THREE.Color((ar / Math.max(1, n)) / 255, (ag / Math.max(1, n)) / 255, (ab / Math.max(1, n)) / 255)
-      albAvg.current.copy(avg)
+      albAvg.current.setRGB((ar / Math.max(1, n)) / 255, (ag / Math.max(1, n)) / 255, (ab / Math.max(1, n)) / 255)
       return picks
     }
 
@@ -239,7 +211,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           })
         })
 
-        // Palette (avg + top3)
+        // Swatches
         const c = document.createElement('canvas'); c.width = 64; c.height = 64
         const g = c.getContext('2d')
         if (g) {
@@ -275,46 +247,39 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         // Start crossfade to current
         crossRef.current = 0.0
         setF('uAlbumCross', 0.0)
-      } catch {
-        // ignore
-      }
+      } catch { /* ignore */ }
     }
 
     loadAlbum()
     const albumIv = window.setInterval(loadAlbum, 6000)
 
-    // Geometry (BackSide cylinder for tunnel presence)
+    // Geometry (BackSide cylinder for tunnel feel)
     const radius = 14, tunnelLen = 220
     const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 360, 1, true)
     tunnel.rotateZ(Math.PI * 0.5)
 
-    // Uniforms
+    // Uniforms (INITIALIZED ONCE)
     const uniforms = {
-      // Time/audio
       uTime: { value: 0.0 },
       uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
       uLoud: { value: 0.12 },
       uBeat: { value: 0.0 },
 
-      // Motion
       uScroll: { value: 0.0 },
       uSpin: { value: 0.0 },
       uZoom: { value: 0.0 },
 
-      // Album textures and flags
       tAlbum1: { value: null as THREE.Texture | null },
       tAlbum2: { value: null as THREE.Texture | null },
       uHasAlbum1: { value: 0.0 },
       uHasAlbum2: { value: 0.0 },
       uAlbumCross: { value: 1.0 },
 
-      // Album swatches (avg + 3 dominants)
       uC0: { value: albAvg.current.clone() },
       uC1: { value: albC1.current.clone() },
       uC2: { value: albC2.current.clone() },
       uC3: { value: albC3.current.clone() },
 
-      // Controls
       uIntensity: { value: cfgRef.current.intensity },
       uSpeed: { value: cfgRef.current.speed },
       uExposure: { value: cfgRef.current.exposure },
@@ -341,7 +306,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
       uEdgeEmphasis: { value: cfgRef.current.edgeEmphasis },
 
-      // Accessibility
       uSafe: { value: (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0 },
       uContrastBoost: { value: accessibility.highContrast ? 1.0 : 0.0 }
     }
@@ -375,12 +339,12 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         uniform sampler2D tAlbum2;
         uniform float uHasAlbum1;
         uniform float uHasAlbum2;
-        uniform float uAlbumCross; // 0->1 progress toward current album
+        uniform float uAlbumCross;
 
-        uniform vec3 uC0; // avg
-        uniform vec3 uC1; // dom1
-        uniform vec3 uC2; // dom2
-        uniform vec3 uC3; // dom3
+        uniform vec3 uC0;
+        uniform vec3 uC1;
+        uniform vec3 uC2;
+        uniform vec3 uC3;
 
         uniform float uIntensity;
         uniform float uSpeed;
@@ -389,7 +353,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         uniform float uGamma;
         uniform float uVignette;
 
-        uniform float uShapeMode; // 0 prism-star, 1 mosaic
+        uniform float uShapeMode; // 0 prism, 1 mosaic
         uniform float uSlices;
         uniform float uTileScale;
         uniform float uTileRound;
@@ -401,7 +365,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         uniform float uTexRotate;
         uniform float uAlbumTexWarp;
 
-        uniform float uInterlaceMode; // 0 radial (prism), 1 stripes, 2 checker
+        uniform float uInterlaceMode; // 0 radial, 1 stripes, 2 checker
         uniform float uInterlaceScale;
         uniform float uInterlaceStrength;
         uniform float uFuseBias;
@@ -411,7 +375,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         uniform float uSafe;
         uniform float uContrastBoost;
 
-        // noise/fbm
         float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
         float noise(vec2 p){
           vec2 i=floor(p), f=fract(p);
@@ -446,7 +409,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           return m * seg + floor(xf/seg)*seg;
         }
 
-        // masks
         float stripeMask(vec2 uv, float scale){
           return step(0.0, sin(uv.y*scale));
         }
@@ -459,13 +421,14 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           return step(0.0, sin(r*scale*6.28318));
         }
 
-        // hex-ish mosaic via blended rotated grids
         float mosaicMask(vec2 uv, float scale, float roundness){
-          vec2 uv2 = rotate2D(uv, 2.09439510239); // 120 deg
-          vec2 uv3 = rotate2D(uv, -2.09439510239);
-          vec2 g1 = abs(fract(uv*scale)-0.5);
-          vec2 g2 = abs(fract(uv2*scale)-0.5);
-          vec2 g3 = abs(fract(uv3*scale)-0.5);
+          // robust hex-like tiling
+          vec2 uvA = uv;
+          vec2 uvB = rotate2D(uv, 2.09439510239);
+          vec2 uvC = rotate2D(uv, -2.09439510239);
+          vec2 g1 = abs(fract(uvA*scale)-0.5);
+          vec2 g2 = abs(fract(uvB*scale)-0.5);
+          vec2 g3 = abs(fract(uvC*scale)-0.5);
           float d = min(min(g1.x+g1.y, g2.x+g2.y), g3.x+g3.y);
           return smoothstep(0.5, 0.5 - 0.2*roundness, d);
         }
@@ -475,7 +438,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           return mix(vec3(l), c, s);
         }
 
-        // 2-album interlacing/fusing with crossfade bias
         vec3 sampleAlbums(vec2 uv, sampler2D a1, sampler2D a2, float has1, float has2, float cross, float mode, float scale, float strength, float fuseBias) {
           vec3 A = has1 > 0.5 ? texture2D(a1, uv).rgb : vec3(0.0);
           vec3 B = has2 > 0.5 ? texture2D(a2, uv).rgb : A;
@@ -488,7 +450,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           float imix = mix(0.5, m, clamp(strength, 0.0, 1.0));
           vec3 inter = mix(B, A, imix);
 
-          // Crossfade progress: from previous to current, with bias
           float bias = clamp(fuseBias, 0.0, 1.0);
           float xf = smoothstep(0.0, 1.0, cross);
           float xfBias = clamp(mix(xf, 1.0 - xf, bias), 0.0, 1.0);
@@ -498,14 +459,13 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         void main(){
           float time = uTime;
 
-          // base UV with spin/zoom
           vec2 uv = vUv;
           float spin = (0.1 + 0.5*uIntensity) * time + uSpin;
           uv = rotate2D(uv, spin);
           float zoom = clamp(0.10 + 0.25*uZoom, 0.0, 0.5);
           uv = mix(uv, (uv - 0.5) * (1.0 - zoom) + 0.5, 0.8);
 
-          // kaleido fold on x and travel on y (for prism-star)
+          // base kaleido coords for prism
           vec2 k = uv;
           k.y = fract(k.y - time*0.04 - uScroll);
           k.x = foldKaleidoX(k.x, uSlices);
@@ -516,10 +476,10 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           vec2 nrm = vec2(fbm(tuv*3.0 + time*0.08) - 0.5, fbm(tuv*3.2 - time*0.07) - 0.5);
           vec2 baseUV = (tuv * uTexScale) + nrm * (uPrismWarp * 0.08);
 
-          // interlaced albums
+          // interlaced albums (album-only color source)
           vec3 baseCol = sampleAlbums(baseUV, tAlbum1, tAlbum2, uHasAlbum1, uHasAlbum2, uAlbumCross, uInterlaceMode, uInterlaceScale, uInterlaceStrength, uFuseBias);
 
-          // prism dispersion from album1 (fallback to baseCol if missing)
+          // prism dispersion from album1 (fallback to baseCol)
           vec3 dispCol = baseCol;
           if (uHasAlbum1 > 0.5) {
             float disp = uPrismDispersion * (0.4 + 0.6*uIntensity);
@@ -538,7 +498,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           float edge = 0.0;
 
           if (mode < 0.5) {
-            // Vortex Prism: starburst from kaleido angle
+            // Vortex Prism: starburst using kaleido angle
             vec2 c = k - 0.5;
             float ang = atan(c.y, c.x);
             float blades = max(3.0, uSlices * 0.5 + 4.0);
@@ -546,34 +506,26 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
             mask = smoothstep(0.2, 0.95, star);
             edge = smoothstep(0.75, 0.9, star);
           } else {
-            // Liquid Mosaic: hex-like tiling mask
+            // Liquid Mosaic
             float m = mosaicMask(uv, uTileScale, uTileRound);
             mask = m;
             edge = smoothstep(0.35, 0.6, m) * 0.8;
           }
 
-          // Compose color strictly from album sources:
-          // - Base = interlaced albums
-          // - Add prism dispersion highlight
-          // - Edge tinted by album dominant swatches
+          // compose strictly from album sources
           vec3 col = mix(baseCol, dispCol, 0.35);
           vec3 edgeCol = mix(uC1, uC2, 0.5 + 0.3*sin(time*0.3));
           col = mix(col, edgeCol, uEdgeEmphasis * edge);
-
-          // Palette wash (subtle) using album swatches gradient (no external colors)
           vec3 pal = mix(mix(uC0, uC1, k.x), mix(uC2, uC3, k.y), 0.5);
           col = mix(col, pal, 0.12 * uIntensity);
-
-          // Shape emphasis
           col *= (0.8 + 0.4*mask);
 
-          // Tone mapping & look
+          // tone & safety
           col = sat(col, mix(uSaturation, 1.0, uSafe*0.3));
           col *= mix(0.6, 1.6, clamp(uExposure, 0.0, 1.6));
           col = col / (1.0 + col);
           col = pow(col, vec3(clamp(uGamma, 0.85, 1.15)));
 
-          // Vignette (in-shader; composer vignette kept mild)
           vec2 q = vUv - 0.5;
           float vig = 1.0 - clamp(dot(q,q)*1.4, 0.0, 1.0);
           col *= mix(1.0, pow(vig, 1.8), clamp(uVignette, 0.0, 1.0));
@@ -587,33 +539,39 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const tunnelMesh = new THREE.Mesh(tunnel, mat)
     scene.add(tunnelMesh)
 
-    // Safe uniform setters (never read .value)
+    // SAFER uniform setters: recreate uniform object if it goes missing
+    const ensureUniform = (name: keyof typeof uniforms, initial: any) => {
+      const m = matRef.current as THREE.ShaderMaterial | null
+      if (!m) return null
+      const table = m.uniforms as any
+      const u = table?.[name]
+      if (!u || typeof u !== 'object' || u === null || !('value' in u)) {
+        table[name] = { value: initial }
+        return table[name]
+      }
+      return u
+    }
     const setF = (name: keyof typeof uniforms, v: number) => {
-      const m = matRef.current; if (!m || !m.uniforms) return
-      const u = (m.uniforms as any)[name]; if (!u || u.value === undefined || u.value === null) return
+      const u = ensureUniform(name, v); if (!u) return
       u.value = v
     }
     const setV2 = (name: keyof typeof uniforms, x: number, y: number) => {
-      const m = matRef.current; if (!m || !m.uniforms) return
-      const u = (m.uniforms as any)[name]; if (!u) return
-      if (u.value && (u.value as any).isVector2) (u.value as THREE.Vector2).set(x, y)
+      const u = ensureUniform(name, new THREE.Vector2(x, y)); if (!u) return
+      if (u.value && u.value.isVector2) u.value.set(x, y)
       else u.value = new THREE.Vector2(x, y)
     }
     const setV3 = (name: keyof typeof uniforms, x: number, y: number, z: number) => {
-      const m = matRef.current; if (!m || !m.uniforms) return
-      const u = (m.uniforms as any)[name]; if (!u) return
-      if (u.value && (u.value as any).isVector3) (u.value as THREE.Vector3).set(x, y, z)
+      const u = ensureUniform(name, new THREE.Vector3(x, y, z)); if (!u) return
+      if (u.value && u.value.isVector3) u.value.set(x, y, z)
       else u.value = new THREE.Vector3(x, y, z)
     }
     const setColor = (name: keyof typeof uniforms, col: THREE.Color) => {
-      const m = matRef.current; if (!m || !m.uniforms) return
-      const u = (m.uniforms as any)[name]; if (!u) return
-      if (u.value && (u.value as any).isColor) (u.value as THREE.Color).copy(col)
+      const u = ensureUniform(name, col.clone()); if (!u) return
+      if (u.value && u.value.isColor) u.value.copy(col)
       else u.value = col.clone()
     }
     const setTex = (name: keyof typeof uniforms, tex: THREE.Texture | null) => {
-      const m = matRef.current; if (!m || !m.uniforms) return
-      const u = (m.uniforms as any)[name]; if (!u) return
+      const u = ensureUniform(name, tex); if (!u) return
       u.value = tex
     }
 
@@ -659,7 +617,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         gamma: THREE.MathUtils.clamp(T.gamma, 0.85, 1.15),
         vignette: clamp01(T.vignette),
 
-        shapeMode: T.shapeMode,
+        shapeMode: (T.shapeMode === 1 ? 1 : 0) as 0 | 1,
         slices: Math.max(1, Math.min(48, Math.round(T.slices))),
         tileScale: THREE.MathUtils.clamp(T.tileScale, 0.8, 6.0),
         tileRound: clamp01(T.tileRound),
@@ -672,7 +630,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         texRotate: THREE.MathUtils.clamp(T.texRotate, -Math.PI, Math.PI),
         albumTexWarp: THREE.MathUtils.clamp(T.albumTexWarp, 0, 0.8),
 
-        interlaceMode: T.interlaceMode,
+        interlaceMode: (T.interlaceMode === 1 || T.interlaceMode === 2) ? T.interlaceMode : 0,
         interlaceScale: THREE.MathUtils.clamp(T.interlaceScale, 40, 600),
         interlaceStrength: clamp01(T.interlaceStrength),
         fuseBias: clamp01(T.fuseBias),
@@ -695,11 +653,11 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       const spin = 0.28 * kSpeed + 0.14 * high + 0.06 * Math.sin(t * 0.45)
       const zoom = 0.24 * kIntensity + 0.17 * mid + 0.12 * (beat > 0.5 ? 1.0 : 0.0)
 
-      // Advance scroll & crossfade
+      // Progress
       scrollRef.current += dt * (0.24 + 1.05 * kSpeed + 0.48 * loud)
-      crossRef.current = Math.min(1, crossRef.current + dt * 0.35) // ~3s cross
+      crossRef.current = Math.min(1, crossRef.current + dt * 0.35)
 
-      // Push uniforms (SAFE)
+      // Push uniforms (all through ensureUniform)
       setF('uTime', t)
       setV3('uAudio', low, mid, high)
       setF('uLoud', loud)
@@ -870,26 +828,26 @@ function Panel(props: {
             </Row>
           </Card>
 
-          <Card title="Shape (only two: Vortex Prism / Liquid Mosaic)">
+          <Card title="Shape (Vortex Prism / Liquid Mosaic)">
             <Row label="Shape Mode">
               <select
                 value={cfg.shapeMode}
-                onChange={e => onChange(prev => ({ ...prev, shapeMode: Number(e.currentTarget.value) as Cfg['shapeMode'] }))}
+                onChange={e => onChange(prev => ({ ...prev, shapeMode: (Number(e.currentTarget.value) === 1 ? 1 : 0) as Cfg['shapeMode'] }))}
                 style={{ width: '100%', background: '#0f1218', color: '#cfe7ff', border: '1px solid #2b2f3a', borderRadius: 6, padding: '6px' }}
               >
                 <option value={0}>Vortex Prism</option>
                 <option value={1}>Liquid Mosaic</option>
               </select>
             </Row>
-            <Row label={`Slices ${Math.round(cfg.slices)}`}>
+            <Row label={`Slices (prism) ${Math.round(cfg.slices)}`}>
               <input type="range" min={1} max={48} step={1} value={cfg.slices}
                      onChange={onRange(v => onChange(prev => ({ ...prev, slices: Math.max(1, Math.min(48, Math.round(v))) })))} />
             </Row>
-            <Row label={`Tile Scale ${cfg.tileScale.toFixed(2)} (mosaic)`}>
+            <Row label={`Tile Scale (mosaic) ${cfg.tileScale.toFixed(2)}`}>
               <input type="range" min={0.8} max={6} step={0.01} value={cfg.tileScale}
                      onChange={onRange(v => onChange(prev => ({ ...prev, tileScale: Math.max(0.8, Math.min(6, v)) })))} />
             </Row>
-            <Row label={`Tile Round ${cfg.tileRound.toFixed(2)} (mosaic)`}>
+            <Row label={`Tile Round (mosaic) ${cfg.tileRound.toFixed(2)}`}>
               <input type="range" min={0} max={1} step={0.01} value={cfg.tileRound}
                      onChange={onRange(v => onChange(prev => ({ ...prev, tileRound: Math.max(0, Math.min(1, v)) })))} />
             </Row>
@@ -930,26 +888,26 @@ function Panel(props: {
           </Card>
 
           <Card title="Interlacing / Fusion">
-            <Row label="Interlace Mode">
+            <Row label="Mode">
               <select
                 value={cfg.interlaceMode}
-                onChange={e => onChange(prev => ({ ...prev, interlaceMode: Number(e.currentTarget.value) as Cfg['interlaceMode'] }))}
+                onChange={e => onChange(prev => ({ ...prev, interlaceMode: (Number(e.currentTarget.value) === 2 ? 2 : Number(e.currentTarget.value) === 1 ? 1 : 0) as Cfg['interlaceMode'] }))}
                 style={{ width: '100%', background: '#0f1218', color: '#cfe7ff', border: '1px solid #2b2f3a', borderRadius: 6, padding: '6px' }}
               >
-                <option value={0}>Radial (Prism)</option>
+                <option value={0}>Radial (for Prism)</option>
                 <option value={1}>Stripes</option>
                 <option value={2}>Checker</option>
               </select>
             </Row>
-            <Row label={`Interlace Scale ${cfg.interlaceScale.toFixed(0)}`}>
+            <Row label={`Scale ${cfg.interlaceScale.toFixed(0)}`}>
               <input type="range" min={40} max={600} step={1} value={cfg.interlaceScale}
                      onChange={onRange(v => onChange(prev => ({ ...prev, interlaceScale: Math.max(40, Math.min(600, v)) })))} />
             </Row>
-            <Row label={`Interlace Strength ${cfg.interlaceStrength.toFixed(2)}`}>
+            <Row label={`Strength ${cfg.interlaceStrength.toFixed(2)}`}>
               <input type="range" min={0} max={1} step={0.01} value={cfg.interlaceStrength}
                      onChange={onRange(v => onChange(prev => ({ ...prev, interlaceStrength: Math.max(0, Math.min(1, v)) })))} />
             </Row>
-            <Row label={`Fuse Bias (prev↔current) ${cfg.fuseBias.toFixed(2)}`}>
+            <Row label={`Fuse Bias prev↔current ${cfg.fuseBias.toFixed(2)}`}>
               <input type="range" min={0} max={1} step={0.01} value={cfg.fuseBias}
                      onChange={onRange(v => onChange(prev => ({ ...prev, fuseBias: Math.max(0, Math.min(1, v)) })))} />
             </Row>

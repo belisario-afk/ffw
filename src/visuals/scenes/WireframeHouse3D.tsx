@@ -1,5 +1,3 @@
-// WireframeHouse3D: synced & readable lyrics, stable autopilot, safe mosaic.
-
 import React, { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
@@ -105,7 +103,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   })
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Stable refs for autopilot and lyrics sync
+  // stable refs
   const angleRef = useRef(0)
   const syncedRef = useRef<SyncedLine[] | null>(null)
   const currentLineRef = useRef<number>(-1)
@@ -113,9 +111,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   useEffect(() => {
     const token = (auth as any)?.accessToken
-    if (token) {
-      try { setSpotifyTokenProvider(async () => token) } catch {}
-    }
+    if (token) { try { setSpotifyTokenProvider(async () => token) } catch {} }
   }, [auth])
 
   useEffect(() => {
@@ -143,6 +139,32 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   useEffect(() => {
     if (!canvasRef.current) return
 
+    // helpers FIRST (hoisted)
+    function pathPoint(path: 'Circle'|'Ellipse'|'Lemniscate'|'Manual', a: number, r: number) {
+      if (path === 'Ellipse') return new THREE.Vector3(Math.sin(a) * r * 1.08, 0, Math.cos(a) * r * 0.92)
+      if (path === 'Lemniscate') { const s = Math.sin(a), c = Math.cos(a), d = 1 + s*s; return new THREE.Vector3((r * c) / d, 0, (r * s * c) / d) }
+      return new THREE.Vector3(Math.sin(a) * r, 0, Math.cos(a) * r)
+    }
+    function createDarkPlaceholderTexture() {
+      const c = document.createElement('canvas'); c.width = c.height = 64
+      const g = c.getContext('2d')!
+      g.fillStyle = '#0b0e13'; g.fillRect(0,0,64,64)
+      g.fillStyle = '#111722'
+      for (let y=0;y<8;y++) for (let x=0;x<8;x++) if ((x+y)%2===0) g.fillRect(x*8,y*8,8,8)
+      const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; return tex
+    }
+    async function estimateTextureLuminance(tex: THREE.Texture): Promise<number> {
+      const img = tex.image as HTMLImageElement | HTMLCanvasElement | ImageBitmap
+      const w = 32, h = 32
+      const c = document.createElement('canvas'); c.width = w; c.height = h
+      const g = c.getContext('2d'); if (!g) return 0.6
+      try { g.drawImage(img as any, 0, 0, w, h) } catch { return 0.6 }
+      const data = g.getImageData(0, 0, w, h).data
+      let sum = 0
+      for (let i = 0; i < data.length; i += 4) { const r = data[i], gr = data[i + 1], b = data[i + 2]; sum += (0.2126*r + 0.7152*gr + 0.0722*b) / 255 }
+      return sum / (w * h)
+    }
+
     // Scene/camera/renderer
     const scene = new THREE.Scene()
     scene.background = null
@@ -166,6 +188,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       motionBlur: false
     })
 
+    // Controls
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
@@ -197,7 +220,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     grid.position.y = 0
     scene.add(grid)
 
-    // Floor (no ripple)
+    // Floor
     const floorSize = 22
     const floorGeom = new THREE.PlaneGeometry(floorSize, floorSize, 1, 1)
     const floorMat = new THREE.ShaderMaterial({
@@ -239,7 +262,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     mosaicGroup.visible = false
     scene.add(mosaicGroup)
 
-    // Wireframe house
+    // Wireframe
     const mansionPositions = buildMansionEdges()
     const fatGeo = new LineSegmentsGeometry()
     fatGeo.setPositions(mansionPositions)
@@ -279,7 +302,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       scene.add(windowGroup)
     }
 
-    // Optional background
+    // Optional starfield
     let starfield: THREE.Points | null = null
     if (cfg.fx.starfield) {
       const g = new THREE.BufferGeometry()
@@ -300,8 +323,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       scene.add(starfield)
     }
 
-    // Haze
-    const fogSheet = (() => {
+    // Haze (keep a direct ref to material; no lookup in animate)
+    const fogMat = (() => {
       const geom = new THREE.PlaneGeometry(34, 12)
       const mat = new THREE.ShaderMaterial({
         uniforms: { uTime: { value: 0 }, uIntensity: { value: 0 }, uColor: { value: new THREE.Color(0xa9cfff) } },
@@ -318,15 +341,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const mesh = new THREE.Mesh(geom, mat)
       mesh.position.set(0, 3.2, -1.4); mesh.rotation.x = -0.06
       scene.add(mesh)
-      return mesh
+      return mat
     })()
 
     // Lyrics marquee (synced support)
     let marqueeMat: THREE.ShaderMaterial | null = null
     let marqueeTex: THREE.Texture | null = null
-    let marqueeMesh: THREE.Mesh | null = null
     let marqueeText = ''
-    const setupMarquee = (text: string, opacity = 0.75) => {
+    const setupMarquee = (text: string, opacity = 0.8) => {
       const canvas = document.createElement('canvas')
       canvas.width = 2048; canvas.height = 128
       const g = canvas.getContext('2d')!
@@ -370,16 +392,16 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             }`
         })
         const geom = new THREE.PlaneGeometry(4.8, 0.28)
-        marqueeMesh = new THREE.Mesh(geom, marqueeMat)
-        marqueeMesh.position.set(0, 2.48, 1.305)
-        scene.add(marqueeMesh)
+        const mesh = new THREE.Mesh(geom, marqueeMat)
+        mesh.position.set(0, 2.48, 1.305)
+        scene.add(mesh)
       } else {
         marqueeMat.uniforms.tText.value = marqueeTex
         marqueeMat.uniforms.uOpacity.value = opacity
         marqueeMat.needsUpdate = true
       }
     }
-    if (cfg.fx.lyricsMarquee) { marqueeText = 'FFw Visualizer'; setupMarquee(marqueeText, 0.8) }
+    if (cfg.fx.lyricsMarquee) { marqueeText = 'FFw Visualizer'; setupMarquee(marqueeText, 0.85) }
 
     // Covers + lyrics
     let floorTex: THREE.Texture | null = null
@@ -388,7 +410,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
     const loadAlbumCoverAndLyrics = async () => {
       try {
-        const s = await getPlaybackState().catch(() => null) // may 403
+        const s = await getPlaybackState().catch(() => null)
         const id = (s?.item?.id as string) || null
         const url = (s?.item?.album?.images?.[0]?.url as string) || null
         const title = (s?.item?.name as string) || ''
@@ -396,14 +418,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const progress = (s?.progress_ms as number) ?? 0
         const isPlaying = (s?.is_playing as boolean) ?? false
 
-        // Keep a simple playback clock for synced lyrics
         if (id) {
           pbClock.current.playing = !!isPlaying
           pbClock.current.offsetMs = progress
           pbClock.current.startedAt = Date.now() - progress
         }
 
-        // Cover
         if (url) {
           const blobUrl = await cacheAlbumArt(url).catch(() => url)
           const tex = await new Promise<THREE.Texture>((resolve, reject) => {
@@ -416,8 +436,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           tex.generateMipmaps = true
 
           const brightness = await estimateTextureLuminance(tex).catch(() => 0.6)
-          const dim = clamp(1.02 - brightness * 0.45, 0.6, 0.92)
-          floorMat.uniforms.uDim.value = dim
+          floorMat.uniforms.uDim.value = clamp(1.02 - brightness * 0.45, 0.6, 0.92)
           floorMat.uniforms.uOpacity.value = clamp(0.9 - (brightness - 0.6) * 0.25, 0.65, 0.9)
 
           floorTex?.dispose(); floorTex = tex
@@ -432,28 +451,24 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           mosaicGroup.visible = false
         }
 
-        // Lyrics (synced preferred)
         if (cfg.fx.lyricsMarquee && id && id !== currentTrackId) {
           currentTrackId = id
           let line = title && artist ? `${title} — ${artist}` : (title || artist || '')
           let synced: SyncedLine[] | undefined = undefined
           try {
             const lr = await fetchLyrics({ title, artist })
-            if (lr) {
-              line = lr.plain || line
-              synced = lr.synced
-            }
+            if (lr) { line = lr.plain || line; synced = lr.synced }
           } catch {}
           syncedRef.current = synced || null
           currentLineRef.current = -1
-          if (line && line !== marqueeText) { marqueeText = line; setupMarquee(line, 0.85) }
+          if (line && line !== marqueeText) { marqueeText = line; setupMarquee(line, 0.9) }
         }
       } catch {}
     }
     loadAlbumCoverAndLyrics()
     const albumIv = window.setInterval(loadAlbumCoverAndLyrics, 5000)
 
-    // Audio reactivity
+    // Reactivity
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
@@ -486,59 +501,56 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const high = latest?.bands.high ?? 0.08
       const loud = latest?.loudness ?? 0.15
 
-      // Palette modulation (gentle)
+      // colors
       accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.25, 0, 0.25))
       accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.2, 0, 0.2))
       fatMat.color.set(accent); thinMat.color.set(accent)
 
-      // Lines pulse slightly
+      // lines
       const px = cfg.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
       setLinePixels(px)
 
-      // Haze
-      const fogMat = (scene.children.find(c => (c as any).material?.uniforms?.uTime) as THREE.Mesh)?.material as THREE.ShaderMaterial
+      // fog
       if (fogMat?.uniforms?.uTime) {
         fogMat.uniforms.uTime.value = t
         fogMat.uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
         ;(fogMat.uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
       }
 
-      // Mosaic visibility: only when we have covers and enabled
+      // mosaic/floor
       mosaicGroup.visible = !!cfg.fx.mosaicFloor && coverTextures.length > 0
       floorMesh.visible = !mosaicGroup.visible
 
-      // Synced lyrics (if available and playing)
-      if (cfg.fx.lyricsMarquee && marqueeMat && syncedRef.current?.length) {
-        const pb = pbClock.current
-        const ms = pb.playing ? (Date.now() - pb.startedAt) : pb.offsetMs
+      // lyrics (synced if available)
+      if (cfg.fx.lyricsMarquee && marqueeMat) {
         const lines = syncedRef.current
-        // find current line index
-        // Keep current index if still valid; else scan
-        let idx = currentLineRef.current
-        if (idx < 0 || idx >= lines.length || ms < lines[idx].timeMs || (idx < lines.length - 1 && ms >= lines[idx + 1].timeMs)) {
-          // binary search for performance
-          let lo = 0, hi = lines.length - 1, found = 0
-          while (lo <= hi) {
-            const midIdx = (lo + hi) >> 1
-            if (lines[midIdx].timeMs <= ms) { found = midIdx; lo = midIdx + 1 } else { hi = midIdx - 1 }
+        if (lines?.length) {
+          const pb = pbClock.current
+          const ms = pb.playing ? (Date.now() - pb.startedAt) : pb.offsetMs
+          let idx = currentLineRef.current
+          if (idx < 0 || idx >= lines.length || ms < lines[idx].timeMs || (idx < lines.length - 1 && ms >= lines[idx + 1].timeMs)) {
+            // binary search
+            let lo = 0, hi = lines.length - 1, found = 0
+            while (lo <= hi) {
+              const midIdx = (lo + hi) >> 1
+              if (lines[midIdx].timeMs <= ms) { found = midIdx; lo = midIdx + 1 } else { hi = midIdx - 1 }
+            }
+            idx = found
+            if (idx !== currentLineRef.current) {
+              currentLineRef.current = idx
+              const text = lines[idx].text || ''
+              if (text) { marqueeText = text; setupMarquee(text, 0.92) }
+            }
           }
-          idx = found
-          if (idx !== currentLineRef.current) {
-            currentLineRef.current = idx
-            const text = lines[idx].text || ''
-            if (text) { marqueeText = text; setupMarquee(text, 0.9) }
-          }
+          marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.03) % 1
+        } else {
+          marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.05) % 1
+          marqueeMat.uniforms.uOpacity.value = 0.85
         }
-        // slow scroll for visual life
-        marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.03) % 1
-        marqueeMat.uniforms.uTint.value = new THREE.Color().copy(accent)
-      } else if (cfg.fx.lyricsMarquee && marqueeMat) {
-        marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.05) % 1
-        marqueeMat.uniforms.uOpacity.value = 0.8
-        marqueeMat.uniforms.uTint.value = new THREE.Color().copy(accent)
+        ;(marqueeMat.uniforms.uTint.value as THREE.Color).copy(accent)
       }
 
-      // Autopilot camera — always runs (works even without analysis)
+      // camera autopilot (works even with no analysis)
       if (cfg.camera.autoPath && !userInteracting) {
         const baseSpeed = cfg.orbitSpeed
         const audioBoost = 0.4 * (low + mid + high)
@@ -556,34 +568,31 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       comp.composer.render()
     }
 
-    type Path = 'Circle'|'Ellipse'|'Lemniscate'|'Manual'
-    const pathPoint = (path: Path, a: number, r: number) => {
-      if (path === 'Ellipse') return new THREE.Vector3(Math.sin(a) * r * 1.08, 0, Math.cos(a) * r * 0.92)
-      if (path === 'Lemniscate') { const s = Math.sin(a), c = Math.cos(a), d = 1 + s*s; return new THREE.Vector3((r * c) / d, 0, (r * s * c) / d) }
-      return new THREE.Vector3(Math.sin(a) * r, 0, Math.cos(a) * r)
+    animate()
+
+    // cleanup
+    return () => {
+      window.removeEventListener('resize', updateSizes)
+      cancelAnimationFrame(raf)
+      clearInterval(albumIv)
+      offFrame?.()
+      controls.dispose()
+      floorTex?.dispose()
+      marqueeTex?.dispose?.()
+      scene.traverse(obj => {
+        const any = obj as any
+        if (any.geometry?.dispose) any.geometry.dispose()
+        if (any.material) {
+          if (Array.isArray(any.material)) any.material.forEach((m: any) => m?.dispose?.())
+          else any.material?.dispose?.()
+        }
+      })
+      comp.dispose()
+      disposeRenderer()
+      renderer.dispose()
     }
 
-    const createDarkPlaceholderTexture = () => {
-      const c = document.createElement('canvas'); c.width = c.height = 64
-      const g = c.getContext('2d')!
-      g.fillStyle = '#0b0e13'; g.fillRect(0,0,64,64)
-      g.fillStyle = '#111722'
-      for (let y=0;y<8;y++) for (let x=0;x<8;x++) if ((x+y)%2===0) g.fillRect(x*8,y*8,8,8)
-      const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; return tex
-    }
-
-    async function estimateTextureLuminance(tex: THREE.Texture): Promise<number> {
-      const img = tex.image as HTMLImageElement | HTMLCanvasElement | ImageBitmap
-      const w = 32, h = 32
-      const c = document.createElement('canvas'); c.width = w; c.height = h
-      const g = c.getContext('2d'); if (!g) return 0.6
-      try { g.drawImage(img as any, 0, 0, w, h) } catch { return 0.6 }
-      const data = g.getImageData(0, 0, w, h).data
-      let sum = 0
-      for (let i = 0; i < data.length; i += 4) { const r = data[i], gr = data[i + 1], b = data[i + 2]; sum += (0.2126*r + 0.7152*gr + 0.0722*b) / 255 }
-      return sum / (w * h)
-    }
-
+    // build edges helpers
     function buildMansionEdges(): Float32Array {
       const out: number[] = []
       const y0 = 0.0, y1 = 1.2, y2 = 2.35, y3 = 3.5
@@ -679,31 +688,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         }
       }
     }
-
-    // Start render loop
-    animate()
-
-    return () => {
-      cancelAnimationFrame(raf)
-      clearInterval(albumIv)
-      window.removeEventListener('resize', updateSizes)
-      offFrame?.()
-      controls.dispose()
-      floorTex?.dispose()
-      marqueeTex?.dispose?.()
-      scene.traverse(obj => {
-        const any = obj as any
-        if (any.geometry?.dispose) any.geometry.dispose()
-        if (any.material) {
-          if (Array.isArray(any.material)) any.material.forEach((m: any) => m?.dispose?.())
-          else any.material?.dispose?.()
-        }
-      })
-      comp.dispose()
-      disposeRenderer()
-      renderer.dispose()
-    }
-  // Intentionally keep a stable effect; do not re-run on cfg changes except renderScale/bloom/accessibility/auth
+  // keep renderScale/bloom/accessibility/auth as triggers; avoid re-running on cfg changes
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 

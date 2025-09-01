@@ -17,6 +17,7 @@ import { detectGPUInfo } from './utils/gpu'
 import { HousePanel, defaultHouseSettings, type HouseSettings } from './ui/HousePanel'
 import { startReactivityOrchestrator } from './audio/ReactivityOrchestrator'
 import { startFallbackTicker } from './audio/FallbackTicker'
+import TopBar from './ui/TopBar'
 
 type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
 

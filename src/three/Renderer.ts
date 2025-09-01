@@ -19,7 +19,12 @@ export type PostFX = {
 }
 
 export function createRenderer(canvas: HTMLCanvasElement, scale = 1) {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true, powerPreference: 'high-performance' })
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: false,
+    alpha: true,
+    powerPreference: 'high-performance'
+  })
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.toneMapping = THREE.ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.0
@@ -56,21 +61,36 @@ export function createComposer(renderer: THREE.WebGLRenderer, scene: THREE.Scene
 
   let vignettePass: ShaderPass | null = null
   if (post.vignette) {
+    // IMPORTANT: full-screen pass vertex shader must write clip-space directly
+    // Using projectionMatrix*modelViewMatrix*position causes a type error (position is vec3).
     vignettePass = new ShaderPass({
       uniforms: {
         tDiffuse: { value: null },
         strength: { value: post.vignetteStrength }
       },
       vertexShader: /* glsl */`
-        varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*position; }
+        precision highp float;
+        precision highp int;
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          // Fullscreen quad is already in clip space for ShaderPass; write directly
+          gl_Position = vec4(position, 1.0);
+        }
       `,
       fragmentShader: /* glsl */`
-        varying vec2 vUv; uniform sampler2D tDiffuse; uniform float strength;
-        void main(){
-          vec2 uv=vUv-0.5; float r=length(uv)*1.4142; float v=smoothstep(0.0,1.0,r);
-          vec4 col=texture2D(tDiffuse, vUv);
-          col.rgb *= mix(1.0, 1.0 - 0.85*v, clamp(strength,0.0,1.0));
-          gl_FragColor=col;
+        precision highp float;
+        precision highp int;
+        varying vec2 vUv;
+        uniform sampler2D tDiffuse;
+        uniform float strength;
+        void main() {
+          vec2 uv = vUv - 0.5;
+          float r = length(uv) * 1.41421356; // sqrt(2)
+          float v = smoothstep(0.0, 1.0, r);
+          vec4 col = texture2D(tDiffuse, vUv);
+          col.rgb *= mix(1.0, 1.0 - 0.85 * v, clamp(strength, 0.0, 1.0));
+          gl_FragColor = col;
         }
       `
     } as any)
@@ -97,14 +117,13 @@ export function createComposer(renderer: THREE.WebGLRenderer, scene: THREE.Scene
   return {
     composer,
     updatePost(post2: PostFX) {
-      // In this simple scaffold, recreate composer externally if topology changes drastically
       if (bloomPass) {
         bloomPass.strength = post2.bloomStrength
         bloomPass.radius = post2.bloomRadius
         bloomPass.threshold = post2.bloomThreshold
       }
-      if (vignettePass) vignettePass.material.uniforms['strength'].value = post2.vignetteStrength
-      if (filmPass) filmPass.uniforms['grayscale'].value = 0 // keep color
+      if (vignettePass) (vignettePass.material as any).uniforms['strength'].value = post2.vignetteStrength
+      if (filmPass) (filmPass as any).uniforms['grayscale'].value = 0
     },
     onResize,
     dispose() {

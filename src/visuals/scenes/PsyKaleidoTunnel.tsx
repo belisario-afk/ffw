@@ -22,53 +22,69 @@ type Cfg = {
   warp: number
 }
 
-const LS_KEY = 'ffw.kaleido.cfg.advanced.v1'
+type Preset = { name: string } & Cfg
 
-// Optional lyric motes via troika-three-text (loaded lazily)
-let TroikaText: any = null
-async function ensureTroika() {
-  if (TroikaText) return true
-  try {
-    const mod = await import('troika-three-text')
-    TroikaText = (mod as any).Text
-    return true
-  } catch {
-    return false
+const LS_KEY = 'ffw.kaleido.cfg.advanced.v3'
+
+// Hand-tuned presets for strong, trippy looks.
+// Tip: Slices 16–24 for mandalas, 6–10 for chunky petals.
+const PRESETS: Record<string, Preset> = {
+  mandalaSurge: {
+    name: 'Mandala Surge',
+    intensity: 1.1, speed: 0.85, slices: 22, chroma: 0.55,
+    particleDensity: 1.8, exposure: 0.95, albumMix: 0.7, swirl: 0.85, warp: 0.75
+  },
+  petalDrift: {
+    name: 'Petal Drift',
+    intensity: 0.8, speed: 0.55, slices: 10, chroma: 0.35,
+    particleDensity: 1.2, exposure: 0.85, albumMix: 0.5, swirl: 0.55, warp: 0.6
+  },
+  neonBloom: {
+    name: 'Neon Bloom',
+    intensity: 1.2, speed: 0.95, slices: 18, chroma: 0.8,
+    particleDensity: 2.2, exposure: 1.0, albumMix: 0.4, swirl: 0.9, warp: 0.8
+  },
+  hyperWarp: {
+    name: 'Hyper Warp',
+    intensity: 1.35, speed: 1.2, slices: 16, chroma: 0.6,
+    particleDensity: 2.4, exposure: 0.92, albumMix: 0.6, swirl: 1.0, warp: 1.0
+  },
+  albumTrip: {
+    name: 'Album Trip',
+    intensity: 0.95, speed: 0.75, slices: 20, chroma: 0.5,
+    particleDensity: 1.6, exposure: 0.9, albumMix: 0.9, swirl: 0.8, warp: 0.7
   }
 }
 
 export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
-  // Strong refs
+  // Scene refs
   const matRef = useRef<THREE.ShaderMaterial | null>(null)
   const particlesRef = useRef<THREE.Points | null>(null)
   const albumTexRef = useRef<THREE.Texture | null>(null)
-  const lyricGroupRef = useRef<THREE.Group | null>(null)
   const scrollRef = useRef(0)
 
+  // Config + presets
   const [panelOpen, setPanelOpen] = useState(false)
+  const [selectedPreset, setSelectedPreset] = useState<keyof typeof PRESETS>('mandalaSurge')
   const [cfg, setCfg] = useState<Cfg>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}')
-      return {
-        intensity: 0.95,
-        speed: 0.75,
-        slices: 18,         // push higher default for mandala look
-        chroma: 0.5,
-        particleDensity: 1.3,
-        exposure: 0.9,
-        albumMix: 0.65,
-        swirl: 0.75,
-        warp: 0.75,
-        ...saved
-      }
+      return { ...PRESETS.mandalaSurge, ...saved }
     } catch {
-      return { intensity: 0.95, speed: 0.75, slices: 18, chroma: 0.5, particleDensity: 1.3, exposure: 0.9, albumMix: 0.65, swirl: 0.75, warp: 0.75 }
+      return { ...PRESETS.mandalaSurge }
     }
   })
   const cfgRef = useRef(cfg)
-  useEffect(() => { cfgRef.current = cfg; try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)) } catch {} }, [cfg])
+  useEffect(() => {
+    cfgRef.current = cfg
+    try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)) } catch {}
+  }, [cfg])
+
+  // Album palette colors (always used), texture (optional if CORS allows)
+  const albumA = useRef(new THREE.Color('#77d0ff'))
+  const albumB = useRef(new THREE.Color('#b47bff'))
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -83,69 +99,60 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const { renderer, dispose: disposeRenderer } = createRenderer(canvas, quality.renderScale)
     const comp = createComposer(renderer, scene, camera, {
       bloom: quality.bloom,
-      bloomStrength: 0.72,
-      bloomRadius: 0.42,
-      bloomThreshold: 0.55,
+      bloomStrength: 0.76,
+      bloomRadius: 0.44,
+      bloomThreshold: 0.54,
       fxaa: true,
       vignette: true,
-      vignetteStrength: 0.62,
+      vignetteStrength: 0.64,
       filmGrain: false,
       filmGrainStrength: 0.0,
       motionBlur: false
     })
 
-    // Guards
     let running = true
     let disposed = false
 
-    // Audio frame + optional chorus and lyrics
+    // Audio frames
     let latest: ReactiveFrame | null = null
-    const offFrame = reactivityBus.on('frame', f => { latest = f as any })
+    const offFrame = reactivityBus.on('frame', f => { latest = f })
 
+    // Track polling to update album palette/texture (robust against CORS)
     let lastTrackId: string | null = null
-
-    // Album palette
-    const albumA = new THREE.Color('#77d0ff')
-    const albumB = new THREE.Color('#b47bff')
-
     function quantizeTop2(imageData: Uint8ClampedArray): [THREE.Color, THREE.Color] {
-      // 6x6x6 RGB histogram
+      // small histogram to find two dominant colors
       const bins = new Map<number, number>()
       const toBin = (r: number, g: number, b: number) => {
-        const R = Math.min(5, Math.floor(r / 43))
-        const G = Math.min(5, Math.floor(g / 43))
-        const B = Math.min(5, Math.floor(b / 43))
+        const R = Math.min(5, Math.floor(r / 43)), G = Math.min(5, Math.floor(g / 43)), B = Math.min(5, Math.floor(b / 43))
         return (R << 10) | (G << 5) | B
       }
       for (let i = 0; i < imageData.length; i += 4) {
-        const a = imageData[i + 3]
-        if (a < 24) continue
+        const a = imageData[i + 3]; if (a < 24) continue
         const key = toBin(imageData[i], imageData[i + 1], imageData[i + 2])
         bins.set(key, (bins.get(key) || 0) + 1)
       }
-      const sorted = [...bins.entries()].sort((a, b) => b[1] - a[1])
       const decode = (bin: number) => {
         const R = ((bin >> 10) & 0x1f) * 43 + 21
         const G = ((bin >> 5) & 0x1f) * 43 + 21
         const B = (bin & 0x1f) * 43 + 21
         return new THREE.Color(R / 255, G / 255, B / 255)
       }
+      const sorted = [...bins.entries()].sort((a, b) => b[1] - a[1])
       const c1 = sorted[0] ? decode(sorted[0][0]) : new THREE.Color('#77d0ff')
-      let c2 = sorted[1] ? decode(sorted[1][0]) : c1.clone().offsetHSL(0.18, 0.2, 0)
+      let c2 = sorted[1] ? decode(sorted[1][0]) : c1.clone().offsetHSL(0.2, 0.2, 0)
       if (c1.distanceTo(c2) < 0.15) c2.offsetHSL(0.25, 0.3, 0)
       return [c1, c2]
     }
 
-    async function loadAlbum() {
+    async function loadAlbumFromPlayback() {
       try {
         const s = await getPlaybackState().catch(() => null)
         const id = (s?.item?.id as string) || null
-        if (!id || id === lastTrackId) return
-        lastTrackId = id
         const url = (s?.item?.album?.images?.[0]?.url as string) || ''
-        if (!url) return
+        if (!id || !url || id === lastTrackId) return
+        lastTrackId = id
 
-        // Try CORS
+        // Load image (prefer CORS image to allow canvas sampling)
         const img = await new Promise<HTMLImageElement>((resolve, reject) => {
           const im = new Image()
           im.crossOrigin = 'anonymous'
@@ -153,7 +160,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           im.onerror = reject
           im.src = url
         }).catch(async () => {
-          // Fallback: fetch blob
           const blob = await fetch(url).then(r => r.blob())
           const obj = URL.createObjectURL(blob)
           return await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -164,51 +170,56 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           })
         })
 
-        // Compute palette
+        // Compute dominant colors
         const c = document.createElement('canvas'); c.width = 64; c.height = 64
-        const g = c.getContext('2d'); if (!g) return
-        g.drawImage(img, 0, 0, 64, 64)
-        const data = g.getImageData(0, 0, 64, 64).data
-        const [cA, cB] = quantizeTop2(data)
-        albumA.copy(cA)
-        albumB.copy(cB)
-        setColor('uAlbumA', albumA)
-        setColor('uAlbumB', albumB)
+        const g = c.getContext('2d'); if (g) {
+          g.drawImage(img, 0, 0, 64, 64)
+          const data = g.getImageData(0, 0, 64, 64).data
+          const [cA, cB] = quantizeTop2(data)
+          albumA.current.copy(cA)
+          albumB.current.copy(cB)
+          setColor('uAlbumA', albumA.current)
+          setColor('uAlbumB', albumB.current)
+        }
 
-        // Load texture
-        const loader = new THREE.TextureLoader()
-        loader.setCrossOrigin('anonymous' as any)
-        const tex = await new Promise<THREE.Texture>((resolve, reject) => {
-          loader.load(url, t => resolve(t), undefined, reject)
-        })
-        tex.colorSpace = THREE.SRGBColorSpace
-        tex.wrapS = tex.wrapT = THREE.RepeatWrapping
-        tex.minFilter = THREE.LinearMipmapLinearFilter
-        tex.magFilter = THREE.LinearFilter
-        tex.generateMipmaps = true
-        albumTexRef.current?.dispose()
-        albumTexRef.current = tex
-        setTex('tAlbum', tex)
-        setF('uHasAlbum', 1.0)
+        // Load texture (best-effort; palette still works without it)
+        try {
+          const loader = new THREE.TextureLoader()
+          loader.setCrossOrigin('anonymous' as any)
+          const tex = await new Promise<THREE.Texture>((resolve, reject) => {
+            loader.load(url, t => resolve(t), undefined, reject)
+          })
+          tex.colorSpace = THREE.SRGBColorSpace
+          tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+          tex.minFilter = THREE.LinearMipmapLinearFilter
+          tex.magFilter = THREE.LinearFilter
+          tex.generateMipmaps = true
+          albumTexRef.current?.dispose()
+          albumTexRef.current = tex
+          setTex('tAlbum', tex)
+          setF('uHasAlbum', 1.0)
+        } catch {
+          setF('uHasAlbum', 0.0)
+        }
       } catch {
         // ignore
       }
     }
 
-    loadAlbum()
-    const albumIv = window.setInterval(loadAlbum, 7000)
+    loadAlbumFromPlayback()
+    const albumIv = window.setInterval(loadAlbumFromPlayback, 6000)
 
-    // Geometry
+    // Geometry: kaleidoscopic tunnel
     const radius = 14
     const tunnelLen = 240
-    const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 400, 1, true)
+    const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 420, 1, true)
     tunnel.rotateZ(Math.PI * 0.5)
 
     // Uniforms
     const uniforms = {
       uTime: { value: 0.0 },
       uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
-      uLoud: { value: 0.15 },
+      uLoud: { value: 0.12 },
       uBeat: { value: 0.0 },
 
       uSlices: { value: Math.max(1, Math.round(cfgRef.current.slices)) },
@@ -224,8 +235,9 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       uSafe: { value: (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0 },
       uContrastBoost: { value: accessibility.highContrast ? 1.0 : 0.0 },
 
-      uAlbumA: { value: albumA.clone() },
-      uAlbumB: { value: albumB.clone() },
+      // Album adaptation (palette always used, texture best-effort)
+      uAlbumA: { value: albumA.current.clone() },
+      uAlbumB: { value: albumB.current.clone() },
       uAlbumMix: { value: cfgRef.current.albumMix },
       uHasAlbum: { value: 0.0 },
       tAlbum: { value: null as THREE.Texture | null }
@@ -259,8 +271,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         uniform float uScroll;
         uniform float uSpinAmt;
         uniform float uZoomAmt;
-        uniform float uSwirl; // 0..1
-        uniform float uWarp;  // 0..1
+        uniform float uSwirl;
+        uniform float uWarp;
 
         uniform float uSafe;
         uniform float uContrastBoost;
@@ -321,12 +333,14 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         void main(){
           float time = uTime;
 
+          // breathing spin/zoom with swirl
           vec2 uv = vUv;
-          float spin = (0.12 + 0.55*uSwirl) * time + uSpinAmt;
+          float spin = (0.14 + 0.55*uSwirl) * time + uSpinAmt;
           uv = rotate2D(uv, spin);
           float zoomA = clamp(0.12 + 0.3*uZoomAmt, 0.0, 0.55);
           uv = mix(uv, (uv - 0.5) * (1.0 - zoomA) + 0.5, 0.8);
 
+          // wrap and kaleido fold
           uv.y = fract(uv.y - time*0.048 - uScroll);
           uv.x = foldK(uv.x, uSlices);
 
@@ -335,10 +349,12 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           vec2 warpVec = vec2(fbm(uv*2.6 + time*0.11), fbm(uv*2.8 - time*0.13));
           uv += (warpVec - 0.5) * (0.28 * w);
 
+          // structured fields
           float rings = sin((uv.y*38.0 + fbm(uv*3.1)*8.0) - time*7.5 * (0.6 + 0.8*uLoud));
           float spokes = sin((uv.x*66.0 + fbm(uv*3.4)*9.0) + time*5.0 * (0.4 + 0.9*uAudio.z));
           float field = smoothstep(-1.0, 1.0, rings * spokes);
 
+          // album-driven palette (always available)
           vec3 a = mix(vec3(0.30,0.28,0.46), uAlbumA, 0.78);
           vec3 b = mix(vec3(0.50,0.54,0.46), normalize(uAlbumB + 0.001), 0.68);
           vec3 c = mix(vec3(0.85,0.60,0.45), vec3(0.72,0.92,0.64), 0.4);
@@ -349,7 +365,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           vec3 colB = palette(fract(field*0.5 + hueShift*1.45), b, a, c, d);
           vec3 col = mix(colA, colB, 0.45 + 0.25*uAudio.y);
 
-          // album infusion
+          // album texture infusion (best effort)
           if (uHasAlbum > 0.5) {
             vec2 tuv = uv;
             float swirl = (uv.x - 0.5)*(uv.y - 0.5);
@@ -358,11 +374,15 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
             vec3 texCol = texture2D(tAlbum, tuv * vec2(2.0, 4.0)).rgb;
             float mixAmt = clamp(uAlbumMix * (0.45 + 0.9*uAudio.y + 0.55*uAudio.z), 0.0, 0.9);
             col = mix(col, texCol, mixAmt);
+          } else {
+            // If no texture, still bias colors toward the album palette
+            vec3 palCol = mix(uAlbumA, uAlbumB, 0.5 + 0.3*sin(time*0.2));
+            float mixAmt = clamp(uAlbumMix * (0.35 + 0.7*uAudio.y), 0.0, 0.75);
+            col = mix(col, palCol, mixAmt);
           }
 
-          // chroma
+          // chromatic fringing
           float chromAmt = uChroma * (0.4 + 0.6*uIntensity);
-          // reduce chroma if high-contrast or epilepsy-safe
           chromAmt *= mix(1.0, 0.5, uSafe);
           chromAmt *= mix(1.0, 0.7, uContrastBoost);
           col = aberrate(uv, chromAmt, col, time);
@@ -386,15 +406,9 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const tunnelMesh = new THREE.Mesh(tunnel, mat)
     scene.add(tunnelMesh)
 
-    // Lyric motes group
-    const motes = new THREE.Group()
-    motes.name = 'lyric_motes'
-    lyricGroupRef.current = motes
-    scene.add(motes)
-
-    // Particles
+    // Particles (streaks rushing by)
     const makeParticles = (density: number) => {
-      const count = Math.floor(2600 * THREE.MathUtils.clamp(density, 0.1, 3.0))
+      const count = Math.floor(2400 + 1200 * THREE.MathUtils.clamp(density, 0.1, 3.0))
       const geo = new THREE.BufferGeometry()
       const positions = new Float32Array(count * 3)
       const speeds = new Float32Array(count)
@@ -410,7 +424,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
       geo.setAttribute('speed', new THREE.BufferAttribute(speeds, 1))
       const pm = new THREE.PointsMaterial({
-        color: 0xe5f0ff, size: 0.038, sizeAttenuation: true, transparent: true,
+        color: 0xe5f0ff, size: 0.04, sizeAttenuation: true, transparent: true,
         opacity: 0.65, depthWrite: false, blending: THREE.AdditiveBlending
       })
       const pts = new THREE.Points(geo, pm)
@@ -455,44 +469,9 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     window.addEventListener('resize', onResize)
     onResize()
 
-    // Lyric motes helpers
-    let lastLyricAt = 0
-    const lyricOff = reactivityBus.on?.('lyrics', async (line: string) => {
-      if (!line) return
-      if (!(await ensureTroika())) return
-      const now = performance.now()
-      if (now - lastLyricAt < 800) return
-      lastLyricAt = now
-      const words = (line || '').split(/\s+/).filter(Boolean).slice(0, 4)
-      for (const w of words) spawnLyricMote(w)
-    })
-
-    function spawnLyricMote(word: string) {
-      if (!TroikaText || !lyricGroupRef.current) return
-      const text = new TroikaText()
-      text.text = word
-      text.fontSize = 0.9
-      text.color = 0xffffff
-      text.maxWidth = 6
-      text.anchorX = 'center'
-      text.anchorY = 'middle'
-      text.depthOffset = -1
-      text.material.transparent = true
-      text.material.opacity = 0.9
-      const theta = Math.random() * Math.PI * 2
-      const r = radius * (0.75 + Math.random() * 0.15)
-      text.position.set(Math.cos(theta) * r, Math.sin(theta) * r, -Math.random() * (tunnelLen * 0.8))
-      text.rotation.z = theta + Math.PI * 0.5
-      text.userData = { life: 1.0, speed: 6 + Math.random() * 10 }
-      text.sync?.()
-      lyricGroupRef.current.add(text)
-    }
-
-    // Animate
+    // Animate (smoothed params; chorus pulse heuristic)
     const clock = new THREE.Clock()
     let raf = 0
-
-    // smoothed params
     let sIntensity = cfgRef.current.intensity
     let sSpeed = cfgRef.current.speed
     let sExposure = cfgRef.current.exposure
@@ -502,10 +481,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     let sSwirl = cfgRef.current.swirl
     let sWarp = cfgRef.current.warp
 
-    // simple chorus detector (fallback): rising loudness + high mids over a window
     const loudBuf: number[] = []
     const midBuf: number[] = []
-    let chorusActive = false
     let chorusT = 0
 
     const animate = () => {
@@ -513,7 +490,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       if (!running || disposed) return
 
       const dt = Math.min(0.05, clock.getDelta())
-      const t = clock.elapsedTime
+      const t = clock.getElapsedTime()
 
       // Audio snapshot
       const low = latest?.bands?.low ?? 0.06
@@ -521,34 +498,28 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       const high = latest?.bands?.high ?? 0.06
       const loud = latest?.loudness ?? 0.12
       const beat = latest?.beat ? 1.0 : 0.0
-      const isChorusFlag = (latest as any)?.chorusActive ?? (latest as any)?.sections?.current?.label === 'chorus' ?? false
 
-      // Chorus heuristic if no flag
+      // Chorus pulse heuristic
       loudBuf.push(loud); if (loudBuf.length > 60) loudBuf.shift()
       midBuf.push(mid); if (midBuf.length > 60) midBuf.shift()
       const avgL = loudBuf.reduce((a, b) => a + b, 0) / (loudBuf.length || 1)
       const avgM = midBuf.reduce((a, b) => a + b, 0) / (midBuf.length || 1)
-      if (isChorusFlag || (loud > avgL * 1.25 && mid > avgM * 1.25)) {
-        chorusActive = true
-        chorusT = 0.8 // seconds of pulse
-      } else {
-        chorusT = Math.max(0, chorusT - dt)
-        if (chorusT === 0) chorusActive = false
-      }
-      const chorusPulse = chorusActive ? (0.5 + 0.5 * Math.sin(t * 6.0)) : 0.0
+      if (loud > avgL * 1.25 && mid > avgM * 1.25) chorusT = 0.8
+      else chorusT = Math.max(0, chorusT - dt)
+      const chorusPulse = chorusT > 0 ? (0.5 + 0.5 * Math.sin(t * 6.0)) : 0.0
 
-      // Safety + cfg clamps (targets)
+      // Safety + targets
       const safe = (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0
       const targetIntensity = THREE.MathUtils.clamp(cfgRef.current.intensity, 0, 1.6)
       const targetSpeed = THREE.MathUtils.clamp(cfgRef.current.speed, 0, 2.0)
       const targetExposure = THREE.MathUtils.clamp(cfgRef.current.exposure, 0, 1.4)
-      const targetSlices = Math.max(1, Math.round(cfgRef.current.slices))
+      const targetSlices = Math.max(1, Math.min(32, Math.round(cfgRef.current.slices)))
       const targetChroma = THREE.MathUtils.clamp(cfgRef.current.chroma, 0, 1)
       const targetAlbumMix = THREE.MathUtils.clamp(cfgRef.current.albumMix, 0, 1)
       const targetSwirl = THREE.MathUtils.clamp(cfgRef.current.swirl, 0, 1)
       const targetWarp = THREE.MathUtils.clamp(cfgRef.current.warp, 0, 1)
 
-      // smooth toward targets
+      // Smooth toward targets
       const k = 1 - Math.pow(0.0001, dt)
       sIntensity += (targetIntensity - sIntensity) * k
       sSpeed += (targetSpeed - sSpeed) * k
@@ -559,19 +530,18 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       sSwirl += (targetSwirl - sSwirl) * k
       sWarp += (targetWarp - sWarp) * k
 
-      // safety caps
+      // Safety caps
       const kIntensity = THREE.MathUtils.lerp(sIntensity, Math.min(sIntensity, 0.6), safe)
       const kSpeedBase = THREE.MathUtils.lerp(sSpeed, Math.min(sSpeed, 0.4), safe)
 
-      // Verse/Chorus pulses: modulate speed/slices on chorus
-      const kSpeed = kSpeedBase + (chorusPulse * 0.25)
+      const kSpeed = kSpeedBase + chorusPulse * 0.25
       const kSlices = Math.max(1, Math.round(sSlices + chorusPulse * 4))
 
-      // spin/zoom driven by audio and speed
-      const spin = 0.3 * kSpeed + 0.16 * high + 0.07 * Math.sin(t * 0.45)
-      const zoom = 0.26 * kIntensity + 0.17 * mid + 0.12 * (beat > 0.5 ? 1.0 : 0.0)
+      // Spin/zoom driven by audio
+      const spin = 0.28 * kSpeed + 0.14 * high + 0.06 * Math.sin(t * 0.45)
+      const zoom = 0.24 * kIntensity + 0.17 * mid + 0.12 * (beat > 0.5 ? 1.0 : 0.0)
 
-      // uniforms safely
+      // Push uniforms safely
       setF('uTime', t)
       setV3('uAudio', low, mid, high)
       setF('uLoud', loud)
@@ -580,7 +550,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       setF('uContrastBoost', accessibility.highContrast ? 1.0 : 0.0)
       setF('uSlices', kSlices)
       setF('uIntensity', kIntensity)
-      // reduce chroma if safe/high-contrast already handled in shader, but clamp here too
       setF('uChroma', THREE.MathUtils.clamp(sChroma, 0, 1))
       setF('uExposure', THREE.MathUtils.clamp(sExposure, 0, 1.4))
       setF('uSpinAmt', spin)
@@ -588,14 +557,14 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       setF('uSwirl', THREE.MathUtils.clamp(sSwirl, 0, 1))
       setF('uWarp', THREE.MathUtils.clamp(sWarp, 0, 1))
       setF('uAlbumMix', THREE.MathUtils.clamp(sAlbumMix, 0, 1))
-      setColor('uAlbumA', albumA)
-      setColor('uAlbumB', albumB)
+      setColor('uAlbumA', albumA.current)
+      setColor('uAlbumB', albumB.current)
 
-      // scroll
+      // Scroll
       scrollRef.current += dt * (0.26 + 1.1 * kSpeed + 0.5 * loud)
       setF('uScroll', scrollRef.current)
 
-      // Particles
+      // Particles motion
       const pts = particlesRef.current
       if (pts) {
         const pos = pts.geometry.getAttribute('position') as THREE.BufferAttribute | undefined
@@ -608,9 +577,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
             if (z > 2.0) {
               const theta = Math.random() * Math.PI * 2
               const r = radius * (0.9 + Math.random() * 0.25)
-              const x = Math.cos(theta) * r
-              const y = Math.sin(theta) * r
-              pos.setXYZ(i, x, y, -tunnelLen)
+              pos.setXYZ(i, Math.cos(theta) * r, Math.sin(theta) * r, -tunnelLen)
             } else {
               pos.setZ(i, z)
             }
@@ -619,25 +586,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         }
       }
 
-      // Lyric motes drift
-      if (lyricGroupRef.current) {
-        const group = lyricGroupRef.current
-        for (let i = group.children.length - 1; i >= 0; i--) {
-          const text: any = group.children[i]
-          const ud = text.userData || (text.userData = { life: 1, speed: 8 })
-          const lifeDecay = 0.2 + 0.6 * (kSpeed * 0.4 + loud * 0.3)
-          ud.life -= dt * lifeDecay
-          text.position.z += dt * (ud.speed * (0.6 + 0.8 * kSpeed))
-          text.material.opacity = Math.max(0, Math.min(0.9, ud.life))
-          if (text.position.z > 2.5 || ud.life <= 0) {
-            group.remove(text)
-            text.dispose?.()
-          }
-        }
-      }
-
       // Rebuild particles if density changed a lot
-      const desired = Math.floor(2600 * THREE.MathUtils.clamp(cfgRef.current.particleDensity, 0.1, 3.0))
+      const desired = Math.floor(2400 + 1200 * THREE.MathUtils.clamp(cfgRef.current.particleDensity, 0.1, 3.0))
       const current = (particlesRef.current?.geometry.getAttribute('position') as THREE.BufferAttribute | undefined)?.count ?? desired
       if (Math.abs(desired - current) > 700) {
         if (particlesRef.current) {
@@ -662,13 +612,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       cancelAnimationFrame(raf)
       window.clearInterval(albumIv)
       offFrame?.()
-      lyricOff?.()
 
-      if (lyricGroupRef.current) {
-        lyricGroupRef.current.children.forEach((c: any) => c.dispose?.())
-        scene.remove(lyricGroupRef.current)
-        lyricGroupRef.current = null
-      }
       if (particlesRef.current) {
         scene.remove(particlesRef.current)
         particlesRef.current.geometry?.dispose()
@@ -697,13 +641,29 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   return (
     <div data-visual="psy-kaleido" style={{ position: 'relative', width: '100%', height: '100%' }}>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} aria-label="Psychedelic Kaleido Tunnel" />
-      <Panel open={panelOpen} cfg={cfg} onToggle={() => setPanelOpen(o => !o)} onChange={setCfg} />
+      <Panel
+        open={panelOpen}
+        cfg={cfg}
+        selectedPreset={selectedPreset}
+        onSelectPreset={setSelectedPreset}
+        onApplyPreset={() => setCfg(PRESETS[selectedPreset])}
+        onToggle={() => setPanelOpen(o => !o)}
+        onChange={setCfg}
+      />
     </div>
   )
 }
 
-function Panel(props: { open: boolean; cfg: Cfg; onToggle: () => void; onChange: (u: (p: Cfg) => Cfg | Cfg) => void }) {
-  const { open, cfg, onToggle, onChange } = props
+function Panel(props: {
+  open: boolean
+  cfg: Cfg
+  selectedPreset: keyof typeof PRESETS
+  onSelectPreset: (k: keyof typeof PRESETS) => void
+  onApplyPreset: () => void
+  onToggle: () => void
+  onChange: (u: (p: Cfg) => Cfg | Cfg) => void
+}) {
+  const { open, cfg, onToggle, onChange, selectedPreset, onSelectPreset, onApplyPreset } = props
   const Row = (p: { label: string; children: React.ReactNode }) => (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, margin: '6px 0' }}>
       <label style={{ fontSize: 12, opacity: 0.9 }}>{p.label}</label>
@@ -721,8 +681,7 @@ function Panel(props: { open: boolean; cfg: Cfg; onToggle: () => void; onChange:
     background: 'rgba(16,18,22,0.8)', color: '#cfe7ff', cursor: 'pointer'
   }
   const onRange = (cb: (v: number) => void) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = Number(e.currentTarget.value)
-    cb(v)
+    const v = Number(e.currentTarget.value); cb(v)
   }
 
   return (
@@ -731,8 +690,26 @@ function Panel(props: { open: boolean; cfg: Cfg; onToggle: () => void; onChange:
         {open ? 'Close Psy Settings' : 'Psy Settings'}
       </button>
       {open && (
-        <div style={{ width: 340, marginTop: 8, padding: 12, border: '1px solid #2b2f3a', borderRadius: 8,
-          background: 'rgba(10,12,16,0.92)', color: '#e6f0ff', fontFamily: 'system-ui, sans-serif', fontSize: 12, lineHeight: 1.4 }}>
+        <div style={{
+          width: 360, marginTop: 8, padding: 12, border: '1px solid #2b2f3a', borderRadius: 8,
+          background: 'rgba(10,12,16,0.92)', color: '#e6f0ff', fontFamily: 'system-ui, sans-serif', fontSize: 12, lineHeight: 1.4
+        }}>
+          <Card title="Presets">
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <select
+                value={selectedPreset}
+                onChange={e => onSelectPreset(e.currentTarget.value as keyof typeof PRESETS)}
+                style={{ background: '#0f1218', color: '#cfe7ff', border: '1px solid #2b2f3a', borderRadius: 6, padding: '6px' }}
+              >
+                {Object.entries(PRESETS).map(([key, p]) => (
+                  <option key={key} value={key}>{p.name}</option>
+                ))}
+              </select>
+              <button onClick={onApplyPreset} style={btnStyle}>Apply</button>
+              <button onClick={() => onChange(PRESETS.albumTrip)} style={btnStyle}>Album Boost</button>
+            </div>
+          </Card>
+
           <Card title="Drive">
             <Row label={`Intensity: ${cfg.intensity.toFixed(2)}`}>
               <input type="range" min={0} max={1.6} step={0.01} value={cfg.intensity}
@@ -747,6 +724,7 @@ function Panel(props: { open: boolean; cfg: Cfg; onToggle: () => void; onChange:
                      onChange={onRange(v => onChange(prev => ({ ...prev, exposure: Math.max(0, Math.min(1.4, v || 0.9)) })))} />
             </Row>
           </Card>
+
           <Card title="Kaleidoscope & Color">
             <Row label={`Slices: ${Math.round(cfg.slices)}`}>
               <input type="range" min={1} max={32} step={1} value={cfg.slices}
@@ -761,6 +739,7 @@ function Panel(props: { open: boolean; cfg: Cfg; onToggle: () => void; onChange:
                      onChange={onRange(v => onChange(prev => ({ ...prev, albumMix: Math.max(0, Math.min(1, v || 0.65)) })))} />
             </Row>
           </Card>
+
           <Card title="Warp">
             <Row label={`Swirl: ${cfg.swirl.toFixed(2)}`}>
               <input type="range" min={0} max={1} step={0.01} value={cfg.swirl}
@@ -771,28 +750,21 @@ function Panel(props: { open: boolean; cfg: Cfg; onToggle: () => void; onChange:
                      onChange={onRange(v => onChange(prev => ({ ...prev, warp: Math.max(0, Math.min(1, v || 0.75)) })))} />
             </Row>
           </Card>
+
           <Card title="Particles">
             <Row label={`Density: ${cfg.particleDensity.toFixed(2)}`}>
               <input type="range" min={0.2} max={3.0} step={0.01} value={cfg.particleDensity}
                      onChange={onRange(v => onChange(prev => ({ ...prev, particleDensity: Math.max(0.2, Math.min(3.0, v || 1.3)) })))} />
             </Row>
           </Card>
-          <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'space-between' }}>
-            <button
-              onClick={() => onChange({ intensity: 0.95, speed: 0.75, slices: 18, chroma: 0.5, particleDensity: 1.3, exposure: 0.9, albumMix: 0.65, swirl: 0.75, warp: 0.75 })}
-              style={btnStyle}
-            >
-              Reset
-            </button>
-            <button onClick={onToggle} style={btnStyle}>Close</button>
-          </div>
+
           <div style={{ marginTop: 8, opacity: 0.75 }}>
             Tips:
             <ul style={{ paddingLeft: 18, margin: 0 }}>
-              <li>Slices 16–24 for mandala symmetry; lower for chunky petals</li>
-              <li>Chroma adds color fringe; it auto-dials down in epilepsy/high-contrast</li>
+              <li>Slices 16–24 for wild mandalas; lower for chunky petals</li>
+              <li>Chroma adds color fringing; it auto-dials down in epilepsy/high-contrast</li>
               <li>Higher particle density = stronger rush (desktop GPUs handle 2–3x)</li>
-              <li>Chorus pulses boost speed/slices briefly for emphasis</li>
+              <li>Speed and slices briefly pulse on big sections for emphasis</li>
             </ul>
           </div>
         </div>

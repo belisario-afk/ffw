@@ -9,12 +9,13 @@ import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
 import type { AuthState } from '../../auth/token'
 import { getPlaybackState } from '../../spotify/api'
 import { cacheAlbumArt } from '../../utils/idb'
-import { ensurePlayerConnected, hasSpotifyTokenProvider } from '../../spotify/player'
+import { ensurePlayerConnected, hasSpotifyTokenProvider, setSpotifyTokenProvider } from '../../spotify/player'
 
 type Props = {
   auth: AuthState | null
   quality: { renderScale: 1 | 1.25 | 1.5 | 1.75 | 2, msaa: 0 | 2 | 4 | 8, bloom: boolean, motionBlur: boolean }
   accessibility: { epilepsySafe: boolean, reducedMotion: boolean, highContrast: boolean }
+  // settings prop is still accepted but this component now manages its own panel/state (used as initial)
   settings?: any
 }
 
@@ -44,6 +45,7 @@ type LocalCfg = {
     autoPath: boolean
     target: { x:number, y:number, z:number }
   }
+  // FX toggles
   fx: {
     beams: boolean
     groundRings: boolean
@@ -52,10 +54,8 @@ type LocalCfg = {
     chimneySmoke: boolean
     starfield: boolean
     bloomBreath: boolean
-    // New
     lyricsMarquee: boolean
     mosaicFloor: boolean
-    keyTint: boolean
   }
 }
 
@@ -99,15 +99,13 @@ function defaults(initial?: any): LocalCfg {
       chimneySmoke: initial?.fx?.chimneySmoke ?? true,
       starfield: initial?.fx?.starfield ?? true,
       bloomBreath: initial?.fx?.bloomBreath ?? true,
-      // New defaults
       lyricsMarquee: initial?.fx?.lyricsMarquee ?? true,
-      mosaicFloor: initial?.fx?.mosaicFloor ?? true,
-      keyTint: initial?.fx?.keyTint ?? true
+      mosaicFloor: initial?.fx?.mosaicFloor ?? true
     }
   }
 }
 
-export default function WireframeHouse3D({ quality, accessibility, settings }: Props) {
+export default function WireframeHouse3D({ auth, quality, accessibility, settings }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [cfg, setCfg] = useState<LocalCfg>(() => {
     try {
@@ -118,7 +116,16 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
   })
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Spotify: only attempt to connect if a token provider exists
+  // Wire Spotify token provider from props.auth if available (removes "provider not set" and helps device appear)
+  useEffect(() => {
+    if (auth && (auth as any).accessToken) {
+      try {
+        setSpotifyTokenProvider(async () => (auth as any).accessToken as string)
+      } catch {}
+    }
+  }, [auth])
+
+  // Keep Spotify device listed without touching volume (guarded)
   useEffect(() => {
     if (hasSpotifyTokenProvider()) {
       ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: false })
@@ -214,7 +221,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     grid.position.y = 0
     scene.add(grid)
 
-    // Album floor — single cover shader
+    // Album floor — ShaderMaterial: album texture + dim + ripple
     const floorSize = 22
     const floorGeom = new THREE.PlaneGeometry(floorSize, floorSize, 1, 1)
     const floorMat = new THREE.ShaderMaterial({
@@ -245,6 +252,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         uniform float uRippleAmp, uRippleRadius, uRippleDecay;
         void main() {
           vec2 uv = vUv;
+          // Ripple: radial from center
           if (uRippleAmp > 0.0) {
             vec2 p = uv - 0.5;
             float r = length(p);
@@ -337,7 +345,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       scene.add(starfield)
     }
 
-    // Party beams
+    // Party beams (additive rotating planes)
     const beamGroup = new THREE.Group()
     if (cfg.fx.beams) {
       const beamGeom = new THREE.PlaneGeometry(0.08, 7.5)
@@ -357,7 +365,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       scene.add(beamGroup)
     }
 
-    // Ground pulse rings
+    // Ground pulse rings (spawn on beat)
     const rings: THREE.Mesh[] = []
     let ringPool: THREE.Mesh[] = []
     const emitRing = () => {
@@ -381,7 +389,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       }
     }
 
-    // Windows (emissive planes)
+    // Windows (emissive planes) + optional EQ behavior
     const windowGroup = new THREE.Group()
     const windowMeta: { mesh: THREE.Mesh, story: number, col: number, side: 'front'|'back'|'left'|'right' }[] = []
     {
@@ -398,7 +406,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       scene.add(windowGroup)
     }
 
-    // Chimney smoke
+    // Chimney smoke (lightweight particles)
     const smokeGroup = new THREE.Group()
     let smokeTex: THREE.Texture | null = createSoftCircleTexture()
     const smokeEmitters = [
@@ -528,19 +536,23 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         })
         const geom = new THREE.PlaneGeometry(3.8, 0.22)
         marqueeMesh = new THREE.Mesh(geom, marqueeMat)
-        marqueeMesh.position.set(0, 2.48, 1.305) // just in front of balcony rail/front face
+        marqueeMesh.position.set(0, 2.48, 1.305)
         scene.add(marqueeMesh)
       } else {
         marqueeMat.uniforms.tText.value = marqueeTex
         marqueeMat.needsUpdate = true
       }
     }
+    // Ensure marquee exists even without Spotify/token (fixes "no lyrics showing")
+    if (cfg.fx.lyricsMarquee) {
+      marqueeText = 'FFw Visualizer'
+      setupMarquee(marqueeText)
+    }
 
     // Album cover loader + brightness compensation feeding floor shader + mosaic source
     let floorTex: THREE.Texture | null = null
     const coverTextures: THREE.Texture[] = []
     let currentTrackId: string | null = null
-    let currentFeatures: { key?: number, mode?: 0|1 } | null = null
 
     const loadAlbumCover = async () => {
       try {
@@ -560,7 +572,6 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
           tex.magFilter = THREE.LinearFilter
           tex.generateMipmaps = true
 
-          // Brightness → dim/opacity
           const brightness = await estimateTextureLuminance(tex).catch(() => 0.6)
           const dim = clamp(1.05 - brightness * 0.5, 0.55, 0.95)
           floorMat.uniforms.uDim.value = dim
@@ -571,9 +582,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
           floorMat.uniforms.tAlbum.value = tex
           floorMat.needsUpdate = true
 
-          // Add to mosaic pool
           coverTextures.push(tex)
-          // Seed mosaic tiles if empty
           if (cfg.fx.mosaicFloor && tiles.length) {
             for (let i=0;i<tiles.length;i++) {
               const m = tiles[i].material
@@ -583,24 +592,14 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
           }
         }
 
-        // Lyrics marquee text
+        // Update marquee with "Title — Artist" when available
         const text = title && artist ? `${title} — ${artist}` : (title || artist || '')
         if (cfg.fx.lyricsMarquee && text && text !== marqueeText) {
           marqueeText = text
           setupMarquee(text)
         }
 
-        // Key-aware: fetch features if provider exists (optional window hook)
-        if (cfg.fx.keyTint && id && id !== currentTrackId) {
-          currentTrackId = id
-          currentFeatures = null
-          try {
-            const hook = (window as any).__ffw__getAudioFeatures
-            if (typeof hook === 'function') {
-              currentFeatures = await hook(id) // should return { key: 0..11, mode: 0|1 }
-            }
-          } catch {}
-        }
+        currentTrackId = id || currentTrackId
       } catch {}
     }
     loadAlbumCover()
@@ -610,9 +609,10 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
     const offBeat = reactivityBus.on('beat', () => {
+      // Beat events
       if (cfg.fx.groundRings) emitRing()
       if (cfg.fx.floorRipple) {
-        floorMat.uniforms.uRippleAmp.value = 1.0
+        floorMat.uniforms.uRippleAmp.value = 1.0 // spike, will decay in animate
         floorMat.uniforms.uRippleRadius.value = 0.05
         floorMat.uniforms.uRippleDecay.value = 10.0
       }
@@ -625,6 +625,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       }
     })
     const offBar = reactivityBus.on('bar', () => {
+      // gentle camera preset flip on bar if autoPath
       if (cfg.camera.autoPath) {
         const vary = (v:number, amt:number, min:number, max:number) => clamp(v + THREE.MathUtils.randFloatSpread(amt), min, max)
         cfg.orbitRadius = vary(cfg.orbitRadius, 1.0, 5.0, 13.0)
@@ -650,11 +651,6 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     let frames = 0
     let fallbackArmed = false
 
-    // Key‑tint helpers
-    const warm = new THREE.Color('#ff9b57') // major
-    const cool = new THREE.Color('#57a6ff') // minor
-    let keyMode: 0|1|null = null // 1=major, 0=minor
-
     const clock = new THREE.Clock()
     let raf = 0
     const animate = () => {
@@ -669,28 +665,17 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       const high = latest?.bands.high ?? 0.12
       const loud = latest?.loudness ?? 0.2
 
-      // Determine key mode if features landed
-      if (cfg.fx.keyTint && currentFeatures && keyMode == null) {
-        if (currentFeatures.mode === 1 || currentFeatures.mode === 0) keyMode = currentFeatures.mode
-      }
-
-      // Accent color morph: by key (major warm, minor cool). Fallback to highs if no key.
-      if (cfg.fx.keyTint && keyMode != null) {
-        const target = keyMode === 1 ? warm : cool
-        accent.lerp(target, 0.06)
-        accent2.lerp(target.clone().offsetHSL(0.08, 0, 0), 0.06)
-      } else {
-        accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.8, 0, 1))
-        accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.5, 0, 1))
-      }
+      // Accent color morph by highs (keeps palette coherent)
+      accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.8, 0, 1))
+      accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.5, 0, 1))
       fatMat.color.set(accent)
       thinMat.color.set(accent)
 
-      // Line width pulse
+      // Line width pulse slightly on beat/highs
       const px = cfg.lineWidthPx * (latest?.beat ? 1.35 : 1.0) * (1.0 + 0.15 * high)
       setLinePixels(px)
 
-      // Windows EQ
+      // Windows: EQ-like behavior per story
       windowMeta.forEach((w, i) => {
         const mat = w.mesh.material as THREE.MeshBasicMaterial
         let energy = 0.4 + 0.6 * mid
@@ -758,7 +743,8 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       // Lyrics marquee scroll and opacity by loudness
       if (cfg.fx.lyricsMarquee && marqueeMat) {
         marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * (0.06 + loud * 0.6)) % 1
-        marqueeMat.uniforms.uOpacity.value = THREE.MathUtils.clamp(0.2 + loud * 0.9, 0, 1)
+        const baseOpacity = stale ? 0.45 : 0.2
+        marqueeMat.uniforms.uOpacity.value = THREE.MathUtils.clamp(baseOpacity + loud * 0.9, 0, 1)
         ;(marqueeMat.uniforms.uTint.value as THREE.Color).copy(accent)
       } else if (marqueeMat) {
         marqueeMat.uniforms.uOpacity.value = 0.0
@@ -899,8 +885,8 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         const yb = levels[0], yt = levels[levels.length-1]
         for (let t=1;t<=3;t++) {
           const x = minX + (spanX * t)/4
-          E(x, yb, maxZ, x, yt, maxZ)
-          E(x, yb, minZ, x, yt, minZ)
+          E(x, yb, maxZ, x, yt, maxZ) // front
+          E(x, yb, minZ, x, yt, minZ) // back
         }
         for (let t=1;t<=3;t++) {
           const z = minZ + (spanZ * t)/4
@@ -1041,7 +1027,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       const mat = s.material as THREE.SpriteMaterial
       mat.opacity = instant ? Math.random()*0.4 : 0
     }
-  }, [cfg, quality.renderScale, quality.bloom, accessibility.epilepsySafe])
+  }, [cfg, quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
   return (
     <div data-visual="wireframe3d" style={{ position: 'relative', width: '100%', height: '100%' }}>
@@ -1135,7 +1121,6 @@ function Wire3DPanel(props: {
             <Row label="Bloom breathing"><input type="checkbox" checked={cfg.fx.bloomBreath} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, bloomBreath: e.target.checked } })}/></Row>
             <Row label="Lyrics marquee"><input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, lyricsMarquee: e.target.checked } })}/></Row>
             <Row label="Mosaic floor"><input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, mosaicFloor: e.target.checked } })}/></Row>
-            <Row label="Key-aware tint"><input type="checkbox" checked={cfg.fx.keyTint} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, keyTint: e.target.checked } })}/></Row>
           </Card>
 
           <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>

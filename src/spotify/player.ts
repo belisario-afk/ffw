@@ -1,5 +1,5 @@
 // Idempotent Web Playback SDK connect with persistent device name and volume.
-// Adds a pluggable token provider so both 2D and 3D scenes can share the same user token.
+// Adds a pluggable token provider so visuals can share the same user token.
 // If no provider is set, ensurePlayerConnected will throw unless you guard it via hasSpotifyTokenProvider().
 
 let singleton: Spotify.Player | null = null
@@ -45,7 +45,7 @@ export async function ensurePlayerConnected(opts: EnsureOpts = {}): Promise<{ pl
     singleton = new SpotifySDK.Player({
       name,
       getOAuthToken: (cb: (token: string) => void) => {
-        getSpotifyToken().then(cb).catch(() => cb(token)) // fallback to last known token
+        getSpotifyToken().then(cb).catch(() => cb(token))
       },
       volume: clamp01(readStoredVolume() ?? 0.8)
     })
@@ -88,6 +88,9 @@ async function connectInternal(player: Spotify.Player, name: string, opts: Ensur
       try { player.disconnect() } catch {}
     })
   }
+
+  // Try to activate the audio element once on connect (no-op if not supported).
+  try { await (player as any).activateElement?.() } catch {}
 
   return player
 }

@@ -14,8 +14,8 @@ type Props = {
 Album-only visuals (no synthetic colors)
 - Modes: 0=Vortex Prism, 1=Liquid Mosaic
 - Uses only album textures + extracted swatches (avg + top3)
-- Interlacing current/previous cover (radial/stripes/checker) with safe guards
-- Crash-hardened uniform writing (no direct .value reads, auto-recreate uniforms)
+- Interlacing current/previous cover (radial/stripes/checker)
+- Crash-hardened uniform writing (no direct .value reads; always resolve ShaderMaterial.uniforms live)
 **/
 
 type Cfg = {
@@ -49,7 +49,7 @@ type Cfg = {
 
 type Preset = { name: string } & Cfg
 
-const LS_KEY = 'ffw.kaleido.albumonly.safe.v5'
+const LS_KEY = 'ffw.kaleido.albumonly.safe.v6'
 
 const PRESETS: Record<string, Preset> = {
   vortexPrism: {
@@ -72,6 +72,44 @@ const PRESETS: Record<string, Preset> = {
   }
 }
 
+// Live-uniform setters bound to the material; no caching.
+function makeUniformSetters(matRef: React.MutableRefObject<THREE.ShaderMaterial | null>) {
+  const getTable = () => {
+    const m = matRef.current
+    if (!m) return null
+    if (!m.uniforms) (m as any).uniforms = {}
+    return m.uniforms as Record<string, { value: any }>
+  }
+  const ensure = (name: string, init: any) => {
+    const tbl = getTable()
+    if (!tbl) return null
+    const u = tbl[name]
+    if (!u || typeof u !== 'object' || !('value' in u)) {
+      tbl[name] = { value: init }
+      return tbl[name]
+    }
+    return u
+  }
+  const setF = (name: string, v: number) => { const u = ensure(name, v); if (u) u.value = v }
+  const setV2 = (name: string, x: number, y: number) => {
+    const u = ensure(name, new THREE.Vector2(x, y)); if (!u) return
+    if (u.value?.isVector2) u.value.set(x, y)
+    else u.value = new THREE.Vector2(x, y)
+  }
+  const setV3 = (name: string, x: number, y: number, z: number) => {
+    const u = ensure(name, new THREE.Vector3(x, y, z)); if (!u) return
+    if (u.value?.isVector3) u.value.set(x, y, z)
+    else u.value = new THREE.Vector3(x, y, z)
+  }
+  const setColor = (name: string, col: THREE.Color) => {
+    const u = ensure(name, col.clone()); if (!u) return
+    if (u.value?.isColor) u.value.copy(col)
+    else u.value = col.clone()
+  }
+  const setTex = (name: string, tex: THREE.Texture | null) => { const u = ensure(name, tex); if (u) u.value = tex }
+  return { setF, setV2, setV3, setColor, setTex }
+}
+
 export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -90,7 +128,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
   // Scene refs
   const matRef = useRef<THREE.ShaderMaterial | null>(null)
-  const uniformsRef = useRef<Record<string, { value: any }>>({})
   const scrollRef = useRef(0)
   const disposedRef = useRef(false)
 
@@ -169,6 +206,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       return picks
     }
 
+    const { setF, setV2, setV3, setColor, setTex } = makeUniformSetters(matRef)
+
     async function loadAlbum() {
       try {
         const s = await getPlaybackState().catch(() => null)
@@ -177,13 +216,15 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         if (!id || !url || id === lastTrackId) return
         lastTrackId = id
 
-        // rotate textures
+        // rotate textures (do NOT dispose current; reuse as previous)
         if (tAlbum1Ref.current) {
-          tAlbum2Ref.current?.dispose()
+          if (tAlbum2Ref.current && tAlbum2Ref.current !== tAlbum1Ref.current) {
+            tAlbum2Ref.current.dispose()
+          }
           tAlbum2Ref.current = tAlbum1Ref.current
           has2Ref.current = 1
-          safeSetTex('tAlbum2', tAlbum2Ref.current)
-          safeSetF('uHasAlbum2', 1)
+          setTex('tAlbum2', tAlbum2Ref.current)
+          setF('uHasAlbum2', 1)
         }
 
         // load image (CORS first, blob fallback)
@@ -204,21 +245,21 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           })
         })
 
-        // swatches
-        const c = document.createElement('canvas'); c.width = 48; c.height = 48
+        // swatches (smaller sample to reduce main-thread time)
+        const c = document.createElement('canvas'); c.width = 40; c.height = 40
         const g = c.getContext('2d')
         if (g) {
-          g.drawImage(img, 0, 0, 48, 48)
-          const data = g.getImageData(0, 0, 48, 48).data
+          g.drawImage(img, 0, 0, 40, 40)
+          const data = g.getImageData(0, 0, 40, 40).data
           const picks = quantizeTopN(data, 3)
           albC1.current.copy(picks[0]); albC2.current.copy(picks[1]); albC3.current.copy(picks[2])
-          safeSetColor('uC0', albAvg.current)
-          safeSetColor('uC1', albC1.current)
-          safeSetColor('uC2', albC2.current)
-          safeSetColor('uC3', albC3.current)
+          setColor('uC0', albAvg.current)
+          setColor('uC1', albC1.current)
+          setColor('uC2', albC2.current)
+          setColor('uC3', albC3.current)
         }
 
-        // texture
+        // texture (current)
         const loader = new THREE.TextureLoader()
         loader.setCrossOrigin('anonymous' as any)
         const tex = await new Promise<THREE.Texture>((resolve, reject) => {
@@ -229,15 +270,20 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         tex.minFilter = THREE.LinearMipmapLinearFilter
         tex.magFilter = THREE.LinearFilter
         tex.generateMipmaps = true
+        // anisotropy for sharper look
+        try {
+          tex.anisotropy = (renderer.capabilities as any).getMaxAnisotropy?.() ?? tex.anisotropy
+        } catch {}
+
         tAlbum1Ref.current = tex
         has1Ref.current = 1
-        safeSetTex('tAlbum1', tex)
-        safeSetF('uHasAlbum1', 1)
-        safeSetF('uHasAlbum2', has2Ref.current ? 1 : 0)
+        setTex('tAlbum1', tex)
+        setF('uHasAlbum1', 1)
+        setF('uHasAlbum2', has2Ref.current ? 1 : 0)
 
         // crossfade to current
         crossRef.current = 0
-        safeSetF('uAlbumCross', 0)
+        setF('uAlbumCross', 0)
       } catch { /* ignore */ }
     }
 
@@ -248,8 +294,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const tunnel = new THREE.CylinderGeometry(14, 14, 220, 360, 1, true)
     tunnel.rotateZ(Math.PI * 0.5)
 
-    // Initialize uniforms ONCE and keep a live reference we will update safely
-    const uniforms: Record<string, { value: any }> = uniformsRef.current = {
+    // Initial uniforms (values will be kept in ShaderMaterial; setters always resolve live)
+    const uniforms: Record<string, { value: any }> = {
       uTime: { value: 0.0 },
       uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
       uLoud: { value: 0.12 },
@@ -496,30 +542,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const tunnelMesh = new THREE.Mesh(tunnel, mat)
     scene.add(tunnelMesh)
 
-    // Ultra-safe uniform setters: no direct table reads in callers, no .value on null, try/catch barrier
-    const ensure = (name: string, init: any) => {
-      try {
-        const table = uniformsRef.current
-        if (!table[name]) table[name] = { value: init }
-        else if (!('value' in table[name])) table[name] = { value: init }
-        return table[name]
-      } catch { return null }
-    }
-    const safeSetF = (name: string, v: number) => { const u = ensure(name, v); if (u) u.value = v }
-    const safeSetV2 = (name: string, x: number, y: number) => {
-      const u = ensure(name, new THREE.Vector2(x, y)); if (!u) return
-      if (u.value && u.value.isVector2) u.value.set(x, y); else u.value = new THREE.Vector2(x, y)
-    }
-    const safeSetV3 = (name: string, x: number, y: number, z: number) => {
-      const u = ensure(name, new THREE.Vector3(x, y, z)); if (!u) return
-      if (u.value && u.value.isVector3) u.value.set(x, y, z); else u.value = new THREE.Vector3(x, y, z)
-    }
-    const safeSetColor = (name: string, col: THREE.Color) => {
-      const u = ensure(name, col.clone()); if (!u) return
-      if (u.value && u.value.isColor) u.value.copy(col); else u.value = col.clone()
-    }
-    const safeSetTex = (name: string, tex: THREE.Texture | null) => { const u = ensure(name, tex); if (u) u.value = tex }
-
     // Resize
     const onResize = () => {
       if (disposedRef.current) return
@@ -538,7 +560,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
     const animate = () => {
       raf = requestAnimationFrame(animate)
-      if (disposedRef.current) return
+      if (disposedRef.current || !matRef.current) return
 
       const dt = Math.min(0.05, clock.getDelta())
       const t = clock.elapsedTime
@@ -582,7 +604,10 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       }
 
       const k = 1 - Math.pow(0.0001, dt)
-      ;(Object.keys(target) as (keyof typeof target)[]).forEach(key => { /* @ts-ignore */ s[key] += (target[key] - s[key]) * k })
+      ;(Object.keys(target) as (keyof typeof target)[]).forEach(key => {
+        // @ts-ignore
+        s[key] += (target[key] - s[key]) * k
+      })
 
       const kIntensity = THREE.MathUtils.lerp(s.intensity, Math.min(s.intensity, 0.6), safe)
       const kSpeed = THREE.MathUtils.lerp(s.speed, Math.min(s.speed, 0.4), safe)
@@ -593,47 +618,47 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       scrollRef.current += dt * (0.24 + 1.05 * kSpeed + 0.48 * loud)
       crossRef.current = Math.min(1, crossRef.current + dt * 0.35)
 
-      // Push uniforms via safe setters (never deref .value without checks)
-      safeSetF('uTime', t)
-      safeSetV3('uAudio', low, mid, high)
-      safeSetF('uLoud', loud)
-      safeSetF('uBeat', beat)
-      safeSetF('uSafe', safe)
-      safeSetF('uContrastBoost', accessibility.highContrast ? 1.0 : 0.0)
+      // Push uniforms via live setters
+      setF('uTime', t)
+      setV3('uAudio', low, mid, high)
+      setF('uLoud', loud)
+      setF('uBeat', beat)
+      setF('uSafe', safe)
+      setF('uContrastBoost', accessibility.highContrast ? 1.0 : 0.0)
 
-      safeSetF('uScroll', scrollRef.current)
-      safeSetF('uSpin', spin)
-      safeSetF('uZoom', zoom)
+      setF('uScroll', scrollRef.current)
+      setF('uSpin', spin)
+      setF('uZoom', zoom)
 
-      safeSetF('uIntensity', kIntensity)
-      safeSetF('uSpeed', kSpeed)
-      safeSetF('uExposure', s.exposure)
-      safeSetF('uSaturation', s.saturation)
-      safeSetF('uGamma', s.gamma)
-      safeSetF('uVignette', s.vignette)
+      setF('uIntensity', kIntensity)
+      setF('uSpeed', kSpeed)
+      setF('uExposure', s.exposure)
+      setF('uSaturation', s.saturation)
+      setF('uGamma', s.gamma)
+      setF('uVignette', s.vignette)
 
-      safeSetF('uShapeMode', s.shapeMode)
-      safeSetF('uSlices', s.slices)
-      safeSetF('uTileScale', s.tileScale)
-      safeSetF('uTileRound', s.tileRound)
+      setF('uShapeMode', s.shapeMode)
+      setF('uSlices', s.slices)
+      setF('uTileScale', s.tileScale)
+      setF('uTileRound', s.tileRound)
 
-      safeSetF('uPrismDispersion', s.prismDispersion)
-      safeSetF('uPrismWarp', s.prismWarp)
+      setF('uPrismDispersion', s.prismDispersion)
+      setF('uPrismWarp', s.prismWarp)
 
-      safeSetV2('uTexScale', s.texScaleU, s.texScaleV)
-      safeSetF('uTexRotate', s.texRotate)
-      safeSetF('uAlbumTexWarp', s.albumTexWarp)
+      setV2('uTexScale', s.texScaleU, s.texScaleV)
+      setF('uTexRotate', s.texRotate)
+      setF('uAlbumTexWarp', s.albumTexWarp)
 
-      safeSetF('uInterlaceMode', s.interlaceMode)
-      safeSetF('uInterlaceScale', s.interlaceScale)
-      safeSetF('uInterlaceStrength', s.interlaceStrength)
-      safeSetF('uFuseBias', s.fuseBias)
+      setF('uInterlaceMode', s.interlaceMode)
+      setF('uInterlaceScale', s.interlaceScale)
+      setF('uInterlaceStrength', s.interlaceStrength)
+      setF('uFuseBias', s.fuseBias)
 
-      safeSetF('uEdgeEmphasis', s.edgeEmphasis)
+      setF('uEdgeEmphasis', s.edgeEmphasis)
 
-      safeSetF('uHasAlbum1', has1Ref.current ? 1.0 : 0.0)
-      safeSetF('uHasAlbum2', has2Ref.current ? 1.0 : 0.0)
-      safeSetF('uAlbumCross', crossRef.current)
+      setF('uHasAlbum1', has1Ref.current ? 1.0 : 0.0)
+      setF('uHasAlbum2', has2Ref.current ? 1.0 : 0.0)
+      setF('uAlbumCross', crossRef.current)
 
       comp.composer.render()
     }
@@ -648,8 +673,10 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       window.clearInterval(albumIv)
       offFrame?.()
 
-      tAlbum1Ref.current?.dispose(); tAlbum1Ref.current = null
-      tAlbum2Ref.current?.dispose(); tAlbum2Ref.current = null
+      // Dispose textures safely (do not dispose the same object twice)
+      if (tAlbum1Ref.current) { tAlbum1Ref.current.dispose(); tAlbum1Ref.current = null }
+      if (tAlbum2Ref.current) { tAlbum2Ref.current.dispose(); tAlbum2Ref.current = null }
+
       matRef.current = null
 
       scene.traverse(obj => {

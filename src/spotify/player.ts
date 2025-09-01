@@ -1,121 +1,145 @@
-import { getAccessToken } from '../auth/token'
-import { transferPlayback } from './api'
+// Idempotent Web Playback SDK connect with persistent device name and volume.
+// Only sets initial volume on the FIRST successful connect. Subsequent calls won't change volume.
+// Keeps the player alive across scene switches.
 
-declare global {
-  interface Window {
-    onSpotifyWebPlaybackSDKReady?: () => void
-    Spotify: any
-    __ffwPlayer?: { player: Spotify.Player | null, deviceId: string | null }
-    __ffwSdkLoading?: Promise<void>
+let singleton: Spotify.Player | null = null
+let connected = false
+let initialVolumeSet = false
+let currentDeviceId: string | null = null
+let pendingConnect: Promise<Spotify.Player> | null = null
+
+const DEVICE_NAME = 'FFw visualizer'
+const VOL_KEY = 'ffw.spotify.volume' // persist last known volume [0..1]
+
+type EnsureOpts = {
+  deviceName?: string
+  setInitialVolume?: boolean // default true on first connect; ignored afterwards
+}
+
+export async function ensurePlayerConnected(opts: EnsureOpts = {}): Promise<{ player: Spotify.Player, deviceId: string | null }> {
+  const name = opts.deviceName ?? DEVICE_NAME
+
+  // If we already have an in-flight connect, return that.
+  if (pendingConnect) {
+    const player = await pendingConnect
+    return { player, deviceId: currentDeviceId }
   }
-}
 
-export type PlayerHandle = {
-  deviceId: string | null
-  player: Spotify.Player | null
-  connect: () => Promise<void>
-  disconnect: () => void
-  hasInPagePlayback: boolean
-}
+  // If already connected, no-op.
+  if (singleton && connected) {
+    return { player: singleton, deviceId: currentDeviceId }
+  }
 
-let playerHandlePromise: Promise<PlayerHandle> | null = null
-let connectedOnce = false
+  // If a player exists but got disconnected, reuse it.
+  if (singleton && !connected) {
+    pendingConnect = connectInternal(singleton, name, opts)
+    const player = await pendingConnect.finally(() => { pendingConnect = null })
+    return { player, deviceId: currentDeviceId }
+  }
 
-export async function loadWebPlaybackSDK(): Promise<void> {
-  if (window.Spotify) return
-  if (window.__ffwSdkLoading) return window.__ffwSdkLoading
+  // Create a fresh player
+  const token = await getSpotifyToken()
+  const SpotifySDK = await waitForSpotifySDK()
 
-  window.__ffwSdkLoading = new Promise<void>((resolve, reject) => {
-    try {
-      // Define the global callback BEFORE injecting the script.
-      window.onSpotifyWebPlaybackSDKReady = () => resolve()
-
-      const existing = document.querySelector('script[src="https://sdk.scdn.co/spotify-player.js"]') as HTMLScriptElement | null
-      const script = existing || document.createElement('script')
-      script.src = 'https://sdk.scdn.co/spotify-player.js'
-      script.async = true
-      script.defer = true
-      script.onerror = () => reject(new Error('Failed to load Spotify Web Playback SDK'))
-      if (!existing) document.head.appendChild(script)
-
-      if ((window as any).Spotify) resolve()
-    } catch (e) {
-      reject(e as Error)
-    }
-  })
-
-  return window.__ffwSdkLoading
-}
-
-async function createPlayer(name = 'FFW Visualizer'): Promise<PlayerHandle> {
-  await loadWebPlaybackSDK()
-  const token = await getAccessToken()
-  if (!token) throw new Error('No token for Web Playback SDK')
-
-  // Do not force default volume here to avoid volume resets when scenes switch
-  const player = new window.Spotify.Player({
+  singleton = new SpotifySDK.Player({
     name,
-    getOAuthToken: async (cb: (token: string) => void) => {
-      const t = await getAccessToken()
-      if (t) cb(t)
-    }
+    getOAuthToken: (cb: (token: string) => void) => cb(token),
+    volume: clamp01(readStoredVolume() ?? 0.8) // volume here only seeds player object; we'll also apply below once
   })
 
-  let deviceId: string | null = null
-  let readyResolve: (value: unknown) => void
-  const ready = new Promise((r) => (readyResolve = r))
+  wirePlayerEvents(singleton)
 
-  player.addListener('ready', ({ device_id }: any) => {
-    deviceId = device_id
-    window.__ffwPlayer = { player, deviceId }
-    readyResolve!(true)
-  })
+  pendingConnect = connectInternal(singleton, name, opts)
+  const player = await pendingConnect.finally(() => { pendingConnect = null })
+  return { player, deviceId: currentDeviceId }
+}
 
-  player.addListener('not_ready', ({ device_id }: any) => {
-    if (deviceId === device_id) deviceId = null
-    window.__ffwPlayer = { player, deviceId }
-  })
+async function connectInternal(player: Spotify.Player, name: string, opts: EnsureOpts) {
+  const ok = await player.connect()
+  if (!ok) throw new Error('Spotify player failed to connect')
+  connected = true
 
-  player.addListener('initialization_error', ({ message }: any) => console.error('Spotify SDK init error', message))
-  player.addListener('authentication_error', ({ message }: any) => console.error('Spotify SDK auth error', message))
-  player.addListener('account_error', ({ message }: any) => console.error('Spotify SDK account error', message))
-  player.addListener('playback_error', ({ message }: any) => console.error('Spotify SDK playback error', message))
+  // Set the device name if SDK allows (some SDKs infer from constructor)
+  try { (player as any)._options.name = name } catch {}
 
-  const connect = async () => {
-    if (connectedOnce) return
-    const ok = await player.connect()
-    if (!ok) throw new Error('Could not connect to Spotify player')
-    await ready
-    connectedOnce = true
-    if (deviceId) {
-      try {
-        await transferPlayback(deviceId, true)
-      } catch {
-        // Not premium or cannot transfer; ignore. Remote control still works.
-      }
-    }
+  // Only set initial volume once in the app’s lifetime
+  if (!initialVolumeSet && (opts.setInitialVolume ?? true)) {
+    const v = clamp01(readStoredVolume() ?? 0.8)
+    try { await player.setVolume(v) } catch {}
+    initialVolumeSet = true
   }
 
-  const disconnect = () => { /* singleton — do not disconnect */ }
-
-  window.__ffwPlayer = { player, deviceId }
-  const hasInPagePlayback = true
-
-  return { deviceId, player, connect, disconnect, hasInPagePlayback }
-}
-
-export async function initPlayer(name = 'FFW Visualizer'): Promise<PlayerHandle> {
-  if (!playerHandlePromise) {
-    playerHandlePromise = createPlayer(name)
+  // Poll device id once ready
+  try {
+    const state = await player.getCurrentState()
+    // If playing on this device, it will exist in state; otherwise device id will be provided on transfer
+    currentDeviceId = (state as any)?.device_id ?? currentDeviceId ?? null
+  } catch {
+    // ignore
   }
-  return playerHandlePromise
+
+  // Patch setVolume to persist
+  const origSetVolume = player.setVolume.bind(player)
+  player.setVolume = async (v: number) => {
+    const vv = clamp01(v)
+    writeStoredVolume(vv)
+    return origSetVolume(vv)
+  }
+
+  // Ensure we don’t accidentally disconnect on scene change — only on page unload
+  if (!(window as any).__ffw__playerUnloadHook) {
+    (window as any).__ffw__playerUnloadHook = true
+    window.addEventListener('beforeunload', () => {
+      try { player.disconnect() } catch {}
+    })
+  }
+
+  return player
 }
 
-/**
- * Ensures the singleton player exists and is connected (only once).
- */
-export async function ensurePlayerConnected(): Promise<PlayerHandle> {
-  const handle = await initPlayer()
-  await handle.connect()
-  return handle
+function wirePlayerEvents(player: Spotify.Player) {
+  player.addListener('ready', ({ device_id }) => { currentDeviceId = device_id || currentDeviceId })
+  player.addListener('not_ready', ({ device_id }) => {
+    if (currentDeviceId === device_id) currentDeviceId = null
+  })
+  player.addListener('initialization_error', ({ message }) => console.warn('Spotify init error:', message))
+  player.addListener('account_error', ({ message }) => console.warn('Spotify account error:', message))
+  player.addListener('playback_error', ({ message }) => console.warn('Spotify playback error:', message))
 }
+
+function readStoredVolume(): number | null {
+  try {
+    const s = localStorage.getItem(VOL_KEY)
+    if (!s) return null
+    const v = parseFloat(s)
+    return Number.isFinite(v) ? clamp01(v) : null
+  } catch { return null }
+}
+function writeStoredVolume(v: number) {
+  try { localStorage.setItem(VOL_KEY, String(clamp01(v))) } catch {}
+}
+
+function clamp01(x: number) { return Math.max(0, Math.min(1, x)) }
+
+// Wait for window.Spotify to be available (Web Playback SDK)
+function waitForSpotifySDK(): Promise<typeof Spotify> {
+  return new Promise((resolve) => {
+    if ((window as any).Spotify) return resolve((window as any).Spotify)
+    (window as any).onSpotifyWebPlaybackSDKReady = () => resolve((window as any).Spotify)
+  })
+}
+
+// Replace this with your app’s token sourcing.
+// Must return a valid user OAuth token (not client-credentials).
+async function getSpotifyToken(): Promise<string> {
+  // If your app already has a token function, import and use it instead.
+  // This placeholder throws to surface missing wiring during dev.
+  if ((window as any).__ffw__getSpotifyToken) {
+    return await (window as any).__ffw__getSpotifyToken()
+  }
+  throw new Error('getSpotifyToken() not wired. Expose window.__ffw__getSpotifyToken to supply a user token.')
+}
+
+// Optional helpers exposed for diagnostics
+export function getPlayer(): Spotify.Player | null { return singleton }
+export function getDeviceId(): string | null { return currentDeviceId }

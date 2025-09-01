@@ -9,6 +9,7 @@ import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
 import type { AuthState } from '../../auth/token'
 import { getPlaybackState } from '../../spotify/api'
 import { cacheAlbumArt } from '../../utils/idb'
+import { ensurePlayerConnected } from '../../spotify/player'
 
 type Props = {
   auth: AuthState | null
@@ -23,6 +24,12 @@ type Props = {
 // - Album cover floor with automatic brightness compensation so white albums aren’t blinding
 export default function WireframeHouse3D({ quality, accessibility, settings }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  // Keep Spotify device listed without touching volume
+  useEffect(() => {
+    ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: false })
+      .catch(e => console.warn('Spotify ensurePlayerConnected (3D) failed:', e))
+  }, [])
 
   useEffect(() => {
     if (!canvasRef.current) return
@@ -155,6 +162,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     const fatLines = new LineSegments2(fatGeo, fatMat)
     scene.add(fatLines)
 
+    // Thin-lines fallback (auto toggled if fat-lines misbehave)
     const thinGeo = new THREE.BufferGeometry()
     thinGeo.setAttribute('position', new THREE.BufferAttribute(mansionPositions, 3))
     const thinMat = new THREE.LineBasicMaterial({ color: accent.getHex(), transparent: true, opacity: 0.98, depthTest: true })

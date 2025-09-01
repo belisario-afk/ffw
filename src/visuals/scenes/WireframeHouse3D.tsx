@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import * as THREE from 'three'
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
@@ -16,19 +17,49 @@ type Props = {
   settings: any
 }
 
-// Detailed 3‑story small mansion wireframe + album cover floor
+// Detailed 3‑story “small mansion” wireframe with:
+// - Advanced camera config (FOV, damping, bounds) and OrbitControls (orbit/pan/zoom)
+// - Auto camera path that pauses during user interaction
+// - Album cover floor with automatic brightness compensation so white albums aren’t blinding
 export default function WireframeHouse3D({ quality, accessibility, settings }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   useEffect(() => {
     if (!canvasRef.current) return
 
+    // Camera config (safe defaults; can be overridden via settings.camera)
+    const camCfg = {
+      fov: clamp(settings?.camera?.fov ?? 55, 30, 95),
+      minDistance: clamp(settings?.camera?.minDistance ?? 4, 2, 30),
+      maxDistance: clamp(settings?.camera?.maxDistance ?? 18, 6, 100),
+      minPolarAngle: clamp(settings?.camera?.minPolarAngle ?? (Math.PI * 0.1), 0, Math.PI / 2),
+      maxPolarAngle: clamp(settings?.camera?.maxPolarAngle ?? (Math.PI * 0.9), Math.PI / 4, Math.PI),
+      enablePan: settings?.camera?.enablePan ?? true,
+      enableZoom: settings?.camera?.enableZoom ?? true,
+      enableDamping: settings?.camera?.enableDamping ?? true,
+      dampingFactor: clamp(settings?.camera?.dampingFactor ?? 0.08, 0.01, 0.2),
+      rotateSpeed: clamp(settings?.camera?.rotateSpeed ?? 0.8, 0.1, 5),
+      zoomSpeed: clamp(settings?.camera?.zoomSpeed ?? 0.8, 0.1, 5),
+      panSpeed: clamp(settings?.camera?.panSpeed ?? 0.8, 0.1, 5),
+      autoRotate: settings?.camera?.autoRotate ?? false,
+      autoRotateSpeed: clamp(settings?.camera?.autoRotateSpeed ?? 0.8, 0.05, 10),
+      // Auto path: camera circles the mansion unless user is interacting
+      autoPath: settings?.camera?.autoPath ?? true,
+      target: {
+        x: settings?.camera?.target?.x ?? 0,
+        y: settings?.camera?.target?.y ?? 2.2,
+        z: settings?.camera?.target?.z ?? 0
+      }
+    }
+
     // Scene & camera
     const scene = new THREE.Scene()
     scene.background = null
-    const camera = new THREE.PerspectiveCamera(55, 1, 0.05, 250)
+    scene.fog = new THREE.Fog(new THREE.Color('#06080a'), 60, 180)
+
+    const camera = new THREE.PerspectiveCamera(camCfg.fov, 1, 0.05, 250)
     camera.position.set(0, 3.2, 14)
-    camera.lookAt(0, 2.0, 0)
+    camera.lookAt(camCfg.target.x, camCfg.target.y, camCfg.target.z)
 
     // Renderer + post
     const { renderer, dispose: disposeRenderer } = createRenderer(canvasRef.current, quality.renderScale)
@@ -44,14 +75,36 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       filmGrainStrength: 0.3
     })
 
+    // Orbit Controls
+    const controls = new OrbitControls(camera, renderer.domElement)
+    controls.enableDamping = camCfg.enableDamping
+    controls.dampingFactor = camCfg.dampingFactor
+    controls.enablePan = camCfg.enablePan
+    controls.enableZoom = camCfg.enableZoom
+    controls.rotateSpeed = camCfg.rotateSpeed
+    controls.zoomSpeed = camCfg.zoomSpeed
+    controls.panSpeed = camCfg.panSpeed
+    controls.minDistance = camCfg.minDistance
+    controls.maxDistance = camCfg.maxDistance
+    controls.minPolarAngle = camCfg.minPolarAngle
+    controls.maxPolarAngle = camCfg.maxPolarAngle
+    controls.target.set(camCfg.target.x, camCfg.target.y, camCfg.target.z)
+    controls.autoRotate = camCfg.autoRotate
+    controls.autoRotateSpeed = camCfg.autoRotateSpeed
+
+    let userInteracting = false
+    controls.addEventListener('start', () => { userInteracting = true })
+    controls.addEventListener('end', () => {
+      userInteracting = false
+      // keep target consistent after interaction
+      controls.target.set(camCfg.target.x, camCfg.target.y, camCfg.target.z)
+    })
+
     // Palette from CSS
     const cssColor = (name: string, fallback: string) =>
       getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
     const accent = new THREE.Color(cssColor('--accent', '#00f0ff'))
     const accent2 = new THREE.Color(cssColor('--accent-2', '#ff00f0'))
-
-    // Subtle world fog for depth
-    scene.fog = new THREE.Fog(new THREE.Color('#06080a'), 60, 180)
 
     // Grid
     const grid = new THREE.GridHelper(160, 160, accent2.clone().multiplyScalar(0.35), accent2.clone().multiplyScalar(0.12))
@@ -60,14 +113,14 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     grid.position.y = 0
     scene.add(grid)
 
-    // Album floor (current album cover)
+    // Album floor (current album cover) — with brightness compensation
     const floorSize = 22
     const floorGeom = new THREE.PlaneGeometry(floorSize, floorSize)
     const floorMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
+      color: 0xffffff, // will be attenuated after analyzing brightness
       map: undefined,
       transparent: true,
-      opacity: 1.0,
+      opacity: 0.95, // slightly reduced by default
       depthWrite: false
     })
     const floorMesh = new THREE.Mesh(floorGeom, floorMat)
@@ -75,26 +128,23 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     floorMesh.position.y = 0.001
     scene.add(floorMesh)
 
-    // Mansion edges
+    // Mansion edges (fat lines with fallback to thin lines)
     const mansionPositions = buildMansionEdges()
     const fatGeo = new LineSegmentsGeometry()
     fatGeo.setPositions(mansionPositions)
-    // Ensure bounds (rare drivers)
     ;(fatGeo as any).computeBoundingBox?.()
     ;(fatGeo as any).computeBoundingSphere?.()
 
-    // Fat line material (screen-space px)
     const fatMat = new LineMaterial({
       color: accent.getHex(),
       transparent: true,
       opacity: 0.98,
       depthTest: true
     })
-    // Important: screen-space units
     ;(fatMat as any).worldUnits = false
     const setLinePixels = (px: number) => {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-      fatMat.linewidth = Math.max(0.0009, px / Math.max(1, draw.y)) // px -> normalized
+      fatMat.linewidth = Math.max(0.0009, px / Math.max(1, draw.y))
       fatMat.needsUpdate = true
     }
     {
@@ -102,11 +152,9 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       fatMat.resolution.set(draw.x, draw.y)
       setLinePixels((settings?.lineWidthPx ?? 2.5))
     }
-
     const fatLines = new LineSegments2(fatGeo, fatMat)
     scene.add(fatLines)
 
-    // Thin-lines fallback (auto toggled if fat-lines misbehave)
     const thinGeo = new THREE.BufferGeometry()
     thinGeo.setAttribute('position', new THREE.BufferAttribute(mansionPositions, 3))
     const thinMat = new THREE.LineBasicMaterial({ color: accent.getHex(), transparent: true, opacity: 0.98, depthTest: true })
@@ -175,7 +223,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       return mesh
     })()
 
-    // Album cover (poll)
+    // Album cover loader with brightness compensation
     let floorTex: THREE.Texture | null = null
     const loadAlbumCover = async () => {
       try {
@@ -188,6 +236,18 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         })
         tex.colorSpace = THREE.SRGBColorSpace
         tex.anisotropy = renderer.capabilities.getMaxAnisotropy()
+        tex.minFilter = THREE.LinearMipmapLinearFilter
+        tex.magFilter = THREE.LinearFilter
+        tex.generateMipmaps = true
+
+        // Compute average luminance from the image to auto-dim bright covers
+        const brightness = await estimateTextureLuminance(tex).catch(() => 0.6) // 0..1
+        // Map brightness to a dim factor: bright (1.0) -> ~0.55, dark (0.2) -> ~0.95
+        const dim = clamp(1.05 - brightness * 0.5, 0.55, 0.95)
+        floorMat.color.setScalar(dim)
+        // Slight extra opacity roll-off for very bright covers
+        floorMat.opacity = clamp(0.95 - (brightness - 0.6) * 0.25, 0.7, 0.95)
+
         floorTex?.dispose()
         floorTex = tex
         floorMat.map = tex
@@ -203,16 +263,16 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Camera path
+    // Camera auto path (pauses while user interacts)
     type Path = 'Circle' | 'Ellipse' | 'Lemniscate' | 'Manual'
-    const path: Path = (settings.path || 'Circle') as Path
+    const path: Path = (settings?.path || 'Circle') as Path
     let angle = 0
 
-    // Resize
     const updateSizes = () => {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
       const view = renderer.getSize(new THREE.Vector2())
       camera.aspect = view.x / Math.max(1, view.y)
+      camera.fov = camCfg.fov
       camera.updateProjectionMatrix()
       comp.onResize()
       fatMat.resolution.set(draw.x, draw.y)
@@ -221,7 +281,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     window.addEventListener('resize', updateSizes)
     updateSizes()
 
-    // Simple “is rendering” watchdog: if fat-lines produce degenerate output, fall back
+    // Watchdog for fat-lines misrender; fallback to thin lines
     let frames = 0
     let fallbackArmed = false
 
@@ -259,14 +319,20 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       fz.uniforms.uIntensity.value = THREE.MathUtils.clamp(0.22 + loud * 0.8 + (latest?.beat ? 0.55 : 0), 0, accessibility.epilepsySafe ? 0.6 : 1.0)
       ;(fz.uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.45))
 
-      // Camera motion
-      const baseSpeed = (settings.orbitSpeed ?? 0.5) * (stale ? 0.15 : 1.0)
-      angle += dt * (baseSpeed + low * 1.0 + (latest?.beatStrength ?? 0) * 1.3)
-      const radius = THREE.MathUtils.clamp((settings.orbitRadius ?? 8.0) + Math.sin((latest?.phases.bar ?? 0) * Math.PI * 2) * 0.25, 5.0, 13.0)
-      const elev = (settings.orbitElev ?? 0.08)
-      const pos = pathPoint(path, angle, radius)
-      camera.position.set(pos.x, Math.sin(elev) * (radius * 0.6) + 2.6 + (settings.camBob || 0) * (0.0 + low * 0.35), pos.z)
-      camera.lookAt(0, 2.2, 0)
+      // Auto path (disabled while interacting)
+      if (camCfg.autoPath && !userInteracting) {
+        const baseSpeed = (settings?.orbitSpeed ?? 0.5) * (stale ? 0.15 : 1.0)
+        angle += dt * (baseSpeed + low * 1.0 + (latest?.beatStrength ?? 0) * 1.3)
+        const radius = THREE.MathUtils.clamp((settings?.orbitRadius ?? 8.0) + Math.sin((latest?.phases.bar ?? 0) * Math.PI * 2) * 0.25, 5.0, 13.0)
+        const elev = (settings?.orbitElev ?? 0.08)
+        const pos = pathPoint(path, angle, radius)
+        camera.position.set(pos.x, Math.sin(elev) * (radius * 0.6) + 2.6 + (settings?.camBob || 0) * (0.0 + low * 0.35), pos.z)
+        camera.lookAt(camCfg.target.x, camCfg.target.y, camCfg.target.z)
+        // Keep controls in sync with programmatic camera
+        controls.target.set(camCfg.target.x, camCfg.target.y, camCfg.target.z)
+      }
+
+      controls.update()
 
       // Budget on stale
       const budgetScale = stale ? 0.6 : 1.0
@@ -274,10 +340,8 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
 
       comp.composer.render()
 
-      // Fallback if we keep seeing only a degenerate line (heuristic: few fragments)
       frames++
       if (!fallbackArmed && frames > 10) {
-        // If canvas alpha histogram is too empty, we fall back (approximate via WebGL info draw calls)
         const dc = (renderer.info.render.calls || 0)
         if (dc <= 1) {
           fallbackArmed = true
@@ -293,6 +357,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       clearInterval(albumIv)
       window.removeEventListener('resize', updateSizes)
       offFrame?.()
+      controls.dispose()
       floorTex?.dispose()
       scene.traverse(obj => {
         const any = obj as any
@@ -315,7 +380,37 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       return new THREE.Vector3(Math.sin(a) * r, 0, Math.cos(a) * r)
     }
 
-    // Mansion edges generator
+    function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
+
+    async function estimateTextureLuminance(tex: THREE.Texture): Promise<number> {
+      const img = tex.image as HTMLImageElement | HTMLCanvasElement | ImageBitmap
+      // Draw to a tiny canvas to avoid blocking main thread
+      const w = 32, h = 32
+      const c = document.createElement('canvas')
+      c.width = w; c.height = h
+      const g = c.getContext('2d')
+      if (!g) return 0.6
+      try {
+        if (img instanceof HTMLImageElement || img instanceof HTMLCanvasElement) {
+          g.drawImage(img as any, 0, 0, w, h)
+        } else if ('close' in (img as any) || 'width' in (img as any)) {
+          // ImageBitmap
+          g.drawImage(img as any, 0, 0, w, h)
+        }
+      } catch {
+        return 0.6
+      }
+      const data = g.getImageData(0, 0, w, h).data
+      let sum = 0
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i], gr = data[i + 1], b = data[i + 2]
+        // Rec. 709 luma
+        sum += (0.2126 * r + 0.7152 * gr + 0.0722 * b) / 255
+      }
+      return sum / (w * h)
+    }
+
+    // Mansion edges generator (3 floors, wings, gables, porch, balcony, window frames)
     function buildMansionEdges(): Float32Array {
       const out: number[] = []
       const y0 = 0.0, y1 = 1.2, y2 = 2.35, y3 = 3.5 // floors
@@ -440,9 +535,9 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
           [1.55, 2.1],  // story 2
           [2.65, 3.2],  // story 3
         ]
-        const CF = { minX:-2.2, maxX:2.2, minZ:-1.3, maxZ:1.3 }
-        const LW = { minX:-4.2, maxX:-2.2, minZ:-1.6, maxZ:1.6 }
-        const RW = { minX: 2.2, maxX: 4.2, minZ:-1.6, maxZ:1.6 }
+        const CF = { minX:-2.2, maxX: 2.2, minZ:-1.3, maxZ: 1.3 }
+        const LW = { minX:-4.2, maxX:-2.2, minZ:-1.6, maxZ: 1.6 }
+        const RW = { minX: 2.2, maxX: 4.2, minZ:-1.6, maxZ: 1.6 }
         const faces = [
           { minX: CF.minX, maxX: CF.maxX, z: CF.maxZ }, // central front
           { minX: CF.minX, maxX: CF.maxX, z: CF.minZ }, // central back

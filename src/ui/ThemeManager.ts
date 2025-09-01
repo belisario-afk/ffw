@@ -16,73 +16,15 @@ const ALBUM_SKIN_KEY = 'ffw_album_skin'
 let albumSkinUrlCurrent: string | null = null
 let albumSkinStyleEl: HTMLStyleElement | null = null
 
-// Simple theme palettes via CSS variables
 const themes: Record<ThemeName, Record<string, string>> = {
-  album: {
-    // Start with a neutral palette; AlbumSkinWatcher will override via palette extraction
-    '--bg': '#060a0e',
-    '--fg': '#e7f0f7',
-    '--muted': '#8fa1b3',
-    '--accent': '#00f0ff',
-    '--accent-2': '#ff00f0',
-    '--grid': '#0b1220'
-  },
-  neon: {
-    '--bg': '#051018',
-    '--fg': '#e8fcff',
-    '--muted': '#90a7b4',
-    '--accent': '#00f0ff',
-    '--accent-2': '#28ff86',
-    '--grid': '#0b2030'
-  },
-  magenta: {
-    '--bg': '#140613',
-    '--fg': '#fde8fb',
-    '--muted': '#c8a5c5',
-    '--accent': '#ff00f0',
-    '--accent-2': '#ffb300',
-    '--grid': '#2a0f29'
-  },
-  matrix: {
-    '--bg': '#040b07',
-    '--fg': '#d9ffe8',
-    '--muted': '#9fceae',
-    '--accent': '#1aff6d',
-    '--accent-2': '#00f0ff',
-    '--grid': '#0a1e14'
-  },
-  sunset: {
-    '--bg': '#10080f',
-    '--fg': '#ffeae5',
-    '--muted': '#f3aa96',
-    '--accent': '#ff7a59',
-    '--accent-2': '#ffd166',
-    '--grid': '#2b131f'
-  },
-  slate: {
-    '--bg': '#0b0f14',
-    '--fg': '#f0f3f7',
-    '--muted': '#a8b3c2',
-    '--accent': '#66a3ff',
-    '--accent-2': '#ff66a3',
-    '--grid': '#111827'
-  },
-  light: {
-    '--bg': '#f8fafc',
-    '--fg': '#0a0c0f',
-    '--muted': '#5b6169',
-    '--accent': '#0066ff',
-    '--accent-2': '#ff0088',
-    '--grid': '#e5eaf0'
-  },
-  hcpro: {
-    '--bg': '#000000',
-    '--fg': '#ffffff',
-    '--muted': '#bfbfbf',
-    '--accent': '#00ffff',
-    '--accent-2': '#ff00ff',
-    '--grid': '#161616'
-  }
+  album: { '--bg': '#060a0e', '--fg': '#e7f0f7', '--muted': '#8fa1b3', '--accent': '#00f0ff', '--accent-2': '#ff00f0', '--grid': '#0b1220' },
+  neon: { '--bg': '#051018', '--fg': '#e8fcff', '--muted': '#90a7b4', '--accent': '#00f0ff', '--accent-2': '#28ff86', '--grid': '#0b2030' },
+  magenta: { '--bg': '#140613', '--fg': '#fde8fb', '--muted': '#c8a5c5', '--accent': '#ff00f0', '--accent-2': '#ffb300', '--grid': '#2a0f29' },
+  matrix: { '--bg': '#040b07', '--fg': '#d9ffe8', '--muted': '#9fceae', '--accent': '#1aff6d', '--accent-2': '#00f0ff', '--grid': '#0a1e14' },
+  sunset: { '--bg': '#10080f', '--fg': '#ffeae5', '--muted': '#f3aa96', '--accent': '#ff7a59', '--accent-2': '#ffd166', '--grid': '#2b131f' },
+  slate: { '--bg': '#0b0f14', '--fg': '#f0f3f7', '--muted': '#a8b3c2', '--accent': '#66a3ff', '--accent-2': '#ff66a3', '--grid': '#111827' },
+  light: { '--bg': '#f8fafc', '--fg': '#0a0c0f', '--muted': '#5b6169', '--accent': '#0066ff', '--accent-2': '#ff0088', '--grid': '#e5eaf0' },
+  hcpro: { '--bg': '#000000', '--fg': '#ffffff', '--muted': '#bfbfbf', '--accent': '#00ffff', '--accent-2': '#ff00ff', '--grid': '#161616' }
 }
 
 export function getTheme(): ThemeName {
@@ -99,7 +41,6 @@ export function isAlbumSkinEnabled(): boolean {
   const v = localStorage.getItem(ALBUM_SKIN_KEY)
   if (v === 'true') return true
   if (v === 'false') return false
-  // default ON for album theme, OFF otherwise
   return getTheme() === 'album'
 }
 
@@ -107,22 +48,21 @@ export function setAlbumSkinEnabled(on: boolean) {
   localStorage.setItem(ALBUM_SKIN_KEY, String(on))
   document.documentElement.classList.toggle('album-skin', on)
   if (!on) {
-    setAlbumSkin(null) // clear if disabling
+    setAlbumSkin(null)
+  } else if (albumSkinUrlCurrent) {
+    // Reapply last known album image immediately on re-enable
+    setAlbumSkin(albumSkinUrlCurrent)
   }
 }
 
-// Sets/clears album background skin. Pass null to clear.
 export function setAlbumSkin(url: string | null) {
   albumSkinUrlCurrent = url
   ensureAlbumSkinStyle()
   if (!albumSkinStyleEl) return
   if (!url) {
-    albumSkinStyleEl.textContent = `
-      .album-skin body::before { content: none !important; }
-    `
+    albumSkinStyleEl.textContent = `.album-skin body::before { content: none !important; }`
     return
   }
-  // Use a fixed pseudo-element so it sits under the canvas
   albumSkinStyleEl.textContent = `
     .album-skin body::before {
       content: '';
@@ -152,19 +92,13 @@ function applyTheme(t: ThemeName) {
   const palette = themes[t]
   Object.entries(palette).forEach(([k, v]) => root.style.setProperty(k, v))
   root.setAttribute('data-theme', t)
-
-  // When switching away from 'album', keep album skin optional based on toggle.
-  // If switching to 'album' theme and album skin is enabled, keep showing/refresh via AlbumSkinWatcher.
-  const albumOn = isAlbumSkinEnabled()
-  root.classList.toggle('album-skin', albumOn)
+  root.classList.toggle('album-skin', isAlbumSkinEnabled())
 }
 
 export function ThemeManager() {
   useEffect(() => {
     applyTheme(getTheme())
-    // Ensure album-skin style element exists
     ensureAlbumSkinStyle()
-    // Respect persisted toggle
     document.documentElement.classList.toggle('album-skin', isAlbumSkinEnabled())
   }, [])
   return null

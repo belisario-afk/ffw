@@ -13,6 +13,7 @@ import { ThemeManager, setTheme, getTheme, ThemeName, setAlbumSkinEnabled, isAlb
 import { getFPS } from './utils/fps'
 import { detectGPUInfo } from './utils/gpu'
 import { HousePanel, defaultHouseSettings, type HouseSettings } from './ui/HousePanel'
+import { initTransitionManager, requestSceneChange } from './visuals/TransitionManager'
 
 type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
 
@@ -80,11 +81,22 @@ export default function App() {
     localStorage.setItem('ffw_house_settings', JSON.stringify(houseSettings))
   }, [houseSettings])
 
+  // Initialize beat-synced transition manager
+  useEffect(() => {
+    initTransitionManager((name) => {
+      setScene(name)
+      localStorage.setItem('ffw_scene', name)
+    })
+  }, [])
+
   function handleLogin() { loginWithSpotify({ scopes: defaultScopes() }) }
   function handleSignOut() { signOut(); setAuth(null); navigate('/'); location.reload() }
 
   function onThemeChange(t: ThemeName) { setThemeState(t); setTheme(t) }
-  function onSceneChange(v: string) { setScene(v); localStorage.setItem('ffw_scene', v) }
+  function onSceneChange(v: string) {
+    // Switch on next beat (fallback after ~1.2s if no audio)
+    requestSceneChange(v, { waitForBeat: true, timeoutMs: 1200 })
+  }
 
   return (
     <div className="app-shell" role="application" aria-label="FFW Visualizer">

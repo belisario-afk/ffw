@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { AuthState } from '../../auth/token'
 import { ensurePlayerConnected } from '../../spotify/player'
-import { AudioAnalyzer, type AnalysisFrame } from '../../audio/AudioAnalyzer'
+import { AudioAnalyzer } from '../../audio/AudioAnalyzer'
 import { CONFIG } from '../../config'
 import { getPlaybackState } from '../../spotify/api'
 import { extractPaletteFromImage, applyPaletteToCss } from '../../utils/palette'
 import { cacheAlbumArt } from '../../utils/idb'
 import { setAlbumSkin } from '../../ui/ThemeManager'
 import type { HouseSettings } from '../../ui/HousePanel'
+import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
 
 type Props = {
   auth: AuthState | null
@@ -18,15 +19,14 @@ type Props = {
 
 type Vec3 = { x: number; y: number; z: number }
 type Edge = [number, number]
-
-type Ring = { r: number; w: number; a: number }          // floor ring: radius, width, alpha
+type Ring = { r: number; w: number; a: number }
 type Confetti = { p: Vec3; v: Vec3; life: number; hue: number }
 
 export default function WireframeHouse({ auth, quality, accessibility, settings }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [ctx2d, setCtx2d] = useState<CanvasRenderingContext2D | null>(null)
 
-  // Geometry (upright house on ground y=0)
+  // Geometry (house at origin, ground y=0)
   const vertsRef = useRef<Vec3[]>([])
   const restRef = useRef<Vec3[]>([])
   const velRef = useRef<Vec3[]>([])
@@ -38,16 +38,14 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
   const ringsRef = useRef<Ring[]>([])
   const confettiRef = useRef<Confetti[]>([])
 
-  // Camera & dynamics
+  // Dynamics & camera
   const lastBeatAtRef = useRef(0)
   const beatIntensityRef = useRef(0)
   const shakeRef = useRef(0)
   const orbitAngleRef = useRef(0)
 
-  // Analysis/render
-  const analyzerRef = useRef<AudioAnalyzer | null>(null)
-  const lastFrameRef = useRef<AnalysisFrame | null>(null)
-  const rafRef = useRef<number | null>(null)
+  // Reactive frame (from bus)
+  const reactiveRef = useRef<ReactiveFrame | null>(null)
 
   // Meta
   const [trackMeta, setTrackMeta] = useState<{ name: string, artists: string, albumUrl: string }|null>(null)
@@ -69,32 +67,28 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     return () => window.removeEventListener('resize', onResize)
   }, [quality.renderScale])
 
-  // Build geometry (no object rotation; house stays still)
+  // Build geometry once (upright)
   useEffect(() => {
     const base = 1.2, h = 0.9, roofH = 0.95
     const verts: Vec3[] = [
-      // floor (y=0)
       { x: -base, y: 0, z: -base }, { x:  base, y: 0, z: -base },
       { x:  base, y: 0, z:  base }, { x: -base, y: 0, z:  base },
-      // walls top
       { x: -base, y:  h, z: -base }, { x:  base, y:  h, z: -base },
       { x:  base, y:  h, z:  base }, { x: -base, y:  h, z:  base },
-      // roof apex
       { x: 0, y: h + roofH, z: 0 }
     ]
-    const edges: Edge = [
+    const edges: Edge[] = [
       [0,1],[1,2],[2,3],[3,0],
       [4,5],[5,6],[6,7],[7,4],
       [0,4],[1,5],[2,6],[3,7],
       [4,8],[5,8],[6,8],[7,8],
       [4,6],[5,7]
-    ] as any
+    ]
     vertsRef.current = verts.map(v => ({...v}))
     restRef.current = verts.map(v => ({...v}))
     velRef.current = verts.map(() => ({ x: 0, y: 0, z: 0 }))
     edgesRef.current = edges
 
-    // Windows sampling points (front/back faces)
     const windows: Array<{ p: Vec3 }> = []
     const rows = 3, cols = 4
     for (let face = -1; face <= 1; face += 2) {
@@ -108,7 +102,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     windowsRef.current = windows
   }, [])
 
-  // Stars by settings
+  // Stars
   useEffect(() => {
     const stars = Array.from({ length: settings.stars }, () => ({
       x: (Math.random() * 2 - 1) * 2.5,
@@ -119,45 +113,32 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     starsRef.current = stars
   }, [settings.stars])
 
-  // Render loop
+  // Subscribe to reactivity bus
   useEffect(() => {
-    if (!ctx2d || !canvasRef.current) return
-    let running = true
-    let lastT = performance.now()
-    const loop = () => {
-      if (!running) return
-      const now = performance.now()
-      const dt = Math.min(0.05, (now - lastT) / 1000)
-      lastT = now
+    const off = reactivityBus.on('frame', (f) => { reactiveRef.current = f })
+    return () => { off?.() }
+  }, [])
 
-      const frame = lastFrameRef.current || fallbackFrame(now)
-      stepPhysics(frame, dt)
-      drawScene(ctx2d, canvasRef.current!, frame)
-      rafRef.current = requestAnimationFrame(loop)
-    }
-    rafRef.current = requestAnimationFrame(loop)
-    return () => { running = false; if (rafRef.current) cancelAnimationFrame(rafRef.current) }
-  }, [ctx2d, quality, accessibility, settings])
-
-  // Analyzer + palette
+  // Ensure analyzer is running to feed the bus (scene-local)
   useEffect(() => {
     let cancelled = false
     async function boot() {
       if (!auth) return
       try {
         await ensurePlayerConnected()
-        const aEl = findAudioElement()
+        // Setup analyzer to feed the bus
         const analyzer = new AudioAnalyzer({
           fftSize: CONFIG.fftSize,
           smoothing: 0.82,
           epilepsySafe: accessibility.epilepsySafe,
           reducedMotion: accessibility.reducedMotion
         })
-        analyzerRef.current = analyzer
+        // Attach to any page <audio>
+        const aEl = findAudioElement()
         if (aEl) { analyzer.attachMedia(aEl); await analyzer.resume() }
-        analyzer.onFrame = (f) => { lastFrameRef.current = f }
         analyzer.run()
 
+        // Fetch palette from album
         const s = await getPlaybackState().catch(() => null)
         if (s?.item?.album?.images?.length) {
           const url = s.item.album.images[0].url as string
@@ -172,12 +153,33 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
           img.src = blobUrl
           img.onload = () => { applyPaletteToCss(extractPaletteFromImage(img)); setAlbumSkin(blobUrl) }
         }
-      } catch (e) { console.warn('Player init failed', e) }
+      } catch (e) {
+        console.warn('Analyzer init failed', e)
+      }
     }
     boot()
     return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth])
+  }, [auth, accessibility.epilepsySafe, accessibility.reducedMotion])
+
+  // Render loop (always visible)
+  useEffect(() => {
+    if (!ctx2d || !canvasRef.current) return
+    let running = true
+    let lastT = performance.now()
+    const loop = () => {
+      if (!running) return
+      const now = performance.now()
+      const dt = Math.min(0.05, (now - lastT) / 1000)
+      lastT = now
+
+      const f = reactiveRef.current
+      stepPhysics(f, dt)
+      drawScene(ctx2d!, canvasRef.current!, f)
+      requestAnimationFrame(loop)
+    }
+    requestAnimationFrame(loop)
+    return () => { running = false }
+  }, [ctx2d, quality, accessibility, settings])
 
   return (
     <div style={{ height: '100%', position: 'relative' }}>
@@ -198,13 +200,14 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
 
   // ===== Helpers =====
 
-  function stepPhysics(frame: AnalysisFrame, dt: number) {
-    const [low, mid, high] = energies(frame)
+  function stepPhysics(f: ReactiveFrame | null, dt: number) {
+    const low = f?.bands.low ?? 0.1
+    const beat = !!f?.beat
 
-    // Beat gate
+    // Beat-synced dynamics
     const minBeatGap = accessibility.epilepsySafe ? 180 : 120
     const now = performance.now()
-    if (frame.beat && now - lastBeatAtRef.current > minBeatGap) {
+    if (beat && now - lastBeatAtRef.current > minBeatGap) {
       lastBeatAtRef.current = now
       beatIntensityRef.current = Math.min(1, beatIntensityRef.current + 0.6 + low * 0.5)
       shakeRef.current = Math.min(1, shakeRef.current + settings.camShake * 0.8)
@@ -221,14 +224,9 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
         vel[i].z += dir.z * power * (0.8 + Math.random() * 0.2)
       }
 
-      // FX: floor ring
-      if (settings.partyRings) {
-        ringsRef.current.push({ r: 0, w: 0.35, a: 0.6 })
-      }
-
-      // FX: confetti
+      if (settings.partyRings) ringsRef.current.push({ r: 0, w: 0.35, a: 0.6 })
       if (settings.confetti) {
-        const count = 80
+        const count = 70
         for (let i = 0; i < count; i++) {
           confettiRef.current.push({
             p: { x: (Math.random() - 0.5) * 1.0, y: 1.0 + Math.random() * 0.4, z: (Math.random() - 0.5) * 1.0 },
@@ -242,7 +240,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     beatIntensityRef.current *= 0.9
     shakeRef.current *= 0.88
 
-    // Orbit camera angle (reactive speed)
+    // Orbit angle
     if (settings.orbit) {
       const speed = settings.orbitSpeed + low * 0.8 + beatIntensityRef.current * 1.2
       orbitAngleRef.current += speed * dt
@@ -261,7 +259,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
       verts[i].z += vel[i].z * dt
     }
 
-    // Evolve rings (screen-space ellipse approximation)
+    // Rings evolve
     for (const ring of ringsRef.current) {
       ring.r += (2.6 + low * 3.0) * dt
       ring.w += 0.06 * dt
@@ -283,9 +281,12 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     }
   }
 
-  function drawScene(g: CanvasRenderingContext2D, canvas: HTMLCanvasElement, frame: AnalysisFrame) {
+  function drawScene(g: CanvasRenderingContext2D, canvas: HTMLCanvasElement, f: ReactiveFrame | null) {
     const { width: W, height: H } = canvas
-    const [low, mid, high] = energies(frame)
+    const low = f?.bands.low ?? 0.1
+    const mid = f?.bands.mid ?? 0.1
+    const high = f?.bands.high ?? 0.1
+    const loud = f?.loudness ?? 0.1
 
     // Background
     if (quality.motionBlur && !accessibility.reducedMotion) {
@@ -299,24 +300,24 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
       g.fillRect(0, 0, W, H)
     }
 
-    // Accents (+ reactive)
-    const accentBase = getVar('--accent', '#0ff')
-    const accent2Base = getVar('--accent-2', '#f0f')
+    // Colors
+    const accentBase = css('--accent', '#0ff')
+    const accent2Base = css('--accent-2', '#f0f')
     const accent = settings.colorMode === 'reactive' ? mixHex(accentBase, accent2Base, clamp01(high * 0.9)) : accentBase
     const accent2 = settings.colorMode === 'reactive' ? mixHex(accent2Base, accentBase, clamp01(mid * 0.6)) : accent2Base
 
     // Stars
-    drawStars(g, W, H, starsRef.current, frame)
+    stars(g, W, H, starsRef.current, f)
 
-    // Ground glow/horizon
+    // Horizon
     g.globalCompositeOperation = 'lighter'
-    g.fillStyle = withAlpha(accent, (0.05 + frame.loudness * 0.06) * settings.glow)
+    g.fillStyle = withAlpha(accent, (0.05 + loud * 0.06) * settings.glow)
     g.beginPath()
-    g.ellipse(W*0.5, H*0.8, W*0.64, H*(0.12 + frame.loudness * 0.02), 0, 0, Math.PI*2)
+    g.ellipse(W*0.5, H*0.8, W*0.64, H*(0.12 + loud * 0.02), 0, 0, Math.PI*2)
     g.fill()
     g.globalCompositeOperation = 'source-over'
 
-    // True orbit camera (camera moves, house stays at origin)
+    // Camera (true orbit)
     const radius = Math.max(3.5, settings.orbitRadius)
     const angle = settings.orbit ? orbitAngleRef.current : 0
     const elev = settings.orbitElev
@@ -331,45 +332,39 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     cam.x += shakeAmp * Math.sin(t * 27.3)
     cam.y += shakeAmp * Math.cos(t * 31.7)
 
-    // Projection helper
     const proj = (v: Vec3, scale = 1) => projectLookAt(v, cam, target, W, H, scale)
 
     // Grid
-    if (settings.grid) drawGrid(g, proj, { color: withAlpha(accent2, 0.25), beat: beatIntensityRef.current })
+    if (settings.grid) grid(g, proj, { color: withAlpha(accent2, 0.25), beat: beatIntensityRef.current })
 
-    // Floor rings (elliptical pulses approximated in screen space)
+    // Rings
     if (settings.partyRings) drawRings(g, W, H, ringsRef.current, accent)
 
     // Beams
-    if (settings.beams) drawPartyBeams(g, proj, { accent2, high, beat: beatIntensityRef.current })
+    if (settings.beams) partyBeams(g, proj, { accent2, high, beat: beatIntensityRef.current })
 
-    // Wireframe (depth sorted) + EQ edges + jitter
+    // Wireframe
     const scale = 1 + beatIntensityRef.current * 0.06 + low * 0.02
-    drawWire(g, vertsRef.current, edgesRef.current, proj, {
+    wire(g, vertsRef.current, edgesRef.current, proj, {
       accent, accent2,
       glow: quality.bloom ? settings.glow : 0,
       lineWidth: settings.lineWidth * (1 + beatIntensityRef.current * 0.25),
       scale,
       eqEdges: settings.eqEdges,
       edgeJitter: settings.edgeJitter * (0.5 + high * 1.2)
-    }, frame)
+    }, f)
 
     // Windows
-    if (settings.windows) drawWindows(g, windowsRef.current, proj, {
-      accent: accent2,
-      high,
-      beat: beatIntensityRef.current,
-      intensity: settings.windowIntensity
-    })
+    if (settings.windows) win(g, windowsRef.current, proj, { accent: accent2, high, beat: beatIntensityRef.current, intensity: settings.windowIntensity })
 
-    // Confetti on top
-    if (settings.confetti) drawConfetti(g, proj, confettiRef.current)
+    // Confetti
+    if (settings.confetti) confetti(g, proj, confettiRef.current)
   }
 
-  // ---------- Draw helpers ----------
-  function drawStars(g: CanvasRenderingContext2D, W: number, H: number, stars: {x:number;y:number;z:number;b:number}[], frame: AnalysisFrame) {
-    const tw = frame.chroma[0] * 0.6 + frame.chroma[7] * 0.4
-    const base = 0.6 + frame.loudness * 0.3
+  // ----- Drawing primitives -----
+  function stars(g: CanvasRenderingContext2D, W: number, H: number, stars: {x:number;y:number;z:number;b:number}[], f: ReactiveFrame | null) {
+    const tw = (f?.chroma?.[0] ?? 0) * 0.6 + (f?.chroma?.[7] ?? 0) * 0.4
+    const base = 0.6 + (f?.loudness ?? 0) * 0.3
     for (let i = 0; i < stars.length; i++) {
       const s = stars[i]
       const fx = (s.x / s.z) * 240 + (W / 2)
@@ -381,7 +376,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     }
   }
 
-  function drawGrid(
+  function grid(
     g: CanvasRenderingContext2D,
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
     opts: { color: string, beat: number }
@@ -417,7 +412,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     }
   }
 
-  function drawPartyBeams(
+  function partyBeams(
     g: CanvasRenderingContext2D,
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
     opts: { accent2: string, high: number, beat: number }
@@ -438,20 +433,19 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     g.globalCompositeOperation = 'source-over'
   }
 
-  function drawWire(
+  function wire(
     g: CanvasRenderingContext2D,
     verts: Vec3[], edges: Edge[],
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
     opts: { accent: string, accent2: string, glow: number, lineWidth: number, scale: number, eqEdges: boolean, edgeJitter: number },
-    frame: AnalysisFrame
+    f: ReactiveFrame | null
   ) {
     const P = verts.map(v => proj(v, opts.scale))
     const es = edges.map(([a,b], idx) => ({ a, b, z: (P[a].z + P[b].z) * 0.5, idx }))
       .sort((e1, e2) => e2.z - e1.z)
 
-    // jitter amount in pixels
-    const t = performance.now()/1000
     const jitter = opts.edgeJitter
+    const t = performance.now()/1000
     const jitterPoint = (pt: {x:number;y:number}, seed: number) => {
       if (jitter <= 0.001) return pt
       const j = (Math.sin(seed * 13.37 + t * 9.1) + Math.cos(seed * 7.91 + t * 6.7)) * 0.5
@@ -459,17 +453,18 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
       return { x: pt.x + j * amp, y: pt.y + j * amp * 0.6 }
     }
 
-    const [low, mid, high] = energies(frame)
+    const low = f?.bands.low ?? 0.1
+    const mid = f?.bands.mid ?? 0.1
+    const high = f?.bands.high ?? 0.1
     const bandE = (edgeIdx: number) => {
-      // map edge index to band weight
-      const f = (edgeIdx % 16) / 16
-      return f < 0.33 ? low : f < 0.66 ? mid : high
+      const frac = (edgeIdx % 16) / 16
+      return frac < 0.33 ? low : frac < 0.66 ? mid : high
     }
 
     g.globalCompositeOperation = 'lighter'
     if (opts.glow > 0) { g.shadowColor = opts.accent; g.shadowBlur = 10 * opts.glow } else { g.shadowBlur = 0 }
 
-    // Back pass (use accent2 tint)
+    // Back pass
     g.lineWidth = opts.lineWidth
     for (const e of es) {
       const a = jitterPoint(P[e.a], e.idx + 1)
@@ -481,7 +476,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
       g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke()
     }
 
-    // Front pass brighter
+    // Front pass
     g.lineWidth = opts.lineWidth + 0.7
     for (const e of es) {
       const a = jitterPoint(P[e.a], e.idx + 3)
@@ -491,11 +486,12 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
       g.strokeStyle = withAlpha(col, 0.95)
       g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke()
     }
+
     g.globalCompositeOperation = 'source-over'
     g.shadowBlur = 0
   }
 
-  function drawWindows(
+  function win(
     g: CanvasRenderingContext2D,
     windows: Array<{ p: Vec3 }>,
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
@@ -512,7 +508,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     }
   }
 
-  function drawConfetti(
+  function confetti(
     g: CanvasRenderingContext2D,
     proj: (v: Vec3, scale?: number) => { x: number; y: number; z: number },
     conf: Confetti[]
@@ -525,7 +521,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     }
   }
 
-  // Look-at projection (Y-up)
+  // Look-at projection, Y-up
   function projectLookAt(v: Vec3, cam: Vec3, target: Vec3, W: number, H: number, scale = 1) {
     const p = { x: v.x * scale - cam.x, y: v.y * scale - cam.y, z: v.z * scale - cam.z }
     const up = { x: 0, y: 1, z: 0 }
@@ -539,40 +535,15 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     return { x: cx * persp + W / 2, y: -cy * persp + H * 0.68, z: cz }
   }
 
-  // Math helpers
+  // Math
   function sub(a: Vec3, b: Vec3): Vec3 { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z } }
   function dot(a: Vec3, b: Vec3) { return a.x*b.x + a.y*b.y + a.z*b.z }
   function cross(a: Vec3, b: Vec3): Vec3 { return { x: a.y*b.z - a.z*b.y, y: a.z*b.x - a.x*b.z, z: a.x*b.y - a.y*b.x } }
   function norm(v: Vec3): Vec3 { const l = Math.hypot(v.x, v.y, v.z) || 1; return { x: v.x / l, y: v.y / l, z: v.z / l } }
 
-  function energies(frame: AnalysisFrame): [number, number, number] {
-    const arr = frame.fftLog, N = arr.length
-    const band = (a: number, b: number) => {
-      const i0 = Math.max(0, Math.floor(a * N)), i1 = Math.min(N, Math.floor(b * N))
-      let s = 0, c = Math.max(1, i1 - i0)
-      for (let i = i0; i < i1; i++) s += arr[i]
-      return s / c
-    }
-    return [band(0.0, 0.18), band(0.18, 0.55), band(0.55, 1.0)]
-  }
-
-  function fallbackFrame(now: number): AnalysisFrame {
-    const t = now / 1000
-    const fft = new Float32Array(2048).fill(0).map((_, i) => 0.08 + 0.04 * Math.sin(i * 0.02 + t * 2))
-    const fftLog = new Float32Array(256).fill(0).map((_, i) => 0.1 + 0.06 * Math.sin(i * 0.12 + t * 2.2))
-    const chroma = new Float32Array(12).fill(0)
-    return { time: t, fft, fftLog, chroma, loudness: 0.12, beat: false, tempo: 120 }
-  }
-
-  function findAudioElement(): HTMLAudioElement | undefined {
-    const els = Array.from(document.querySelectorAll('audio')) as HTMLAudioElement[]
-    return els.find(el => !!el.src)
-  }
-
-  function getVar(name: string, fallback: string) {
+  function css(name: string, fallback: string) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
   }
-
   function withAlpha(hexOrCss: string, a: number) {
     if (hexOrCss.startsWith('#')) {
       const h = hexOrCss.replace('#','')
@@ -587,7 +558,6 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     }
     return hexOrCss
   }
-
   function mixHex(a: string, b: string, t: number) {
     const ca = hexToRgb(a), cb = hexToRgb(b)
     const m = (x: number, y: number) => Math.round(x + (y - x) * t)
@@ -599,4 +569,9 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
   }
   function toHex(n: number) { return n.toString(16).padStart(2,'0') }
   function clamp01(x: number) { return Math.max(0, Math.min(1, x)) }
+}
+
+function findAudioElement(): HTMLAudioElement | undefined {
+  const els = Array.from(document.querySelectorAll('audio')) as HTMLAudioElement[]
+  return els.find(el => !!el.src)
 }

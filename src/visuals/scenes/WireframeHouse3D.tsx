@@ -1,5 +1,4 @@
-// Minimal, calmer defaults + lyrics marquee + token wiring from props.auth.
-// Film grain/motion blur disabled to avoid WebGL 3D texture warnings in some setups.
+// Minimal scene + robust lyrics + safe mosaic defaults.
 
 import React, { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
@@ -13,7 +12,7 @@ import type { AuthState } from '../../auth/token'
 import { getPlaybackState } from '../../spotify/api'
 import { cacheAlbumArt } from '../../utils/idb'
 import { ensurePlayerConnected, hasSpotifyTokenProvider, setSpotifyTokenProvider } from '../../spotify/player'
-import { fetchLyrics } from '../../lyrics/provider' // NEW
+import { fetchLyrics } from '../../lyrics/provider'
 
 type Props = {
   auth: AuthState | null
@@ -84,11 +83,7 @@ function defaults(initial?: any): LocalCfg {
       autoRotate: initial?.camera?.autoRotate ?? false,
       autoRotateSpeed: clamp(initial?.camera?.autoRotateSpeed ?? 0.5, 0.05, 5),
       autoPath: initial?.camera?.autoPath ?? true,
-      target: {
-        x: initial?.camera?.target?.x ?? 0,
-        y: initial?.camera?.target?.y ?? 2.2,
-        z: initial?.camera?.target?.z ?? 0
-      }
+      target: { x: 0, y: 2.2, z: 0 }
     },
     fx: {
       beams: initial?.fx?.beams ?? false,
@@ -105,23 +100,16 @@ function defaults(initial?: any): LocalCfg {
 export default function WireframeHouse3D({ auth, quality, accessibility, settings }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [cfg, setCfg] = useState<LocalCfg>(() => {
-    try {
-      const saved = localStorage.getItem(LS_KEY)
-      if (saved) return { ...defaults(settings), ...JSON.parse(saved) }
-    } catch {}
+    try { const saved = localStorage.getItem(LS_KEY); if (saved) return { ...defaults(settings), ...JSON.parse(saved) } } catch {}
     return defaults(settings)
   })
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Provide token to Spotify player if available from props.auth
   useEffect(() => {
     const token = (auth as any)?.accessToken
-    if (token) {
-      try { setSpotifyTokenProvider(async () => token) } catch {}
-    }
+    if (token) { try { setSpotifyTokenProvider(async () => token) } catch {} }
   }, [auth])
 
-  // Connect Web Playback SDK device (guarded)
   useEffect(() => {
     if (hasSpotifyTokenProvider()) {
       ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
@@ -131,7 +119,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     }
   }, [])
 
-  // Allow global gear to open this panel
   useEffect(() => {
     const open = () => setPanelOpen(true)
     const close = () => setPanelOpen(false)
@@ -143,15 +130,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     }
   }, [])
 
-  // Persist settings
-  useEffect(() => {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)) } catch {}
-  }, [cfg])
+  useEffect(() => { try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)) } catch {} }, [cfg])
 
   useEffect(() => {
     if (!canvasRef.current) return
 
-    // Scene & camera
     const scene = new THREE.Scene()
     scene.background = null
     scene.fog = new THREE.Fog(new THREE.Color('#050607'), 50, 140)
@@ -160,7 +143,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     camera.position.set(0, 2.8, 12.5)
     camera.lookAt(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
 
-    // Renderer + post
     const { renderer, dispose: disposeRenderer } = createRenderer(canvasRef.current, quality.renderScale)
     const comp = createComposer(renderer, scene, camera, {
       bloom: quality.bloom,
@@ -174,8 +156,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       filmGrainStrength: 0.0,
       motionBlur: false
     })
+    // NOTE: If you still see texImage3D warnings from Renderer.ts, ensure any 3D texture pass sets UNPACK_FLIP_Y_WEBGL=false before upload.
 
-    // Orbit Controls
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = cfg.camera.enableDamping
     controls.dampingFactor = cfg.camera.dampingFactor
@@ -193,85 +175,67 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     controls.autoRotateSpeed = cfg.camera.autoRotateSpeed
     let userInteracting = false
     controls.addEventListener('start', () => { userInteracting = true })
-    controls.addEventListener('end', () => {
-      userInteracting = false
-      controls.target.set(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
-    })
+    controls.addEventListener('end', () => { userInteracting = false; controls.target.set(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z) })
 
-    // Palette (calmer tones)
     const baseAccent = new THREE.Color('#77d0ff')
     const baseAccent2 = new THREE.Color('#a7b8ff')
     const accent = baseAccent.clone()
     const accent2 = baseAccent2.clone()
 
-    // Grid (very faint)
     const grid = new THREE.GridHelper(160, 160, accent2.clone().multiplyScalar(0.25), accent2.clone().multiplyScalar(0.08))
     ;(grid.material as THREE.Material).transparent = true
     ;(grid.material as THREE.Material).opacity = 0.05
     grid.position.y = 0
     scene.add(grid)
 
-    // Album floor — ShaderMaterial (simplified, no ripple)
+    // Floor (no ripple)
     const floorSize = 22
     const floorGeom = new THREE.PlaneGeometry(floorSize, floorSize, 1, 1)
     const floorMat = new THREE.ShaderMaterial({
-      uniforms: {
-        tAlbum: { value: null as THREE.Texture | null },
-        uDim: { value: 0.82 },
-        uOpacity: { value: 0.85 }
-      },
-      transparent: true,
-      depthWrite: false,
-      vertexShader: `
-        precision highp float;
-        varying vec2 vUv;
-        void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
-      `,
+      uniforms: { tAlbum: { value: null as THREE.Texture | null }, uDim: { value: 0.82 }, uOpacity: { value: 0.85 } },
+      transparent: true, depthWrite: false,
+      vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
       fragmentShader: `
         precision highp float;
         varying vec2 vUv;
-        uniform sampler2D tAlbum;
-        uniform float uDim, uOpacity;
-        void main() {
-          vec4 tex = texture2D(tAlbum, vUv);
-          vec3 col = mix(vec3(0.06,0.08,0.1), tex.rgb, 0.6) * uDim;
+        uniform sampler2D tAlbum; uniform float uDim, uOpacity;
+        void main(){
+          vec3 bg = vec3(0.06,0.08,0.1);
+          vec3 col = mix(bg, texture2D(tAlbum, vUv).rgb, 0.6) * uDim;
           gl_FragColor = vec4(col, uOpacity);
-        }
-      `
+        }`
     })
     const floorMesh = new THREE.Mesh(floorGeom, floorMat)
     floorMesh.rotation.x = -Math.PI / 2
     floorMesh.position.y = 0.001
     scene.add(floorMesh)
 
-    // Mosaic floor (optional)
+    // Mosaic floor — start with dark placeholder to avoid bright white tiles
     const mosaicGroup = new THREE.Group()
     const tiles: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
     const tileN = 8
     const tileSize = floorSize / tileN
+    const placeholderTex = createDarkPlaceholderTexture()
     for (let y = 0; y < tileN; y++) {
       for (let x = 0; x < tileN; x++) {
         const g = new THREE.PlaneGeometry(tileSize, tileSize)
-        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, map: null, transparent: true, opacity: 0.8, depthWrite: false })
+        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, map: placeholderTex, transparent: true, opacity: 0.8, depthWrite: false, toneMapped: false })
+        m.color.setScalar(0.85) // dim
         const mesh = new THREE.Mesh(g, m)
         mesh.rotation.x = -Math.PI / 2
         mesh.position.set((x + 0.5) * tileSize - floorSize / 2, 0.0025, (y + 0.5) * tileSize - floorSize / 2)
         mosaicGroup.add(mesh); tiles.push(mesh)
       }
     }
-    mosaicGroup.visible = !!cfg.fx.mosaicFloor
+    // Show mosaic only when we have at least one cover
+    mosaicGroup.visible = false
     scene.add(mosaicGroup)
 
-    // Mansion edges (fat lines + thin fallback)
+    // Mansion edges
     const mansionPositions = buildMansionEdges()
     const fatGeo = new LineSegmentsGeometry()
     fatGeo.setPositions(mansionPositions)
-    const fatMat = new LineMaterial({
-      color: accent.getHex(),
-      transparent: true,
-      opacity: 0.95,
-      depthTest: true
-    })
+    const fatMat = new LineMaterial({ color: accent.getHex(), transparent: true, opacity: 0.95, depthTest: true })
     ;(fatMat as any).worldUnits = false
     const setLinePixels = (px: number) => {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
@@ -293,12 +257,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     thinLines.visible = false
     scene.add(thinLines)
 
-    // Windows (we keep meshes but no flicker — constant low opacity or invisible)
+    // Static windows (no flicker)
     const windowGroup = new THREE.Group()
     {
       const winGeom = new THREE.PlaneGeometry(0.22, 0.16)
       const addWindow = (p: THREE.Vector3, out: THREE.Vector3) => {
-        const m = new THREE.MeshBasicMaterial({ color: accent2, transparent: true, opacity: 0.15 }) // static, subtle
+        const m = new THREE.MeshBasicMaterial({ color: accent2, transparent: true, opacity: 0.12 })
         const mesh = new THREE.Mesh(winGeom, m)
         mesh.position.copy(p)
         mesh.lookAt(p.clone().add(out))
@@ -308,13 +272,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       scene.add(windowGroup)
     }
 
-    // Optional Starfield, Beams, Smoke (default off)
+    // Optional background
     let starfield: THREE.Points | null = null
     const beamGroup = new THREE.Group()
-    const smokeGroup = new THREE.Group()
-    let smokeTex: THREE.Texture | null = null
-    const smokeEmitters = [ new THREE.Vector3(-0.8, 3.75, 0.2), new THREE.Vector3(0.9, 3.75,-0.25) ]
-    const smokeSprites: THREE.Sprite[] = []
     if (cfg.fx.starfield) {
       const g = new THREE.BufferGeometry()
       const N = 900
@@ -343,27 +303,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
       scene.add(beamGroup)
     }
-    if (cfg.fx.chimneySmoke) {
-      smokeTex = createSoftCircleTexture()
-      if (smokeTex) {
-        for (let i=0;i<40;i++) {
-          const mat = new THREE.SpriteMaterial({ map: smokeTex, color: 0xffffff, transparent: true, opacity: 0, depthWrite: false })
-          const s = new THREE.Sprite(mat)
-          resetSmoke(s, smokeEmitters[i%smokeEmitters.length], true)
-          smokeGroup.add(s); smokeSprites.push(s)
-        }
-        scene.add(smokeGroup)
-      }
-    }
 
-    // Haze (subtle)
+    // Haze
     const fogSheet = (() => {
       const geom = new THREE.PlaneGeometry(34, 12)
       const mat = new THREE.ShaderMaterial({
         uniforms: { uTime: { value: 0 }, uIntensity: { value: 0 }, uColor: { value: new THREE.Color(0xa9cfff) } },
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
         vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
         fragmentShader: `
           precision highp float; varying vec2 vUv; uniform float uTime; uniform float uIntensity; uniform vec3 uColor;
@@ -371,8 +317,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           float noise(vec2 p){ vec2 i=floor(p), f=fract(p); float a=hash(i), b=hash(i+vec2(1.,0.)), c=hash(i+vec2(0.,1.)), d=hash(i+vec2(1.,1.));
             vec2 u=f*f*(3.-2.*f); return mix(a,b,u.x)+ (c-a)*u.y*(1.-u.x) + (d-b)*u.x*u.y; }
           void main(){ float n=noise(vUv*2.2+vec2(uTime*0.025,0.0)); float m=smoothstep(0.32,0.78,n);
-            float alpha=m*uIntensity*0.38; gl_FragColor=vec4(uColor,alpha); }
-        `
+            float alpha=m*uIntensity*0.38; gl_FragColor=vec4(uColor,alpha); }`
       })
       const mesh = new THREE.Mesh(geom, mat)
       mesh.position.set(0, 3.2, -1.4); mesh.rotation.x = -0.06
@@ -380,7 +325,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       return mesh
     })()
 
-    // Lyrics marquee
+    // Lyrics marquee (always create a visible fallback)
     let marqueeMat: THREE.ShaderMaterial | null = null
     let marqueeTex: THREE.Texture | null = null
     let marqueeMesh: THREE.Mesh | null = null
@@ -390,24 +335,47 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       canvas.width = 2048; canvas.height = 128
       const g = canvas.getContext('2d')!
       g.clearRect(0,0,canvas.width,canvas.height)
-      g.fillStyle = '#ffffff'; g.font = '600 72px system-ui, sans-serif'; g.textBaseline = 'middle'
-      const gap = 90; const metrics = g.measureText(text); const w = Math.max(metrics.width + gap, 500)
-      let x = 0; while (x < canvas.width + w) { g.fillText(text, x, canvas.height/2); x += w }
-      const tex = new THREE.CanvasTexture(canvas); tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.ClampToEdgeWrapping
-      tex.repeat.set(2, 1); tex.colorSpace = THREE.SRGBColorSpace
+      // readability
+      g.font = '600 72px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
+      g.textBaseline = 'middle'
+      g.fillStyle = '#ffffff'
+      g.shadowColor = 'rgba(0,0,0,0.85)'
+      g.shadowBlur = 6
+      const gap = 90
+      const metrics = g.measureText(text)
+      const w = Math.max(metrics.width + gap, 500)
+      let x = 0
+      while (x < canvas.width + w) { g.fillText(text, x, canvas.height/2); x += w }
+
+      const tex = new THREE.CanvasTexture(canvas)
+      tex.wrapS = THREE.RepeatWrapping
+      tex.wrapT = THREE.ClampToEdgeWrapping
+      tex.repeat.set(2, 1)
+      tex.colorSpace = THREE.SRGBColorSpace
       marqueeTex?.dispose(); marqueeTex = tex
 
       if (!marqueeMat) {
         marqueeMat = new THREE.ShaderMaterial({
-          uniforms: { tText: { value: marqueeTex }, uScroll: { value: 0 }, uOpacity: { value: 0.0 }, uTint: { value: new THREE.Color(0xffffff) } },
+          uniforms: {
+            tText: { value: marqueeTex },
+            uScroll: { value: 0 },
+            uOpacity: { value: 0.7 }, // strong baseline so it's clearly visible
+            uTint: { value: new THREE.Color(0xffffff) }
+          },
           transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
           vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
           fragmentShader: `
-            precision highp float; varying vec2 vUv; uniform sampler2D tText; uniform float uScroll; uniform float uOpacity; uniform vec3 uTint;
-            void main(){ vec2 uv=vUv; uv.x=fract(uv.x+uScroll); vec4 c=texture2D(tText, uv); gl_FragColor=vec4(c.rgb*uTint, c.a*uOpacity); }
-          `
+            precision highp float; varying vec2 vUv;
+            uniform sampler2D tText; uniform float uScroll; uniform float uOpacity; uniform vec3 uTint;
+            void main(){
+              vec2 uv=vUv; uv.x=fract(uv.x+uScroll);
+              vec4 c=texture2D(tText, uv);
+              // edge fade for cleaner look
+              float edge = smoothstep(0.0,0.06,uv.x) * smoothstep(1.0,0.94,uv.x);
+              gl_FragColor = vec4(c.rgb*uTint, c.a * uOpacity * edge);
+            }`
         })
-        const geom = new THREE.PlaneGeometry(3.8, 0.22)
+        const geom = new THREE.PlaneGeometry(4.4, 0.26) // slightly larger
         marqueeMesh = new THREE.Mesh(geom, marqueeMat)
         marqueeMesh.position.set(0, 2.48, 1.305)
         scene.add(marqueeMesh)
@@ -416,19 +384,25 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         marqueeMat.needsUpdate = true
       }
     }
-    if (cfg.fx.lyricsMarquee) { marqueeText = 'FFw Visualizer'; setupMarquee(marqueeText) }
+    if (cfg.fx.lyricsMarquee) {
+      marqueeText = 'FFw Visualizer'
+      setupMarquee(marqueeText)
+    }
 
-    // Album cover + lyrics
+    // Covers + lyrics
     let floorTex: THREE.Texture | null = null
+    const coverTextures: THREE.Texture[] = []
     let currentTrackId: string | null = null
+
     const loadAlbumCoverAndLyrics = async () => {
       try {
-        const s = await getPlaybackState().catch(() => null)
+        const s = await getPlaybackState().catch(() => null) // may 403 if scope missing
         const id = (s?.item?.id as string) || null
         const url = (s?.item?.album?.images?.[0]?.url as string) || null
         const title = (s?.item?.name as string) || ''
         const artist = (s?.item?.artists?.[0]?.name as string) || ''
-        // Cover
+
+        // Covers
         if (url) {
           const blobUrl = await cacheAlbumArt(url).catch(() => url)
           const tex = await new Promise<THREE.Texture>((resolve, reject) => {
@@ -440,29 +414,41 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           tex.magFilter = THREE.LinearFilter
           tex.generateMipmaps = true
 
+          // Dimness based on cover brightness
           const brightness = await estimateTextureLuminance(tex).catch(() => 0.6)
           const dim = clamp(1.02 - brightness * 0.45, 0.6, 0.92)
           floorMat.uniforms.uDim.value = dim
           floorMat.uniforms.uOpacity.value = clamp(0.9 - (brightness - 0.6) * 0.25, 0.65, 0.9)
 
           floorTex?.dispose(); floorTex = tex
-          floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
+          floorMat.uniforms.tAlbum.value = tex
+          floorMat.needsUpdate = true
+
+          coverTextures.push(tex)
+          if (cfg.fx.mosaicFloor && tiles.length && coverTextures.length === 1) {
+            // First usable cover => enable mosaic
+            mosaicGroup.visible = true
+            // seed all tiles with the first cover
+            tiles.forEach(t => { t.material.map = tex; t.material.toneMapped = false; t.material.color.setScalar(0.85); t.material.needsUpdate = true })
+          }
+        } else {
+          // No cover available: hide mosaic to avoid white tiles
+          mosaicGroup.visible = false
         }
-        // Lyrics: on track change try provider; otherwise show Title — Artist
-        if (cfg.fx.lyricsMarquee && id && id !== currentTrackId) {
+
+        // Lyrics
+        if (cfg.fx.lyricsMarquee && (title || artist) && id && id !== currentTrackId) {
           currentTrackId = id
           let line = title && artist ? `${title} — ${artist}` : (title || artist || '')
           try {
-            // Allow user override
+            // User override first
             const hook = (window as any).__ffw__getLyrics
             if (typeof hook === 'function') {
               const res = await hook({ id, title, artist })
-              if (res) {
-                const plain = Array.isArray(res) ? res.join('  •  ') : (res.text || '')
-                if (plain) line = plain
-              }
+              const plain = normalizeLyrics(res)
+              if (plain) line = plain
             } else {
-              // Try LRCLIB (best-effort, no auth)
+              // LRCLIB fallback
               const lr = await fetchLyrics({ title, artist })
               if (lr?.plain) line = lr.plain
             }
@@ -477,7 +463,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     // Reactivity
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
-    // No more floor ripple, no window flicker updates
+
     // Resize
     const updateSizes = () => {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
@@ -492,7 +478,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     window.addEventListener('resize', updateSizes)
     updateSizes()
 
-    // Fallback watch
     let frames = 0
     let fallbackArmed = false
 
@@ -510,16 +495,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const high = latest?.bands.high ?? 0.08
       const loud = latest?.loudness ?? 0.15
 
-      // Calmer accent modulation (narrow range)
       accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.25, 0, 0.25))
       accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.2, 0, 0.2))
       fatMat.color.set(accent); thinMat.color.set(accent)
 
-      // Line width: subtle pulse
       const px = cfg.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
       setLinePixels(px)
 
-      // Optional effects
       if (cfg.fx.beams) {
         beamGroup.rotation.y += dt * (0.2 + high * 1.2)
         beamGroup.children.forEach((b) => {
@@ -539,59 +521,25 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       fogMat.uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
       ;(fogMat.uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
 
-      // Toggle floor visibility according to mosaic setting
-      floorMesh.visible = !cfg.fx.mosaicFloor
-      mosaicGroup.visible = !!cfg.fx.mosaicFloor
+      // Mosaic visibility respects having covers
+      mosaicGroup.visible = !!cfg.fx.mosaicFloor && coverTextures.length > 0
+      floorMesh.visible = !mosaicGroup.visible
 
-      // Smoke
-      if (cfg.fx.chimneySmoke) {
-        smokeSprites.forEach((s, i) => {
-          const mat = s.material as THREE.SpriteMaterial
-          s.position.y += dt * (0.28 + loud * 1.0)
-          s.position.x += Math.sin(t * 0.4 + i) * 0.001
-          s.position.z += Math.cos(t * 0.35 + i * 0.7) * 0.001
-          s.scale.setScalar(0.3 + Math.min(1.0, t * 0.02 + loud * 0.25))
-          mat.opacity = Math.min(0.4, (mat.opacity ?? 0) + dt * 0.2)
-          if (s.position.y > 6) resetSmoke(s, smokeEmitters[i%smokeEmitters.length], false)
-        })
-      }
-
-      // Lyrics marquee
+      // Lyrics marquee — keep visible and readable even when stale
       if (cfg.fx.lyricsMarquee && marqueeMat) {
-        marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * (0.045 + loud * 0.35)) % 1
-        const baseOpacity = stale ? 0.35 : 0.18
-        marqueeMat.uniforms.uOpacity.value = THREE.MathUtils.clamp(baseOpacity + loud * 0.6, 0, 0.8)
+        marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.05) % 1
+        // Clamp minimum opacity high enough to be seen
+        const minOp = 0.55
+        const extra = THREE.MathUtils.clamp(loud * 0.3, 0, 0.3)
+        marqueeMat.uniforms.uOpacity.value = Math.min(0.9, minOp + extra)
         ;(marqueeMat.uniforms.uTint.value as THREE.Color).copy(accent)
-      } else if (marqueeMat) {
-        marqueeMat.uniforms.uOpacity.value = 0.0
       }
 
-      // Camera auto path
-      if (cfg.camera.autoPath && !userInteracting) {
-        const baseSpeed = (cfg.orbitSpeed ?? 0.35) * (stale ? 0.15 : 1.0)
-        angle += dt * (baseSpeed + low * 0.7 + (latest?.beatStrength ?? 0) * 0.9)
-        const radius = THREE.MathUtils.clamp((cfg.orbitRadius ?? 9.5) + Math.sin((latest?.phases.bar ?? 0) * Math.PI * 2) * 0.2, 6.0, 12.0)
-        const elev = (cfg.orbitElev ?? 0.06)
-        const pos = pathPoint(cfg.path, angle, radius)
-        camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + (cfg.camBob || 0) * (0.0 + low * 0.2), pos.z)
-        camera.lookAt(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
-        controls.target.set(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
-      }
-
-      // Optional bloom tweak
-      if (cfg.fx.bloomBreath) {
-        const strength = THREE.MathUtils.clamp(0.55 + high * 0.9 + (latest?.beat ? 0.25 : 0), 0, accessibility.epilepsySafe ? 0.9 : 1.4)
-        const threshold = THREE.MathUtils.clamp(0.3 + (1.0 - high) * 0.25, 0.08, 0.55)
-        try { (comp as any).updatePost?.({ bloom: true, bloomStrength: strength, bloomRadius: 0.25, bloomThreshold: threshold, fxaa: true, vignette: true, vignetteStrength: 0.45, filmGrain: false, filmGrainStrength: 0.0, motionBlur: false }) } catch {}
-      }
-
-      // Budget on stale
       ;(grid.material as THREE.Material).opacity = 0.05 * (stale ? 0.6 : 1.0)
 
       controls.update()
       comp.composer.render()
 
-      // Fallback to thin lines if fat lines fail to draw
       frames++
       if (!fallbackArmed && frames > 10) {
         const dc = (renderer.info.render.calls || 0)
@@ -615,7 +563,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.dispose()
       floorTex?.dispose()
       marqueeTex?.dispose?.()
-      smokeTex?.dispose?.()
       scene.traverse(obj => {
         const any = obj as any
         if (any.geometry?.dispose) any.geometry.dispose()
@@ -629,7 +576,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       renderer.dispose()
     }
 
-    // Helpers
     async function estimateTextureLuminance(tex: THREE.Texture): Promise<number> {
       const img = tex.image as HTMLImageElement | HTMLCanvasElement | ImageBitmap
       const w = 32, h = 32
@@ -744,11 +690,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const LW = { minX:-4.0, maxX:-2.2, minZ:-1.4, maxZ:1.4 }
       const RW = { minX: 2.2, maxX: 4.0, minZ:-1.4, maxZ:1.4 }
       const addFace = (minX:number, maxX:number, z:number, out:THREE.Vector3, cols:number) => {
-        for (let s=0; s<storyY.length; s++) {
-          for (let i=0;i<cols;i++) {
-            const x = THREE.MathUtils.lerp(minX+0.22, maxX-0.22, (i+0.5)/cols)
-            add(new THREE.Vector3(x, storyY[s], z), out)
-          }
+        for (let s=0; s<storyY.length; s++) for (let i=0;i<cols;i++) {
+          const x = THREE.MathUtils.lerp(minX+0.22, maxX-0.22, (i+0.5)/cols)
+          add(new THREE.Vector3(x, storyY[s], z), out)
         }
       }
       addFace(CF.minX, CF.maxX, CF.maxZ+0.001, new THREE.Vector3(0,0, 1), 6)
@@ -757,29 +701,41 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       addFace(LW.minX, LW.maxX, LW.minZ-0.001, new THREE.Vector3(0,0,-1), 4)
       addFace(RW.minX, RW.maxX, RW.maxZ+0.001, new THREE.Vector3(0,0, 1), 4)
       addFace(RW.minX, RW.maxX, RW.minZ-0.001, new THREE.Vector3(0,0,-1), 4)
-      for (let s=0; s<storyY.length; s++) {
-        for (let i=0;i<4;i++) {
-          const z = THREE.MathUtils.lerp(CF.minZ+0.1, CF.maxZ-0.1, (i+0.5)/4)
-          add(new THREE.Vector3(-2.201, storyY[s], z), new THREE.Vector3(-1,0,0))
-          add(new THREE.Vector3( 2.201, storyY[s], z), new THREE.Vector3( 1,0,0))
-        }
+      for (let s=0; s<storyY.length; s++) for (let i=0;i<4;i++) {
+        const z = THREE.MathUtils.lerp(CF.minZ+0.1, CF.maxZ-0.1, (i+0.5)/4)
+        add(new THREE.Vector3(-2.201, storyY[s], z), new THREE.Vector3(-1,0,0))
+        add(new THREE.Vector3( 2.201, storyY[s], z), new THREE.Vector3( 1,0,0))
       }
     }
 
-    function createSoftCircleTexture(): THREE.Texture | null {
-      try {
-        const c = document.createElement('canvas'); c.width = c.height = 64
-        const g = c.getContext('2d')!
-        const grd = g.createRadialGradient(32,32,2, 32,32,32)
-        grd.addColorStop(0, 'rgba(255,255,255,0.9)'); grd.addColorStop(0.5, 'rgba(255,255,255,0.25)'); grd.addColorStop(1, 'rgba(255,255,255,0.0)')
-        g.fillStyle = grd; g.fillRect(0,0,64,64)
-        const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace
-        return tex
-      } catch { return null }
+    function createDarkPlaceholderTexture(): THREE.Texture {
+      const c = document.createElement('canvas')
+      c.width = c.height = 64
+      const g = c.getContext('2d')!
+      g.fillStyle = '#0b0e13'
+      g.fillRect(0,0,64,64)
+      g.fillStyle = '#111722'
+      for (let y=0;y<8;y++) for (let x=0;x<8;x++) {
+        if ((x+y)%2===0) g.fillRect(x*8,y*8,8,8)
+      }
+      const tex = new THREE.CanvasTexture(c)
+      tex.colorSpace = THREE.SRGBColorSpace
+      tex.anisotropy = 1
+      return tex
     }
-    function resetSmoke(s: THREE.Sprite, origin: THREE.Vector3, instant = false) {
-      s.position.copy(origin); s.scale.setScalar(0.2 + Math.random()*0.2)
-      const mat = s.material as THREE.SpriteMaterial; mat.opacity = instant ? Math.random()*0.35 : 0
+
+    function normalizeLyrics(input: any): string {
+      if (!input) return ''
+      if (typeof input === 'string') return collapse(input)
+      if (Array.isArray(input)) return input.map(String).join('  •  ')
+      if (typeof input === 'object') {
+        if (input.text) return collapse(String(input.text))
+        if (Array.isArray(input.lines)) return input.lines.map(String).join('  •  ')
+      }
+      return ''
+    }
+    function collapse(s: string): string {
+      return s.replace(/\[[0-9:.]+\]/g, ' ').replace(/\s+/g, ' ').trim()
     }
   }, [cfg, quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
@@ -839,13 +795,6 @@ function Wire3DPanel(props: {
             <Row label={`Auto path`}>
               <input type="checkbox" checked={cfg.camera.autoPath}
                      onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoPath: e.target.checked } }))}/>
-            </Row>
-          </Card>
-
-          <Card title="Wireframe">
-            <Row label={`Line width: ${cfg.lineWidthPx.toFixed(2)} px`}>
-              <input type="range" min={0.8} max={4} step={0.1} value={cfg.lineWidthPx}
-                     onChange={e => onChange({ ...cfg, lineWidthPx: +e.target.value })} />
             </Row>
           </Card>
 

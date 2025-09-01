@@ -13,7 +13,6 @@ type Props = {
   auth: AuthState | null
   quality: { renderScale: 1 | 1.25 | 1.5 | 1.75 | 2, msaa: 0 | 2 | 4 | 8, bloom: boolean, motionBlur: boolean }
   accessibility: { epilepsySafe: boolean, reducedMotion: boolean, highContrast: boolean }
-  // Reuses your HouseSettings; any missing fields default internally
   settings: any
 }
 
@@ -27,8 +26,8 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
 
     // Scene + camera
     const scene = new THREE.Scene()
-    const camera = new THREE.PerspectiveCamera(55, 1, 0.05, 200)
-    camera.position.set(0, 1.8, 7)
+    const camera = new THREE.PerspectiveCamera(55, 1, 0.05, 300)
+    camera.position.set(0, 1.9, 8)
 
     // Renderer + composer
     const { renderer, dispose: disposeRenderer } = createRenderer(canvasRef.current, quality.renderScale)
@@ -36,12 +35,12 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       bloom: quality.bloom,
       bloomStrength: 0.9,
       bloomRadius: 0.35,
-      bloomThreshold: 0.2,
+      bloomThreshold: 0.24,
       fxaa: true,
       vignette: true,
-      vignetteStrength: 0.55,
+      vignetteStrength: 0.5,
       filmGrain: true,
-      filmGrainStrength: 0.3
+      filmGrainStrength: 0.25
     })
 
     // CSS palette
@@ -50,11 +49,41 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     const accent = new THREE.Color(cssColor('--accent', '#00f0ff'))
     const accent2 = new THREE.Color(cssColor('--accent-2', '#ff00f0'))
 
-    // Ground plane with album cover
+    // Starfield "outer space" backdrop
+    const stars = (() => {
+      const COUNT = 2000
+      const g = new THREE.BufferGeometry()
+      const pos = new Float32Array(COUNT * 3)
+      for (let i = 0; i < COUNT; i++) {
+        const x = (Math.random() - 0.5) * 120
+        const y = Math.random() * 30 + 1.5
+        const z = -15 - Math.random() * 120
+        pos[i * 3 + 0] = x
+        pos[i * 3 + 1] = y
+        pos[i * 3 + 2] = z
+      }
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+      const m = new THREE.PointsMaterial({
+        color: 0xffffff,
+        size: 1.0, // in pixels when sizeAttenuation=false
+        sizeAttenuation: false,
+        transparent: true,
+        opacity: 0.85,
+        depthWrite: false,
+        depthTest: false,
+        blending: THREE.AdditiveBlending
+      })
+      const pts = new THREE.Points(g, m)
+      pts.renderOrder = -20 // draw first
+      scene.add(pts)
+      return pts
+    })()
+
+    // Ground plane with current album cover
     const albumGroup = new THREE.Group()
     const albumPlane = (() => {
       const geom = new THREE.PlaneGeometry(18, 18, 1, 1)
-      const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 })
+      const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.92 })
       const mesh = new THREE.Mesh(geom, mat)
       mesh.rotation.x = -Math.PI / 2
       mesh.position.set(0, 0.001, 0)
@@ -63,14 +92,14 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       return mesh
     })()
 
-    // Thin glow grid over the album floor
-    const grid = new THREE.GridHelper(36, 36, accent.clone().multiplyScalar(0.6), accent.clone().multiplyScalar(0.3))
+    // Glow grid over the album floor (subtle)
+    const grid = new THREE.GridHelper(36, 36, accent.clone().multiplyScalar(0.55), accent.clone().multiplyScalar(0.28))
     ;(grid.material as THREE.Material).transparent = true
-    ;(grid.material as THREE.Material).opacity = 0.18
+    ;(grid.material as THREE.Material).opacity = 0.16
     grid.position.y = 0.002
     scene.add(grid)
 
-    // Build a detailed 3-story house as fat-line wireframe
+    // 3‑story detailed wireframe house using fat lines
     const edges3 = build3StoryHouseEdges()
     const lineGeo = new LineSegmentsGeometry()
     {
@@ -84,8 +113,8 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
 
     const lineMat = new LineMaterial({
       color: accent.getHex(),
-      // IMPORTANT: linewidth is in pixels for LineMaterial. Use a visible width (3–6 px).
-      linewidth: Math.max(2, Math.min(6, (settings.lineWidth || 2) * 2.2)),
+      // LineMaterial uses pixel units — make it clearly visible
+      linewidth: Math.max(2.5, Math.min(6, (settings.lineWidth || 2) * 2.4)),
       transparent: true,
       opacity: 0.98,
       depthTest: true
@@ -94,11 +123,10 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
       lineMat.resolution.set(draw.x, draw.y)
     }
-
     const lines = new LineSegments2(lineGeo, lineMat)
     scene.add(lines)
 
-    // Add emissive window quads across 3 floors on 4 faces
+    // Emissive windows across 3 floors on all faces
     const windowGroup = new THREE.Group()
     {
       const winGeom = new THREE.PlaneGeometry(0.18, 0.12)
@@ -107,29 +135,37 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         const m = new THREE.MeshBasicMaterial({ color: accent2.clone(), transparent: true, opacity: 0 })
         const mesh = new THREE.Mesh(winGeom, m)
         mesh.position.copy(p)
-        // point outward from center
-        const outward = new THREE.Vector3(p.x, p.y, p.z).setLength(Math.abs(p.z) + 1).setY(p.y)
+        // Face outward from center on each side
+        const outward = new THREE.Vector3(p.x, p.y, p.z).setLength(Math.max(Math.abs(p.z), Math.abs(p.x)) + 1).setY(p.y)
         mesh.lookAt(outward)
         windowGroup.add(mesh)
       }
       scene.add(windowGroup)
     }
 
-    // Backdrop reactive bars (instanced boxes) behind the house
-    const bars = (() => {
-      const count = 48
-      const width = 0.18
-      const spacing = 0.28
-      const geom = new THREE.BoxGeometry(width, 1, 0.1)
-      const mat = new THREE.MeshBasicMaterial({ color: accent2.clone(), transparent: true, opacity: 0.85 })
+    // OUTER BACKDROP REACTIVE BARS (arc wall far behind, like outer space)
+    const backdropBars = (() => {
+      const count = 96
+      const arcSpan = THREE.MathUtils.degToRad(150) // wide arc
+      const radius = 28 // far away
+      const baseY = 0.2
+      const geom = new THREE.BoxGeometry(0.22, 1, 0.12)
+      const mat = new THREE.MeshBasicMaterial({
+        color: accent2.clone(),
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: true,
+        depthTest: true,
+        blending: THREE.AdditiveBlending
+      })
       const mesh = new THREE.InstancedMesh(geom, mat, count)
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-      mesh.position.set(0, 0, -3.8)
+      mesh.renderOrder = -10 // render early (behind)
       scene.add(mesh)
-      return { mesh, count, width, spacing, values: new Float32Array(count).fill(0) }
+      return { mesh, count, arcSpan, radius, baseY, values: new Float32Array(count).fill(0) }
     })()
 
-    // Laser beams around
+    // Lasers (additive planes) around house
     const beamGroup = new THREE.Group()
     {
       const beamGeom = new THREE.PlaneGeometry(0.05, 4)
@@ -149,58 +185,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       scene.add(beamGroup)
     }
 
-    // Soft fog sheet
-    const fogSheet = (() => {
-      const geom = new THREE.PlaneGeometry(14, 4)
-      const mat = new THREE.ShaderMaterial({
-        uniforms: {
-          uTime: { value: 0 },
-          uIntensity: { value: 0 },
-          uColor: { value: new THREE.Color(0xaad1ff) }
-        },
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-        vertexShader: `
-          precision highp float;
-          precision highp int;
-          varying vec2 vUv;
-          void main() {
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `,
-        fragmentShader: `
-          precision highp float;
-          precision highp int;
-          varying vec2 vUv;
-          uniform float uTime;
-          uniform float uIntensity;
-          uniform vec3 uColor;
-
-          float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-          float noise(vec2 p){
-            vec2 i=floor(p), f=fract(p);
-            float a=hash(i);
-            float b=hash(i+vec2(1.0,0.0));
-            float c=hash(i+vec2(0.0,1.0));
-            float d=hash(i+vec2(1.0,1.0));
-            vec2 u=f*f*(3.0-2.0*f);
-            return mix(a,b,u.x)+ (c-a)*u.y*(1.0-u.x) + (d-b)*u.x*u.y;
-          }
-          void main(){
-            float n = noise(vUv*5.0 + vec2(uTime*0.035, 0.0));
-            float m = smoothstep(0.25, 0.9, n);
-            float alpha = m * uIntensity * 0.55;
-            gl_FragColor = vec4(uColor, alpha);
-          }
-        `
-      })
-      const mesh = new THREE.Mesh(geom, mat)
-      mesh.position.set(0, 1.5, -2.6)
-      scene.add(mesh)
-      return mesh
-    })()
+    // NOTE: Removed fog sheet ("weird screen behind the house") as requested.
 
     // Reactive state
     let latest: ReactiveFrame | null = null
@@ -213,12 +198,11 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     const path: Path = (settings.path || 'Circle') as Path
     let angle = 0
 
-    // Album cover loader + track watcher
+    // Album cover loader to floor
     let currentTrackId: string | null = null
     const texLoader = new THREE.TextureLoader()
     texLoader.crossOrigin = 'anonymous'
     const maxAniso = renderer.capabilities.getMaxAnisotropy()
-
     async function loadAlbumToFloor() {
       const s = await getPlaybackState().catch(() => null as any)
       const id = s?.item?.id || null
@@ -231,17 +215,17 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         texLoader.load(blobUrl, (tex) => {
           tex.colorSpace = THREE.SRGBColorSpace
           tex.anisotropy = maxAniso
-          ;(albumPlane.material as THREE.MeshBasicMaterial).map?.dispose?.()
           const mat = albumPlane.material as THREE.MeshBasicMaterial
+          mat.map?.dispose?.()
           mat.map = tex
           mat.needsUpdate = true
         })
       } catch {}
     }
     loadAlbumToFloor()
-    const albumIv = window.setInterval(loadAlbumToFloor, 4000)
+    const albumIv = window.setInterval(loadAlbumToFloor, 5000)
 
-    // Sizing
+    // Size/line resolution updates
     const updateSizes = () => {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
       const view = renderer.getSize(new THREE.Vector2())
@@ -261,6 +245,9 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     let barPulse = 0
 
     const tmpMat = new THREE.Matrix4()
+    const tmpQuat = new THREE.Quaternion()
+    const tmpPos = new THREE.Vector3()
+    const tmpScale = new THREE.Vector3()
 
     const animate = () => {
       raf = requestAnimationFrame(animate)
@@ -273,68 +260,65 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       const high = latest?.bands.high ?? 0.15
       const loud = latest?.loudness ?? 0.2
 
-      // Color mix + line width pulse
+      // Accent mix + beat line width pulse
       const mixed = new THREE.Color().copy(accent).lerp(accent2, THREE.MathUtils.clamp(high * 0.9, 0, 1))
       lineMat.color = mixed
-      const basePx = Math.max(2, Math.min(6, (settings.lineWidth || 2) * 2.2))
-      const pulse = beatPulse > 0 ? (1 + 0.6 * beatPulse) : 1
+      const basePx = Math.max(2.5, Math.min(6, (settings.lineWidth || 2) * 2.4))
+      const pulse = beatPulse > 0 ? (1 + 0.55 * beatPulse) : 1
       lineMat.linewidth = basePx * pulse
       lineMat.needsUpdate = true
 
-      // Window flicker (mid) and slight hue shift
+      // Windows flicker (mid)
       windowGroup.children.forEach((m, i) => {
         const mat = (m as THREE.Mesh).material as THREE.MeshBasicMaterial
-        const flicker = 0.15 + 0.85 * mid * Math.abs(Math.sin((clock.elapsedTime + i * 0.13) * (4.5 + (i % 7))))
+        const flicker = 0.12 + 0.88 * mid * Math.abs(Math.sin((clock.elapsedTime + i * 0.13) * (4.5 + (i % 7))))
         mat.opacity = THREE.MathUtils.clamp(flicker, 0, 1)
-        ;(mat.color as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, high * 0.3))
+        ;(mat.color as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, high * 0.25))
       })
 
       // Beams spin and brightness (high)
       beamGroup.rotation.y += dt * (0.35 + high * 2.8)
       beamGroup.children.forEach((b) => {
         const m = (b as THREE.Mesh).material as THREE.MeshBasicMaterial
-        m.opacity = THREE.MathUtils.clamp(0.06 + high * 0.9, 0, 1)
+        m.opacity = THREE.MathUtils.clamp(0.05 + high * 0.9, 0, 1)
       })
 
-      // Fog
-      const fogMat = (fogSheet.material as THREE.ShaderMaterial)
-      fogMat.uniforms.uTime.value = clock.elapsedTime
-      fogMat.uniforms.uIntensity.value = THREE.MathUtils.clamp(0.2 + loud * 0.9 + (beatPulse > 0 ? 0.5 : 0), 0, accessibility.epilepsySafe ? 0.65 : 1.0)
-
-      // Backdrop bars (reactive)
+      // Reactive outer backdrop bars (far arc wall)
       {
-        const { mesh, count, spacing, width, values } = bars
+        const { mesh, count, arcSpan, radius, baseY, values } = backdropBars
+        const energy = 0.25 * low + 0.35 * mid + 0.4 * high
         for (let i = 0; i < count; i++) {
-          // fake per-bar energy using noise + bands
-          const t = clock.elapsedTime * (1.0 + high * 1.6)
-          const k = i * 0.23
-          const n = (Math.sin(t + k) + Math.sin(t * 1.7 + k * 1.3) * 0.5 + 2.0) / 3.0
-          const target = 0.2 + 2.8 * (0.25 * low + 0.35 * mid + 0.4 * high) * n
-          values[i] += (target - values[i]) * 0.2
-          const h = Math.max(0.02, values[i])
-          const x = (i - count / 2) * spacing
-          tmpMat.compose(
-            new THREE.Vector3(x, h / 2, 0),
-            new THREE.Quaternion(),
-            new THREE.Vector3(width, h, 0.1)
-          )
+          const t = i / (count - 1)
+          const ang = (t - 0.5) * arcSpan
+          const noise = 0.5 * (1 + Math.sin(clock.elapsedTime * (1.2 + high * 2.0) + i * 0.37) * Math.cos(i * 0.11))
+          const targetH = 0.15 + (3.2 + 2.0 * (barPulse > 0 ? barPulse : 0)) * energy * (0.65 + 0.35 * noise)
+          values[i] += (targetH - values[i]) * 0.18
+
+          const h = Math.max(0.05, values[i])
+          tmpPos.set(Math.sin(ang) * radius, baseY + h * 0.5, -Math.cos(ang) * radius - 4)
+          tmpQuat.setFromEuler(new THREE.Euler(0, ang, 0))
+          tmpScale.set(0.22, h, 0.12)
+          tmpMat.compose(tmpPos, tmpQuat, tmpScale)
           mesh.setMatrixAt(i, tmpMat)
         }
         mesh.instanceMatrix.needsUpdate = true
+        const mat = mesh.material as THREE.MeshBasicMaterial
+        mat.color.copy(new THREE.Color().copy(accent2).lerp(accent, THREE.MathUtils.clamp(high * 0.6, 0, 1)))
+        mat.opacity = 0.7 + 0.2 * loud
       }
 
       // Album plane subtle pulsation on bar
-      albumGroup.scale.setScalar(1 + 0.03 * (barPulse > 0 ? barPulse : 0))
-      ;(grid.material as THREE.Material).opacity = (stale ? 0.12 : 0.18)
+      albumGroup.scale.setScalar(1 + 0.025 * (barPulse > 0 ? barPulse : 0))
+      ;(grid.material as THREE.Material).opacity = (stale ? 0.12 : 0.16)
 
       // Camera motion
       const baseSpeed = (settings.orbitSpeed ?? 0.6) * (stale ? 0.15 : 1.0)
       angle += dt * (baseSpeed + low * 1.1 + (latest?.beatStrength ?? 0) * 1.3)
-      const radius = THREE.MathUtils.clamp((settings.orbitRadius ?? 6.0) + Math.sin((latest?.phases.bar ?? 0) * Math.PI * 2) * 0.2, 3.8, 9.0)
+      const radiusCam = THREE.MathUtils.clamp((settings.orbitRadius ?? 6.2) + Math.sin((latest?.phases.bar ?? 0) * Math.PI * 2) * 0.2, 3.8, 9.0)
       const elev = (settings.orbitElev ?? 0.04)
-      const pos = pathPoint(path, angle, radius)
+      const pos = pathPoint(path, angle, radiusCam)
       const bob = (settings.camBob || 0.15) * (0.1 + low * 0.35)
-      camera.position.set(pos.x, Math.sin(elev) * (radius * 0.45) + 1.6 + bob * Math.sin(clock.elapsedTime * 1.6), pos.z)
+      camera.position.set(pos.x, Math.sin(elev) * (radiusCam * 0.45) + 1.6 + bob * Math.sin(clock.elapsedTime * 1.6), pos.z)
       camera.lookAt(0, 1.4, 0)
 
       // decay pulses
@@ -433,7 +417,6 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       const eavesFrontR = new THREE.Vector3(W, y3, D)
       const eavesBackL = new THREE.Vector3(-W, y3, -D)
       const eavesBackR = new THREE.Vector3(W, y3, -D)
-      // roof edges
       e.push(
         [eavesFrontL, ridge],[eavesFrontR, ridge],[eavesBackL, ridge],[eavesBackR, ridge],
         [eavesFrontL, eavesFrontR],[eavesBackL, eavesBackR],

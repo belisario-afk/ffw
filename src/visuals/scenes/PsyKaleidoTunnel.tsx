@@ -24,7 +24,12 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [panelOpen, setPanelOpen] = useState(false)
   const [cfg, setCfg] = useState<Cfg>(() => {
-    try { const saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); return { intensity: 0.9, speed: 0.55, slices: 10, chroma: 0.35, particleDensity: 0.9, ...saved } } catch { return { intensity: 0.9, speed: 0.55, slices: 10, chroma: 0.35, particleDensity: 0.9 } }
+    try {
+      const saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}')
+      return { intensity: 0.9, speed: 0.55, slices: 10, chroma: 0.35, particleDensity: 0.9, ...saved }
+    } catch {
+      return { intensity: 0.9, speed: 0.55, slices: 10, chroma: 0.35, particleDensity: 0.9 }
+    }
   })
   const cfgRef = useRef(cfg)
   useEffect(() => { cfgRef.current = cfg; try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)) } catch {} }, [cfg])
@@ -52,10 +57,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       motionBlur: false
     })
 
-    const clock = new THREE.Clock()
-    const aliveRef = useRef(true)
-    aliveRef.current = true
-
     // Audio frame
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
@@ -67,7 +68,13 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         const s = await getPlaybackState().catch(() => null)
         const url = (s?.item?.album?.images?.[0]?.url as string) || ''
         if (!url) return
-        const img = await new Promise<HTMLImageElement>((res, rej) => { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => res(im); im.onerror = rej; im.src = url })
+        const img = await new Promise<HTMLImageElement>((res, rej) => {
+          const im = new Image()
+          im.crossOrigin = 'anonymous'
+          im.onload = () => res(im)
+          im.onerror = rej
+          im.src = url
+        })
         const c = document.createElement('canvas'); const w = 32, h = 32; c.width = w; c.height = h
         const g = c.getContext('2d'); if (!g) return
         g.drawImage(img, 0, 0, w, h)
@@ -76,7 +83,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         for (let i=0;i<data.length;i+=4){ r += data[i]; gr += data[i+1]; b += data[i+2] }
         const n = data.length/4 || 1
         albumTint.setRGB((r/n)/255, (gr/n)/255, (b/n)/255)
-        // normalize towards pleasing accent
         const maxc = Math.max(albumTint.r, albumTint.g, albumTint.b) || 1
         albumTint.multiplyScalar(0.9 / maxc).lerp(new THREE.Color('#77d0ff'), 0.25)
       } catch {}
@@ -84,12 +90,13 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     sampleAlbumTint()
     const albumIv = window.setInterval(sampleAlbumTint, 7000)
 
-    // Tunnel geometry (bigger radius to fill FOV; place camera inside)
+    // Tunnel geometry (keep camera inside: don't offset in Z)
     const radius = 14
     const tunnelLen = 160
     const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 256, 1, true)
-    tunnel.rotateZ(Math.PI * 0.5) // shift seam
-    const uniforms = {
+    tunnel.rotateZ(Math.PI * 0.5) // shift seam away from view
+
+    const uniforms: Record<string, any> = {
       uTime: { value: 0 },
       uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) }, // low, mid, high
       uLoud: { value: 0.15 },
@@ -102,6 +109,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       uContrastBoost: { value: accessibility.highContrast ? 1.0 : 0.0 },
       uAlbumTint: { value: albumTint.clone() }
     }
+
     const mat = new THREE.ShaderMaterial({
       uniforms,
       side: THREE.BackSide,
@@ -109,17 +117,14 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       depthWrite: true,
       vertexShader: `
         varying vec2 vUv;
-        varying vec3 vPos;
         void main(){
           vUv = uv;
-          vPos = position;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
         }
       `,
       fragmentShader: `
         precision highp float;
         varying vec2 vUv;
-        varying vec3 vPos;
         uniform float uTime;
         uniform vec3 uAudio; // low, mid, high
         uniform float uLoud;
@@ -131,7 +136,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         uniform float uContrastBoost;
         uniform float uSlices;
         uniform vec3 uAlbumTint;
-        const float PI = 3.141592653589793;
 
         float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
         float noise(vec2 p){
@@ -187,10 +191,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           col *= (0.8 + 0.7*flash);
           col = mix(col, chrom, 0.25 * chroma);
 
-          // album tint
           col = mix(col, album, 0.22 + 0.18*audio.y);
 
-          // contrast/saturation and brightness
           col = mix(vec3(dot(col, vec3(0.2126,0.7152,0.0722))), col, sat);
           col *= (0.9 + 0.4*brt);
           col = pow(col, vec3(0.95));
@@ -204,8 +206,9 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         }
       `
     })
+
     const tunnelMesh = new THREE.Mesh(tunnel, mat)
-    tunnelMesh.position.z = -tunnelLen * 0.25
+    tunnelMesh.position.set(0, 0, 0) // IMPORTANT: keep camera inside the cylinder
     scene.add(tunnelMesh)
 
     // Particles (comet flecks rushing by)
@@ -244,6 +247,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     window.addEventListener('resize', onResize)
     onResize()
 
+    // Animate
+    const clock = new THREE.Clock()
     let raf = 0
     const animate = () => {
       raf = requestAnimationFrame(animate)
@@ -293,7 +298,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         pos.needsUpdate = true
       }
 
-      // Live density check without setInterval rebuild thrash: rebuild only if delta large
+      // Rebuild particles only if density changed a lot
       const desired = Math.floor(1600 * THREE.MathUtils.clamp(cfgRef.current.particleDensity, 0.1, 2.0))
       const current = (particles?.geometry.getAttribute('position') as THREE.BufferAttribute | undefined)?.count ?? desired
       if (Math.abs(desired - current) > 400) {
@@ -310,6 +315,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
     animate()
 
+    // cleanup
     return () => {
       window.removeEventListener('resize', onResize)
       cancelAnimationFrame(raf)

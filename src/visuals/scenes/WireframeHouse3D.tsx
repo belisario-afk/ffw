@@ -9,7 +9,7 @@ import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
 import type { AuthState } from '../../auth/token'
 import { getPlaybackState } from '../../spotify/api'
 import { cacheAlbumArt } from '../../utils/idb'
-import { ensurePlayerConnected } from '../../spotify/player'
+import { ensurePlayerConnected, hasSpotifyTokenProvider } from '../../spotify/player'
 
 type Props = {
   auth: AuthState | null
@@ -112,10 +112,31 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
   })
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Keep Spotify device listed without touching volume
+  // Spotify: only attempt to connect if a token provider exists
   useEffect(() => {
-    ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: false })
-      .catch(e => console.warn('Spotify ensurePlayerConnected (3D) failed:', e))
+    if (hasSpotifyTokenProvider()) {
+      ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: false })
+        .catch(e => console.warn('Spotify ensurePlayerConnected (3D) failed:', e))
+    } else {
+      console.warn('WireframeHouse3D: Spotify token provider not set. Skipping player connect.')
+    }
+  }, [])
+
+  // Allow a global gear to open ONLY this 3D panel via a custom event
+  useEffect(() => {
+    const open = () => setPanelOpen(true)
+    const close = () => setPanelOpen(false)
+    window.addEventListener('ffw:open-wireframe3d-settings', open as EventListener)
+    window.addEventListener('ffw:close-wireframe3d-settings', close as EventListener)
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.key === 'S' || e.key === 's') && (e.shiftKey || e.metaKey)) setPanelOpen(p => !p)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('ffw:open-wireframe3d-settings', open as EventListener)
+      window.removeEventListener('ffw:close-wireframe3d-settings', close as EventListener)
+      window.removeEventListener('keydown', onKey)
+    }
   }, [])
 
   // Persist settings
@@ -274,12 +295,11 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       const N = 1500
       const positions = new Float32Array(N * 3)
       for (let i=0;i<N;i++){
-        // shell
         const r = THREE.MathUtils.lerp(40, 90, Math.random())
         const theta = Math.acos(THREE.MathUtils.lerp(-1, 1, Math.random()))
         const phi = Math.random()*Math.PI*2
         const x = r * Math.sin(theta) * Math.cos(phi)
-        const y = r * Math.cos(theta) * 0.5 // squash vertically
+        const y = r * Math.cos(theta) * 0.5
         const z = r * Math.sin(theta) * Math.sin(phi)
         positions.set([x,y,z], i*3)
       }
@@ -450,18 +470,15 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
     const offBeat = reactivityBus.on('beat', () => {
-      // Beat events
       if (cfg.fx.groundRings) emitRing()
       if (cfg.fx.floorRipple) {
-        floorMat.uniforms.uRippleAmp.value = 1.0 // spike, will decay in animate
+        floorMat.uniforms.uRippleAmp.value = 1.0
         floorMat.uniforms.uRippleRadius.value = 0.05
         floorMat.uniforms.uRippleDecay.value = 10.0
       }
     })
     const offBar = reactivityBus.on('bar', () => {
-      // gentle camera preset flip on bar if autoPath
       if (cfg.camera.autoPath) {
-        // small variation to radius/elev
         const vary = (v:number, amt:number, min:number, max:number) => clamp(v + THREE.MathUtils.randFloatSpread(amt), min, max)
         cfg.orbitRadius = vary(cfg.orbitRadius, 1.0, 5.0, 13.0)
         cfg.orbitElev = vary(cfg.orbitElev, 0.02, 0.02, 0.25)
@@ -500,13 +517,13 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       const high = latest?.bands.high ?? 0.12
       const loud = latest?.loudness ?? 0.2
 
-      // Accent color morph by highs (keeps palette coherent)
+      // Accent color morph by highs
       accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.8, 0, 1))
       accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.5, 0, 1))
       fatMat.color.set(accent)
       thinMat.color.set(accent)
 
-      // Line width pulse slightly on beat/highs
+      // Line width pulse
       const px = cfg.lineWidthPx * (latest?.beat ? 1.35 : 1.0) * (1.0 + 0.15 * high)
       setLinePixels(px)
 
@@ -514,7 +531,6 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       windowMeta.forEach((w, i) => {
         const mat = w.mesh.material as THREE.MeshBasicMaterial
         let energy = 0.4 + 0.6 * mid
-        // emphasize by story (low -> story 1, mid -> story 2, high -> story 3)
         if (cfg.fx.windowEQ) {
           energy = (
             (w.story === 0 ? (0.25 + 1.2 * low) : 0) +
@@ -851,7 +867,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
   }, [cfg, quality.renderScale, quality.bloom, accessibility.epilepsySafe])
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div data-visual="wireframe3d" style={{ position: 'relative', width: '100%', height: '100%' }}>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} aria-label="Wireframe House 3D" />
       <Wire3DPanel open={panelOpen} cfg={cfg} onToggle={() => setPanelOpen(o => !o)} onChange={setCfg} />
     </div>
@@ -883,11 +899,11 @@ function Wire3DPanel(props: {
   )
 
   return (
-    <div style={{
+    <div data-panel="wireframe3d" style={{
       position:'absolute', top:12, right:12, zIndex:10,
       userSelect:'none', pointerEvents:'auto'
     }}>
-      <button onClick={onToggle} style={{
+      <button onClick={(e) => { e.stopPropagation(); onToggle() }} style={{
         padding:'6px 10px', fontSize:12, borderRadius:6, border:'1px solid #2b2f3a',
         background:'rgba(10,12,16,0.75)', color:'#cfe7ff', cursor:'pointer'
       }}>

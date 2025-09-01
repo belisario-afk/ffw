@@ -45,6 +45,10 @@ type LocalCfg = {
     autoPath: boolean
     target: { x:number, y:number, z:number }
   }
+  cameraPresets: {
+    enabled: boolean
+    strength: number // 0..1
+  }
   fx: {
     beams: boolean
     groundRings: boolean
@@ -84,6 +88,10 @@ function defaults(initial?: any): LocalCfg {
       autoPath: true,
       target: { x: 0, y: 2.2, z: 0 }
     },
+    cameraPresets: {
+      enabled: initial?.cameraPresets?.enabled ?? true,
+      strength: clamp(initial?.cameraPresets?.strength ?? 0.7, 0, 1)
+    },
     fx: {
       beams: false,
       groundRings: false,
@@ -112,6 +120,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const syncedRef = useRef<SyncedLine[] | null>(null)
   const currentLineRef = useRef<number>(-1)
   const pbClock = useRef<{ playing: boolean; startedAt: number; offsetMs: number }>({ playing: false, startedAt: 0, offsetMs: 0 })
+
+  // chorus detection helpers
+  const lyricCountsRef = useRef<Map<string, number>>(new Map())
+  const chorusRef = useRef<{ active: boolean; lastSwitch: number }>({ active: false, lastSwitch: 0 })
+  const normalizeText = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim()
 
   useEffect(() => {
     const token = (auth as any)?.accessToken
@@ -501,6 +514,16 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           currentLineRef.current = -1
           if (line && line !== marqueeText) { marqueeText = line; setupMarquee(line, 0.9) }
 
+          // Build lyric repetition map for chorus detection
+          if (synced && synced.length) {
+            const counts = new Map<string, number>()
+            for (const l of synced) {
+              const k = normalizeText(l.text || '')
+              if (k) counts.set(k, (counts.get(k) || 0) + 1)
+            }
+            lyricCountsRef.current = counts
+          }
+
           // Initialize billboard with first visible line
           if (synced?.length) {
             const first = synced[0]?.text || line
@@ -624,14 +647,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
               // Queue next, then begin swap to new current
               const nextText = lines[idx + 1]?.text || ''
               billboard.prepareNext(nextText)
-              // We set the next as the new line; to ensure immediate visible content, if current is empty initialize:
               if (idx === 0 && !text) {
                 billboard.setLineNow(text)
               } else {
-                // Set new line immediately on next layer then swap
                 billboard.prepareNext(text).then(() => billboard.beginSwap())
               }
-              // Keep marquee updated too
               if (marqueeMat && text !== marqueeText) { marqueeText = text; setupMarquee(text, 0.92) }
             }
           }
@@ -657,14 +677,46 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       // Animate billboard transitions
       billboard.update(dt)
 
+      // Determine verse/chorus and compute camera multipliers
+      let isChorus = false
+      if (cfgC.camera.autoPath && cfgC.cameraPresets?.enabled && lines?.length) {
+        const rawText = lines[currentLineRef.current]?.text || ''
+        const key = normalizeText(rawText)
+        const repeats = (lyricCountsRef.current.get(key) || 0)
+        const candidate = repeats >= 2 && key.length >= 6
+        const nowMs = Date.now()
+        if (candidate && !chorusRef.current.active && nowMs - chorusRef.current.lastSwitch > 800) {
+          chorusRef.current.active = true
+          chorusRef.current.lastSwitch = nowMs
+        } else if (!candidate && chorusRef.current.active && nowMs - chorusRef.current.lastSwitch > 1500) {
+          chorusRef.current.active = false
+          chorusRef.current.lastSwitch = nowMs
+        }
+        isChorus = chorusRef.current.active
+      }
+
+      let speedMul = 1, radiusMul = 1, elevMul = 1
+      if (cfgC.camera.autoPath && cfgC.cameraPresets?.enabled) {
+        const k = clamp(cfgC.cameraPresets.strength ?? 0.7, 0, 1)
+        if (isChorus) {
+          speedMul = THREE.MathUtils.lerp(1, 1.16, k)
+          radiusMul = THREE.MathUtils.lerp(1, 1.12, k)
+          elevMul = THREE.MathUtils.lerp(1, 1.35, k)
+        } else {
+          speedMul = THREE.MathUtils.lerp(1, 0.90, k)
+          radiusMul = THREE.MathUtils.lerp(1, 0.93, k)
+          elevMul = THREE.MathUtils.lerp(1, 0.82, k)
+        }
+      }
+
       // camera autopilot + bob
       const bob = Math.sin(t * 1.4) * cfgC.camBob
       if (cfgC.camera.autoPath && !userInteracting) {
-        const baseSpeed = cfgC.orbitSpeed
+        const baseSpeed = cfgC.orbitSpeed * speedMul
         const audioBoost = 0.4 * (low + mid + high)
         angleRef.current += dt * (baseSpeed + audioBoost)
-        const radius = THREE.MathUtils.clamp(cfgC.orbitRadius, 6.0, 12.0)
-        const elev = cfgC.orbitElev
+        const radius = THREE.MathUtils.clamp(cfgC.orbitRadius * radiusMul, 6.0, 14.0)
+        const elev = cfgC.orbitElev * elevMul
         const pos = pathPoint(cfgC.path, angleRef.current, radius)
         camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
         camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
@@ -875,6 +927,27 @@ function Wire3DPanel(props: {
             <Row label={`Auto path`}>
               <input type="checkbox" checked={cfg.camera.autoPath}
                      onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoPath: e.target.checked } }))}/>
+            </Row>
+          </Card>
+
+          <Card title="Camera presets (Verse/Chorus)">
+            <Row label="Auto framing">
+              <input
+                type="checkbox"
+                checked={!!cfg.cameraPresets.enabled}
+                onChange={e => onChange(prev => ({
+                  ...prev,
+                  cameraPresets: { ...prev.cameraPresets, enabled: e.target.checked }
+                }))} />
+            </Row>
+            <Row label={`Strength: ${cfg.cameraPresets.strength.toFixed(2)}`}>
+              <input
+                type="range" min={0} max={1} step={0.01}
+                value={cfg.cameraPresets.strength}
+                onChange={e => onChange(prev => ({
+                  ...prev,
+                  cameraPresets: { ...prev.cameraPresets, strength: +e.target.value }
+                }))} />
             </Row>
           </Card>
 

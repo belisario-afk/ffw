@@ -6,6 +6,7 @@ import PlayerController from './controllers/PlayerController'
 import BlankScene from './visuals/scenes/BlankScene'
 const WireframeHouse = React.lazy(() => import('./visuals/scenes/WireframeHouse'))
 const WireframeHouse3D = React.lazy(() => import('./visuals/scenes/WireframeHouse3D'))
+const PsyKaleidoTunnel = React.lazy(() => import('./visuals/scenes/PsyKaleidoTunnel'))
 import Popup from './ui/Popup'
 import QualityPanel from './ui/QualityPanel'
 import VJPanel from './ui/VJPanel'
@@ -100,12 +101,8 @@ export default function App() {
     const t = (auth as any)?.accessToken as string | undefined
     if (t) {
       try {
-        // Make it available to any code using the global provider hook or window provider
         setSpotifyTokenProvider(async () => t)
         ;(window as any).__ffw__getSpotifyToken = async () => t
-
-        // Also mirror into the lightweight spotifyAuth storage so GlobalTopBar knows you are signed in
-        // Keys must match src/auth/spotifyAuth.ts (TOKEN_KEY/EXPIRES_AT_KEY)
         localStorage.setItem('ffw.spotify.token', t)
         const approxExpiry = Date.now() + 55 * 60 * 1000 // ~55 min from now
         localStorage.setItem('ffw.spotify.expires_at', String(approxExpiry))
@@ -117,7 +114,6 @@ export default function App() {
   function handleSignOut() {
     signOut()
     setAuth(null)
-    // Clear the mirrored token for the global playback service
     try {
       localStorage.removeItem('ffw.spotify.token')
       localStorage.removeItem('ffw.spotify.expires_at')
@@ -129,7 +125,6 @@ export default function App() {
   function onThemeChange(t: ThemeName) {
     setThemeState(t)
     setTheme(t)
-    // If picking "album" theme, auto-enable album skin; otherwise keep the user's toggle
     if (t === 'album' && !accessibility.albumSkin) {
       setAccessibility(a => ({ ...a, albumSkin: true }))
     }
@@ -141,10 +136,8 @@ export default function App() {
   }
 
   return (
-    // Key the provider by auth token so it remounts when you sign in via your existing flow
     <PlaybackProvider key={(auth as any)?.accessToken ? 'authed' : 'noauth'}>
       <div className="app-shell" role="application" aria-label="FFW Visualizer">
-        {/* Global playback UI: Sign in / Play in Browser, shared for all scenes */}
         <GlobalTopBar />
 
         <div className="canvas-wrap">
@@ -180,6 +173,12 @@ export default function App() {
                     }}
                     settings={houseSettings}
                   />
+                ) : scene === 'Psychedelic Tunnel' ? (
+                  <PsyKaleidoTunnel
+                    auth={auth}
+                    quality={quality}
+                    accessibility={accessibility}
+                  />
                 ) : (
                   <BlankScene auth={auth} quality={quality} accessibility={accessibility} />
                 )}
@@ -195,6 +194,7 @@ export default function App() {
                 <option value="Blank">Blank</option>
                 <option value="Wireframe House">Wireframe House (2D)</option>
                 <option value="Wireframe House 3D">Wireframe House 3D (Three)</option>
+                <option value="Psychedelic Tunnel">Psychedelic Kaleido Tunnel</option>
               </select>
 
               {(scene === 'Wireframe House' || scene === 'Wireframe House 3D') && (

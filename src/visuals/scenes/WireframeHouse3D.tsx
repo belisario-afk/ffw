@@ -308,6 +308,23 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     thinLines.visible = false
     scene.add(thinLines)
 
+    // Windows (emissive planes) + metadata list (use windowMeta in animate)
+    const windowGroup = new THREE.Group()
+    const windowMeta: { mesh: THREE.Mesh, story: number, col: number, side: 'front'|'back'|'left'|'right' }[] = []
+    {
+      const winGeom = new THREE.PlaneGeometry(0.22, 0.16)
+      const addWindow = (p: THREE.Vector3, out: THREE.Vector3, story: number, col: number, side: 'front'|'back'|'left'|'right') => {
+        const m = new THREE.MeshBasicMaterial({ color: accent2, transparent: true, opacity: 0 })
+        const mesh = new THREE.Mesh(winGeom, m)
+        mesh.position.copy(p)
+        mesh.lookAt(p.clone().add(out))
+        windowGroup.add(mesh)
+        windowMeta.push({ mesh, story, col, side })
+      }
+      addMansionWindows(addWindow)
+      scene.add(windowGroup)
+    }
+
     // Optional Starfield, Beams, Smoke (default off)
     let starfield: THREE.Points | null = null
     const beamGroup = new THREE.Group()
@@ -512,10 +529,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const px = cfg.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
       setLinePixels(px)
 
-      // Windows flicker (subtle)
-      windowGroup.children.forEach((obj, i) => {
-        const mesh = obj as THREE.Mesh
-        const mat = mesh.material as THREE.MeshBasicMaterial
+      // Windows flicker (subtle) — use windowMeta to avoid scope issues
+      windowMeta.forEach((w, i) => {
+        const mat = w.mesh.material as THREE.MeshBasicMaterial
         const base = 0.12 + 0.25 * mid
         const flicker = base * Math.abs(Math.sin((t + i * 0.17) * 2.2))
         mat.opacity = THREE.MathUtils.clamp(flicker, 0, 0.6)

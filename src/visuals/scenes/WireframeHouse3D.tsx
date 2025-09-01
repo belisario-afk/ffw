@@ -12,6 +12,11 @@ import { cacheAlbumArt } from '../../utils/idb'
 import { ensurePlayerConnected, hasSpotifyTokenProvider, setSpotifyTokenProvider } from '../../spotify/player'
 import { fetchLyrics, type SyncedLine } from '../../lyrics/provider'
 
+// Minimal in-scene auth UI so you can Sign in / Play in Browser even if TopBar isn't mounted.
+import { bootstrapAuthFromHash, getAccessToken, ensureAuth } from '../../auth/spotifyAuth'
+import { loadWebPlaybackSDK } from '../../spotify/sdk'
+import { transferPlaybackToDevice } from '../../spotify/connect'
+
 type Props = {
   auth: AuthState | null
   quality: { renderScale: 1 | 1.25 | 1.5 | 1.75 | 2, msaa: 0 | 2 | 4 | 8, bloom: boolean, motionBlur: boolean }
@@ -101,7 +106,22 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     try { const saved = localStorage.getItem(LS_KEY); if (saved) return { ...defaults(settings), ...JSON.parse(saved) } } catch {}
     return defaults(settings)
   })
+  const cfgRef = useRef(cfg)
+  useEffect(() => { cfgRef.current = cfg }, [cfg])
+
   const [panelOpen, setPanelOpen] = useState(false)
+
+  // In-scene auth UI state (so you can sign in even if TopBar is absent)
+  const [token, setToken] = useState<string | null>(null)
+  useEffect(() => {
+    bootstrapAuthFromHash()
+    setToken(getAccessToken())
+    // Provide token to the player provider as well
+    const t = getAccessToken()
+    if (t) {
+      try { setSpotifyTokenProvider(async () => t) } catch {}
+    }
+  }, [])
 
   // stable refs
   const angleRef = useRef(0)
@@ -109,9 +129,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const currentLineRef = useRef<number>(-1)
   const pbClock = useRef<{ playing: boolean; startedAt: number; offsetMs: number }>({ playing: false, startedAt: 0, offsetMs: 0 })
 
+  // Also support auth passed via props
   useEffect(() => {
-    const token = (auth as any)?.accessToken
-    if (token) { try { setSpotifyTokenProvider(async () => token) } catch {} }
+    const t = (auth as any)?.accessToken
+    if (t) {
+      try { setSpotifyTokenProvider(async () => t) } catch {}
+    }
   }, [auth])
 
   useEffect(() => {
@@ -164,7 +187,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       for (let i = 0; i < data.length; i += 4) { const r = data[i], gr = data[i + 1], b = data[i + 2]; sum += (0.2126*r + 0.7152*gr + 0.0722*b) / 255 }
       return sum / (w * h)
     }
-    // MISSING helper added here
     function addMansionWindows(add: (p: THREE.Vector3, out: THREE.Vector3) => void) {
       const storyY = [0.6, 1.7, 2.8]
       const CF = { minX:-2.0, maxX:2.0, minZ:-1.2, maxZ:1.2 }
@@ -178,14 +200,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           }
         }
       }
-      // front/back faces
       addFace(CF.minX, CF.maxX, CF.maxZ+0.001, new THREE.Vector3(0,0, 1), 6)
       addFace(CF.minX, CF.maxX, CF.minZ-0.001, new THREE.Vector3(0,0,-1), 6)
       addFace(LW.minX, LW.maxX, LW.maxZ+0.001, new THREE.Vector3(0,0, 1), 4)
       addFace(LW.minX, LW.maxX, LW.minZ-0.001, new THREE.Vector3(0,0,-1), 4)
       addFace(RW.minX, RW.maxX, RW.maxZ+0.001, new THREE.Vector3(0,0, 1), 4)
       addFace(RW.minX, RW.maxX, RW.minZ-0.001, new THREE.Vector3(0,0,-1), 4)
-      // left/right sides
       for (let s=0; s<storyY.length; s++) {
         for (let i=0;i<4;i++) {
           const z = THREE.MathUtils.lerp(CF.minZ+0.1, CF.maxZ-0.1, (i+0.5)/4)
@@ -200,9 +220,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     scene.background = null
     scene.fog = new THREE.Fog(new THREE.Color('#050607'), 50, 140)
 
-    const camera = new THREE.PerspectiveCamera(cfg.camera.fov, 1, 0.05, 300)
+    const camera = new THREE.PerspectiveCamera(cfgRef.current.camera.fov, 1, 0.05, 300)
     camera.position.set(0, 2.8, 12.5)
-    camera.lookAt(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
+    camera.lookAt(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
 
     const { renderer, dispose: disposeRenderer } = createRenderer(canvasRef.current, quality.renderScale)
     const comp = createComposer(renderer, scene, camera, {
@@ -220,6 +240,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
     // Controls
     const controls = new OrbitControls(camera, renderer.domElement)
+
+    // One-time setup (we'll update these live each frame from cfgRef)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
     controls.enablePan = true
@@ -231,7 +253,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     controls.maxDistance = 16
     controls.minPolarAngle = Math.PI * 0.12
     controls.maxPolarAngle = Math.PI * 0.85
-    controls.target.set(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
+    controls.target.set(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
 
     let userInteracting = false
     controls.addEventListener('start', () => { userInteracting = true })
@@ -300,13 +322,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     ;(fatMat as any).worldUnits = false
     const setLinePixels = (px: number) => {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-      fatMat.linewidth = Math.max(0.0008, px / Math.max(1, draw.y))
+      // push a slightly higher minimum linewidth for reliability
+      fatMat.linewidth = Math.max(0.0015, px / Math.max(1, draw.y))
       fatMat.needsUpdate = true
     }
     {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
       fatMat.resolution.set(draw.x, draw.y)
-      setLinePixels(cfg.lineWidthPx)
+      setLinePixels(cfgRef.current.lineWidthPx)
     }
     const fatLines = new LineSegments2(fatGeo, fatMat)
     scene.add(fatLines)
@@ -334,7 +357,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
     // Optional starfield
     let starfield: THREE.Points | null = null
-    if (cfg.fx.starfield) {
+    if (cfgRef.current.fx.starfield) {
       const g = new THREE.BufferGeometry()
       const N = 900
       const positions = new Float32Array(N * 3)
@@ -431,7 +454,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         marqueeMat.needsUpdate = true
       }
     }
-    if (cfg.fx.lyricsMarquee) { marqueeText = 'FFw Visualizer'; setupMarquee(marqueeText, 0.85) }
+    if (cfgRef.current.fx.lyricsMarquee) { marqueeText = 'FFw Visualizer'; setupMarquee(marqueeText, 0.85) }
 
     // Covers + lyrics
     let floorTex: THREE.Texture | null = null
@@ -473,7 +496,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
 
           coverTextures.push(tex)
-          if (cfg.fx.mosaicFloor && tiles.length && coverTextures.length === 1) {
+          if (cfgRef.current.fx.mosaicFloor && tiles.length && coverTextures.length === 1) {
             mosaicGroup.visible = true
             tiles.forEach(t => { t.material.map = tex; t.material.toneMapped = false; t.material.color.setScalar(0.85); t.material.needsUpdate = true })
           }
@@ -481,7 +504,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           mosaicGroup.visible = false
         }
 
-        if (cfg.fx.lyricsMarquee && id && id !== currentTrackId) {
+        if (cfgRef.current.fx.lyricsMarquee && id && id !== currentTrackId) {
           currentTrackId = id
           let line = title && artist ? `${title} — ${artist}` : (title || artist || '')
           let synced: SyncedLine[] | undefined = undefined
@@ -507,11 +530,17 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
       const view = renderer.getSize(new THREE.Vector2())
       camera.aspect = view.x / Math.max(1, view.y)
-      camera.fov = cfg.camera.fov
-      camera.updateProjectionMatrix()
+      // live-apply FOV from cfgRef
+      const desiredFov = cfgRef.current.camera.fov
+      if (camera.fov !== desiredFov) {
+        camera.fov = desiredFov
+        camera.updateProjectionMatrix()
+      } else {
+        camera.updateProjectionMatrix()
+      }
       comp.onResize()
       fatMat.resolution.set(draw.x, draw.y)
-      setLinePixels(cfg.lineWidthPx)
+      setLinePixels(cfgRef.current.lineWidthPx)
     }
     window.addEventListener('resize', updateSizes)
     updateSizes()
@@ -519,6 +548,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     // Animate
     const clock = new THREE.Clock()
     let raf = 0
+    let frames = 0
+    let fallbackArmed = false
+
     const animate = () => {
       raf = requestAnimationFrame(animate)
       const dt = Math.min(0.05, clock.getDelta())
@@ -526,10 +558,25 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const now = performance.now()
       const stale = !latest || (now - (latest.t || 0)) > 240
 
+      const cfgC = cfgRef.current
+
       const low = latest?.bands.low ?? 0.08
       const mid = latest?.bands.mid ?? 0.08
       const high = latest?.bands.high ?? 0.08
       const loud = latest?.loudness ?? 0.15
+
+      // Controls live updates from cfg
+      controls.enableDamping = cfgC.camera.enableDamping
+      controls.dampingFactor = cfgC.camera.dampingFactor
+      controls.enablePan = cfgC.camera.enablePan
+      controls.enableZoom = cfgC.camera.enableZoom
+      controls.rotateSpeed = cfgC.camera.rotateSpeed
+      controls.zoomSpeed = cfgC.camera.zoomSpeed
+      controls.panSpeed = cfgC.camera.panSpeed
+      controls.minDistance = cfgC.camera.minDistance
+      controls.maxDistance = cfgC.camera.maxDistance
+      controls.minPolarAngle = cfgC.camera.minPolarAngle
+      controls.maxPolarAngle = cfgC.camera.maxPolarAngle
 
       // colors
       accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.25, 0, 0.25))
@@ -537,7 +584,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       fatMat.color.set(accent); thinMat.color.set(accent)
 
       // lines
-      const px = cfg.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
+      const px = cfgC.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
       setLinePixels(px)
 
       // fog
@@ -547,12 +594,15 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         ;(fogMat.uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
       }
 
+      // starfield visibility follows toggle
+      if (starfield) starfield.visible = !!cfgC.fx.starfield
+
       // mosaic/floor
-      mosaicGroup.visible = !!cfg.fx.mosaicFloor && coverTextures.length > 0
+      mosaicGroup.visible = !!cfgC.fx.mosaicFloor && coverTextures.length > 0
       floorMesh.visible = !mosaicGroup.visible
 
       // lyrics (synced if available)
-      if (cfg.fx.lyricsMarquee && marqueeMat) {
+      if (cfgC.fx.lyricsMarquee && marqueeMat) {
         const lines = syncedRef.current
         if (lines?.length) {
           const pb = pbClock.current
@@ -569,33 +619,47 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             if (idx !== currentLineRef.current) {
               currentLineRef.current = idx
               const text = lines[idx].text || ''
-              if (text) { marqueeText = text; setupMarquee(text, 0.92) }
+              if (text && text !== marqueeText) { marqueeText = text; setupMarquee(text, 0.92) }
             }
           }
           marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.03) % 1
         } else {
-          marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.05) % 1
+          // plain fallback
+          marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.045) % 1
           marqueeMat.uniforms.uOpacity.value = 0.85
         }
         ;(marqueeMat.uniforms.uTint.value as THREE.Color).copy(accent)
+      } else if (marqueeMat) {
+        marqueeMat.uniforms.uOpacity.value = 0.0
       }
 
       // camera autopilot (works even with no analysis)
-      if (cfg.camera.autoPath && !userInteracting) {
-        const baseSpeed = cfg.orbitSpeed
+      if (cfgC.camera.autoPath && !userInteracting) {
+        const baseSpeed = cfgC.orbitSpeed
         const audioBoost = 0.4 * (low + mid + high)
         angleRef.current += dt * (baseSpeed + audioBoost)
-        const radius = THREE.MathUtils.clamp(cfg.orbitRadius, 6.0, 12.0)
-        const elev = cfg.orbitElev
-        const pos = pathPoint(cfg.path, angleRef.current, radius)
-        camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + cfg.camBob * (0.05 + low * 0.2), pos.z)
-        camera.lookAt(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
-        controls.target.set(cfg.camera.target.x, cfg.camera.target.y, cfg.camera.target.z)
+        const radius = THREE.MathUtils.clamp(cfgC.orbitRadius, 6.0, 12.0)
+        const elev = cfgC.orbitElev
+        const pos = pathPoint(cfgC.path, angleRef.current, radius)
+        camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + cfgC.camBob * (0.05 + low * 0.2), pos.z)
+        camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
+        controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
       }
 
       ;(grid.material as THREE.Material).opacity = 0.05 * (stale ? 0.6 : 1.0)
       controls.update()
       comp.composer.render()
+
+      // Robust fallback: if fat lines aren't drawing, show thin lines too
+      frames++
+      if (!fallbackArmed && frames > 12) {
+        const dc = (renderer.info.render.calls || 0)
+        if (dc <= 1) {
+          fallbackArmed = true
+          fatLines.visible = false
+          thinLines.visible = true
+        }
+      }
     }
 
     animate()
@@ -722,8 +786,46 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
+  // In-scene auth UI handlers
+  const signIn = () => {
+    ensureAuth()
+  }
+  const playInBrowser = async () => {
+    try {
+      const t = getAccessToken()
+      if (!t) { alert('Sign in with Spotify first'); return }
+      await loadWebPlaybackSDK()
+      const { player, deviceId } = await ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
+      try { await (player as any).activateElement?.() } catch {}
+      let id = deviceId as string | null
+      if (!id) {
+        id = await new Promise<string | null>((resolve) => {
+          const onReady = ({ device_id }: any) => resolve(device_id || null)
+          try { (player as any).addListener?.('ready', onReady) } catch { resolve(null) }
+          setTimeout(() => resolve(null), 4000)
+        })
+      }
+      if (!id) { alert('Player connected. Select “FFw visualizer” in your Spotify app.'); return }
+      await transferPlaybackToDevice({ deviceId: id, play: true })
+      setToken(t)
+    } catch (e: any) {
+      console.error(e)
+      alert(e?.message || 'Failed to enable browser playback')
+    }
+  }
+
   return (
     <div data-visual="wireframe3d" style={{ position: 'relative', width: '100%', height: '100%' }}>
+      {/* Inline auth UI if TopBar is missing */}
+      <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 50, display: 'flex', gap: 8, pointerEvents: 'auto' }}>
+        {!token ? (
+          <button onClick={signIn} style={btnStyle}>Sign in with Spotify</button>
+        ) : (
+          <button onClick={playInBrowser} style={btnStyle}>▶ Play in Browser</button>
+        )}
+        <button onClick={() => setPanelOpen(o => !o)} style={btnStyle}>{panelOpen ? 'Close 3D Settings' : '3D Settings'}</button>
+      </div>
+
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} aria-label="Wireframe House 3D" />
       <Wire3DPanel open={panelOpen} cfg={cfg} onToggle={() => setPanelOpen(o => !o)} onChange={setCfg} />
     </div>
@@ -751,51 +853,57 @@ function Wire3DPanel(props: {
   )
 
   return (
-    <div data-panel="wireframe3d" style={{ position:'absolute', top:12, right:12, zIndex:10, userSelect:'none', pointerEvents:'auto' }}>
-      <button onClick={(e) => { e.stopPropagation(); onToggle() }} style={btnStyle}>
-        {open ? 'Close 3D Settings' : '3D Settings'}
-      </button>
-      {open && (
-        <div style={{ width: 300, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
-          background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
-          <Card title="Camera">
-            <Row label={`FOV: ${cfg.camera.fov.toFixed(0)}`}>
-              <input type="range" min={30} max={85} step={1} value={cfg.camera.fov}
-                     onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, fov: +e.target.value } }))} />
-            </Row>
-            <Row label={`Orbit speed: ${cfg.orbitSpeed.toFixed(2)}`}>
-              <input type="range" min={0.05} max={2} step={0.01} value={cfg.orbitSpeed}
-                     onChange={e => onChange({ ...cfg, orbitSpeed: +e.target.value })} />
-            </Row>
-            <Row label={`Orbit radius: ${cfg.orbitRadius.toFixed(1)}`}>
-              <input type="range" min={6} max={12} step={0.1} value={cfg.orbitRadius}
-                     onChange={e => onChange({ ...cfg, orbitRadius: +e.target.value })} />
-            </Row>
-            <Row label={`Elevation: ${cfg.orbitElev.toFixed(2)}`}>
-              <input type="range" min={0.03} max={0.2} step={0.01} value={cfg.orbitElev}
-                     onChange={e => onChange({ ...cfg, orbitElev: +e.target.value })} />
-            </Row>
-            <Row label={`Auto path`}>
-              <input type="checkbox" checked={cfg.camera.autoPath}
-                     onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoPath: e.target.checked } }))}/>
-            </Row>
-          </Card>
+    <div data-panel="wireframe3d" style={{
+      position:'absolute', top:44, right:12, zIndex:10, userSelect:'none', pointerEvents:'auto',
+      display: props.open ? 'block' : 'none'
+    }}>
+      <div style={{ width: 300, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
+        background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
+        <Card title="Camera">
+          <Row label={`FOV: ${cfg.camera.fov.toFixed(0)}`}>
+            <input type="range" min={30} max={85} step={1} value={cfg.camera.fov}
+                   onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, fov: +e.target.value } }))} />
+          </Row>
+          <Row label={`Orbit speed: ${cfg.orbitSpeed.toFixed(2)}`}>
+            <input type="range" min={0.05} max={2} step={0.01} value={cfg.orbitSpeed}
+                   onChange={e => onChange(prev => ({ ...prev, orbitSpeed: +e.target.value }))} />
+          </Row>
+          <Row label={`Orbit radius: ${cfg.orbitRadius.toFixed(1)}`}>
+            <input type="range" min={6} max={12} step={0.1} value={cfg.orbitRadius}
+                   onChange={e => onChange(prev => ({ ...prev, orbitRadius: +e.target.value }))} />
+          </Row>
+          <Row label={`Elevation: ${cfg.orbitElev.toFixed(2)}`}>
+            <input type="range" min={0.03} max={0.2} step={0.01} value={cfg.orbitElev}
+                   onChange={e => onChange(prev => ({ ...prev, orbitElev: +e.target.value }))} />
+          </Row>
+          <Row label={`Camera bob: ${cfg.camBob.toFixed(2)}`}>
+            <input type="range" min={0} max={0.5} step={0.01} value={cfg.camBob}
+                   onChange={e => onChange(prev => ({ ...prev, camBob: +e.target.value }))} />
+          </Row>
+          <Row label={`Auto path`}>
+            <input type="checkbox" checked={cfg.camera.autoPath}
+                   onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoPath: e.target.checked } }))}/>
+          </Row>
+        </Card>
 
-          <Card title="Effects">
-            <Row label="Mosaic floor"><input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, mosaicFloor: e.target.checked } })}/></Row>
-            <Row label="Beams"><input type="checkbox" checked={cfg.fx.beams} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, beams: e.target.checked } })}/></Row>
-            <Row label="Starfield"><input type="checkbox" checked={cfg.fx.starfield} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, starfield: e.target.checked } })}/></Row>
-            <Row label="Chimney smoke"><input type="checkbox" checked={cfg.fx.chimneySmoke} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, chimneySmoke: e.target.checked } })}/></Row>
-            <Row label="Bloom breathing"><input type="checkbox" checked={cfg.fx.bloomBreath} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, bloomBreath: e.target.checked } })}/></Row>
-            <Row label="Lyrics marquee"><input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange({ ...cfg, fx: { ...cfg.fx, lyricsMarquee: e.target.checked } })}/></Row>
-          </Card>
+        <Card title="Wireframe">
+          <Row label={`Line width: ${cfg.lineWidthPx.toFixed(2)} px`}>
+            <input type="range" min={0.8} max={4} step={0.1} value={cfg.lineWidthPx}
+                   onChange={e => onChange(prev => ({ ...prev, lineWidthPx: +e.target.value }))} />
+          </Row>
+        </Card>
 
-          <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
-            <button onClick={() => onChange(defaults())} style={btnStyle}>Reset</button>
-            <button onClick={onToggle} style={btnStyle}>Close</button>
-          </div>
+        <Card title="Effects">
+          <Row label="Mosaic floor"><input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, mosaicFloor: e.target.checked } }))}/></Row>
+          <Row label="Starfield"><input type="checkbox" checked={cfg.fx.starfield} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, starfield: e.target.checked } }))}/></Row>
+          <Row label="Lyrics marquee"><input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, lyricsMarquee: e.target.checked } }))}/></Row>
+        </Card>
+
+        <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
+          <button onClick={() => onChange(defaults())} style={btnStyle}>Reset</button>
+          <button onClick={props.onToggle} style={btnStyle}>Close</button>
         </div>
-      )}
+      </div>
     </div>
   )
 }

@@ -11,23 +11,25 @@ type Props = {
 }
 
 type Cfg = {
-  intensity: number      // overall effect drive
-  speed: number          // scroll speed
-  slices: number         // kaleidoscope wedges
-  chroma: number         // color fringe amount
+  intensity: number
+  speed: number
+  slices: number
+  chroma: number
   particleDensity: number
-  exposure: number       // new: scene brightness 0..1.2
+  exposure: number
 }
 
 const LS_KEY = 'ffw.kaleido.cfg.v3'
 
 export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const uniformsRef = useRef<Record<string, any> | null>(null)
+  const particlesRef = useRef<THREE.Points | null>(null)
+
   const [panelOpen, setPanelOpen] = useState(false)
   const [cfg, setCfg] = useState<Cfg>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}')
-      // dimmer defaults for “too bright” report
       return { intensity: 0.7, speed: 0.5, slices: 10, chroma: 0.28, particleDensity: 0.9, exposure: 0.7, ...saved }
     } catch {
       return { intensity: 0.7, speed: 0.5, slices: 10, chroma: 0.28, particleDensity: 0.9, exposure: 0.7 }
@@ -48,7 +50,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const { renderer, dispose: disposeRenderer } = createRenderer(canvasRef.current, quality.renderScale)
     const comp = createComposer(renderer, scene, camera, {
       bloom: quality.bloom,
-      // safer bloom to prevent blow-out
       bloomStrength: 0.6,
       bloomRadius: 0.35,
       bloomThreshold: 0.6,
@@ -60,7 +61,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       motionBlur: false
     })
 
-    // Animation guard to prevent post-unmount writes
+    // Prevent post-unmount updates
     let running = true
 
     // Audio frame
@@ -96,17 +97,15 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     sampleAlbumTint()
     const albumIv = window.setInterval(sampleAlbumTint, 8000)
 
-    // Tunnel geometry (camera stays inside: no Z offset)
+    // Tunnel geometry (camera stays inside)
     const radius = 14
     const tunnelLen = 160
     const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 256, 1, true)
     tunnel.rotateZ(Math.PI * 0.5) // shift seam away from view
 
-    // uniforms are stored in a ref and nulled on cleanup to prevent crashes
-    const uniformsRef = useRef<any | null>(null)
     const uniforms: Record<string, any> = {
       uTime: { value: 0 },
-      uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) }, // low, mid, high
+      uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
       uLoud: { value: 0.15 },
       uBeat: { value: 0.0 },
       uSlices: { value: Math.max(1, Math.round(cfgRef.current.slices)) },
@@ -116,7 +115,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       uSafe: { value: (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0 },
       uContrastBoost: { value: accessibility.highContrast ? 1.0 : 0.0 },
       uAlbumTint: { value: albumTint.clone() },
-      uExposure: { value: cfgRef.current.exposure } // new
+      uExposure: { value: cfgRef.current.exposure }
     }
     uniformsRef.current = uniforms
 
@@ -136,7 +135,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         precision highp float;
         varying vec2 vUv;
         uniform float uTime;
-        uniform vec3 uAudio; // low, mid, high
+        uniform vec3 uAudio;
         uniform float uLoud;
         uniform float uBeat;
         uniform float uIntensity;
@@ -190,7 +189,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           vec3 colB = palette(fract(field*0.5 + hueShift*1.4), vec3(0.18,0.45,0.96), vec3(0.55,0.45,0.45), vec3(0.8,0.9,0.5), vec3(0.2,0.0,0.6));
           vec3 col = mix(colA, colB, 0.45 + 0.25*audio.y);
 
-          // chroma split
           float off = 0.002 * chroma * (0.4 + 0.6*intensity);
           float fR = smoothstep(0.25, 0.75, fbm((uv + vec2(off,0.0))*4.0 + time*0.06));
           float fG = smoothstep(0.25, 0.75, fbm((uv + vec2(0.0,off))*4.0 - time*0.04));
@@ -198,20 +196,16 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           vec3 chrom = vec3(fR, fG, fB);
           col = mix(col, chrom, 0.22 * chroma);
 
-          // flash clamp for safety
           float flash = 0.32*loud + 0.4*audio.z + 0.22*audio.y;
           float maxFlash = mix(1.0, 0.35, safe);
           flash = min(flash, maxFlash);
           col *= (0.8 + 0.6*flash);
 
-          // album tint
           col = mix(col, album, 0.18 + 0.16*audio.y);
 
-          // reinhard tone mapping + exposure
           col *= mix(0.6, 1.35, clamp(exposure, 0.0, 1.2));
-          col = col / (1.0 + col);  // reinhard
-          // slight gamma
-          col = pow(col, vec3(0.95));
+          col = col / (1.0 + col);  // Reinhard tonemapping
+          col = pow(col, vec3(0.95)); // mild gamma
           return clamp(col, 0.0, 1.0);
         }
 
@@ -227,8 +221,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     tunnelMesh.position.set(0, 0, 0)
     scene.add(tunnelMesh)
 
-    // Particles (comet flecks rushing by)
-    const particlesRef = useRef<THREE.Points | null>(null)
+    // Particles (comet flecks)
     const makeParticles = (density: number) => {
       const count = Math.floor(1500 * THREE.MathUtils.clamp(density, 0.1, 2.0))
       const geo = new THREE.BufferGeometry()
@@ -282,7 +275,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       const loud = latest?.loudness ?? 0.12
       const beat = latest?.beat ? 1.0 : 0.0
 
-      // Safety clamps + live cfg (guard and clamp)
+      // Safety clamps + live cfg
       const safe = (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0
       const rawIntensity = Math.max(0, Math.min(1.2, cfgRef.current.intensity || 0))
       const rawSpeed = Math.max(0, Math.min(1.5, cfgRef.current.speed || 0))
@@ -302,9 +295,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       u.uChroma.value = chroma
       u.uExposure.value = exposure
       u.uScroll.value += dt * (0.18 + 0.8 * kSpeed + 0.35 * loud)
-
-      const albumU = u.uAlbumTint?.value as THREE.Color | undefined
-      if (albumU) albumU.copy(albumTint)
+      ;(u.uAlbumTint.value as THREE.Color)?.copy(albumTint)
 
       // Particle motion toward camera
       const pts = particlesRef.current
@@ -330,7 +321,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         }
       }
 
-      // Rebuild particles only if density changed a lot, and guard after disposal
+      // Rebuild particles only if density changed a lot
       const desired = Math.floor(1500 * THREE.MathUtils.clamp(cfgRef.current.particleDensity || 0.9, 0.1, 2.0))
       const current = (particlesRef.current?.geometry.getAttribute('position') as THREE.BufferAttribute | undefined)?.count ?? desired
       if (Math.abs(desired - current) > 400) {
@@ -356,6 +347,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       window.clearInterval(albumIv)
       offFrame?.()
       uniformsRef.current = null
+      particlesRef.current = null
       scene.traverse(obj => {
         const any = obj as any
         if (any.geometry?.dispose) any.geometry.dispose()
@@ -406,8 +398,8 @@ function Panel(props: { open: boolean, cfg: Cfg, onToggle: () => void, onChange:
       {open && (
         <div style={{ width: 300, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
           background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
-          <Card title="Intensity">
-            <Row label={`Overall: ${cfg.intensity.toFixed(2)}`}>
+          <Card title="Intensity & Speed">
+            <Row label={`Intensity: ${cfg.intensity.toFixed(2)}`}>
               <input type="range" min={0} max={1.2} step={0.01} value={cfg.intensity}
                      onChange={e => onChange(prev => ({ ...prev, intensity: Math.max(0, Math.min(1.2, +e.currentTarget.value || 0)) }))}/>
             </Row>

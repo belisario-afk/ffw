@@ -41,20 +41,6 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       filmGrainStrength: 0.35
     })
 
-    // Helper: update camera aspect, composer size, and line resolution on resize
-    const updateSizes = () => {
-      const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-      const view = renderer.getSize(new THREE.Vector2())
-      camera.aspect = view.x / Math.max(1, view.y)
-      camera.updateProjectionMatrix()
-      comp.onResize()
-      // Update fat-line resolution to drawing buffer size (pixels)
-      lineMat.resolution.set(draw.x, draw.y)
-      lineMat.needsUpdate = true
-    }
-
-    window.addEventListener('resize', updateSizes)
-
     // Colors from CSS variables
     const cssColor = (name: string, fallback: string) =>
       getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
@@ -85,7 +71,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       opacity: 0.95,
       depthTest: true
     })
-    // Initial resolution (must use drawing buffer size)
+    // Set initial resolution from drawing buffer size
     {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
       lineMat.resolution.set(draw.x, draw.y)
@@ -128,7 +114,7 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
       scene.add(beamGroup)
     }
 
-    // Fog sheet
+    // Fog sheet (precision qualifiers added)
     const fogSheet = (() => {
       const geom = new THREE.PlaneGeometry(12, 4)
       const mat = new THREE.ShaderMaterial({
@@ -141,6 +127,8 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
         depthWrite: false,
         blending: THREE.AdditiveBlending,
         vertexShader: /* glsl */`
+          precision highp float;
+          precision highp int;
           varying vec2 vUv;
           void main() {
             vUv = uv;
@@ -148,6 +136,8 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
           }
         `,
         fragmentShader: /* glsl */`
+          precision highp float;
+          precision highp int;
           varying vec2 vUv;
           uniform float uTime;
           uniform float uIntensity;
@@ -227,7 +217,17 @@ export default function WireframeHouse3D({ quality, accessibility, settings }: P
     const clock = new THREE.Clock()
     let raf = 0
 
-    // Initial size sync
+    // Size updater — define AFTER lineMat exists to avoid TDZ
+    const updateSizes = () => {
+      const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
+      const view = renderer.getSize(new THREE.Vector2())
+      camera.aspect = view.x / Math.max(1, view.y)
+      camera.updateProjectionMatrix()
+      comp.onResize()
+      lineMat.resolution.set(draw.x, draw.y)
+      lineMat.needsUpdate = true
+    }
+    window.addEventListener('resize', updateSizes)
     updateSizes()
 
     const animate = () => {

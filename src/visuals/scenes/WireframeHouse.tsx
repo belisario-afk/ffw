@@ -1,4 +1,5 @@
 // Patch: reduce orbit when no reactive frames, add camera bob, stronger visible reactions.
+// + Guarded render loop to prevent crashes when canvas/context becomes null mid-frame.
 
 import React, { useEffect, useRef, useState } from 'react'
 import type { AuthState } from '../../auth/token'
@@ -58,7 +59,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     canvas.width = Math.floor(canvas.clientWidth * dpr)
     canvas.height = Math.floor(canvas.clientHeight * dpr)
     const ctx = canvas.getContext('2d', { alpha: true })
-    if (ctx) { ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; setCtx2d(ctx) }
+    if (ctx) { ctx.imageSmoothingEnabled = true; (ctx as any).imageSmoothingQuality = 'high'; setCtx2d(ctx) }
     const onResize = () => {
       const dprR = Math.min(2, window.devicePixelRatio || 1) * quality.renderScale
       canvas.width = Math.floor(canvas.clientWidth * dprR)
@@ -170,21 +171,38 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     return () => { cancelled = true }
   }, [auth, accessibility.epilepsySafe, accessibility.reducedMotion])
 
+  // Guarded render loop to avoid null canvas/ctx crash
   useEffect(() => {
-    if (!ctx2d || !canvasRef.current) return
+    if (!ctx2d) return
     let running = true
     let lastT = performance.now()
+
     const loop = () => {
       if (!running) return
       const now = performance.now()
       const dt = Math.min(0.05, (now - lastT) / 1000)
       lastT = now
 
+      const cv = canvasRef.current
+      const ctx = ctx2d
+      if (!cv || !ctx) {
+        requestAnimationFrame(loop)
+        return
+      }
+
       const f = reactiveRef.current
       stepPhysics(f, dt)
-      drawScene(ctx2d!, canvasRef.current!, f)
+
+      try {
+        drawScene(ctx, cv, f)
+      } catch (e) {
+        // Prevent runaway crash loop if canvas/context became invalid
+        console.warn('WireframeHouse draw skipped (ctx/canvas not ready):', e)
+      }
+
       requestAnimationFrame(loop)
     }
+
     requestAnimationFrame(loop)
     return () => { running = false }
   }, [ctx2d, quality, accessibility, settings])
@@ -284,7 +302,10 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
   }
 
   function drawScene(g: CanvasRenderingContext2D, canvas: HTMLCanvasElement, f: ReactiveFrame | null) {
+    if (!canvas) return
     const { width: W, height: H } = canvas
+    if (!W || !H) return
+
     const low = f?.bands.low ?? 0.0
     const mid = f?.bands.mid ?? 0.0
     const high = f?.bands.high ?? 0.0
@@ -360,7 +381,7 @@ export default function WireframeHouse({ auth, quality, accessibility, settings 
     }
   }
 
-  // draw helpers + math (unchanged) ...
+  // draw helpers + math ...
   function drawStars(g: CanvasRenderingContext2D, W: number, H: number, stars: {x:number;y:number;z:number;b:number}[], f: ReactiveFrame | null) {
     const tw = (f?.chroma?.[0] ?? 0) * 0.6 + (f?.chroma?.[7] ?? 0) * 0.4
     const base = 0.6 + (f?.loudness ?? 0) * 0.3

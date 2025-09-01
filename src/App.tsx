@@ -12,8 +12,9 @@ import DevicePicker from './ui/DevicePicker'
 import { ThemeManager, setTheme, getTheme, ThemeName, setAlbumSkinEnabled, isAlbumSkinEnabled } from './ui/ThemeManager'
 import { getFPS } from './utils/fps'
 import { detectGPUInfo } from './utils/gpu'
+import { HousePanel, defaultHouseSettings, type HouseSettings } from './ui/HousePanel'
 
-type Panel = 'quality' | 'vj' | 'devices' | null
+type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
 
 export default function App() {
   const [auth, setAuth] = useState<AuthState | null>(restoreFromStorage())
@@ -34,16 +35,16 @@ export default function App() {
   })
   const [theme, setThemeState] = useState<ThemeName>(getTheme())
   const [scene, setScene] = useState<string>(() => localStorage.getItem('ffw_scene') || 'Blank')
+  const [houseSettings, setHouseSettings] = useState<HouseSettings>(() => {
+    try { return JSON.parse(localStorage.getItem('ffw_house_settings') || '') as HouseSettings } catch { return defaultHouseSettings }
+  })
 
   const navigate = useNavigate()
 
   useEffect(() => {
     detectGPUInfo().then(setGpu)
     let cancel = false
-    const loop = () => {
-      setFps(getFPS())
-      if (!cancel) requestAnimationFrame(loop)
-    }
+    const loop = () => { setFps(getFPS()); if (!cancel) requestAnimationFrame(loop) }
     requestAnimationFrame(loop)
     return () => { cancel = true }
   }, [])
@@ -59,6 +60,7 @@ export default function App() {
       if (e.key === 'q') setPanel(p => p === 'quality' ? null : 'quality')
       if (e.key === 'v') setPanel(p => p === 'vj' ? null : 'vj')
       if (e.key === 'd') setPanel(p => p === 'devices' ? null : 'devices')
+      if (e.key === 's') setPanel(p => p === 'scene' ? null : 'scene')
       if (e.key === 'Escape') setPanel(null)
       if (e.key === 'l' && !auth) handleLogin()
     }
@@ -66,26 +68,15 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [auth])
 
-  function handleLogin() {
-    loginWithSpotify({ scopes: defaultScopes() })
-  }
+  useEffect(() => {
+    localStorage.setItem('ffw_house_settings', JSON.stringify(houseSettings))
+  }, [houseSettings])
 
-  function handleSignOut() {
-    signOut()
-    setAuth(null)
-    navigate('/')
-    location.reload()
-  }
+  function handleLogin() { loginWithSpotify({ scopes: defaultScopes() }) }
+  function handleSignOut() { signOut(); setAuth(null); navigate('/'); location.reload() }
 
-  function onThemeChange(t: ThemeName) {
-    setThemeState(t)
-    setTheme(t)
-  }
-
-  function onSceneChange(v: string) {
-    setScene(v)
-    localStorage.setItem('ffw_scene', v)
-  }
+  function onThemeChange(t: ThemeName) { setThemeState(t); setTheme(t) }
+  function onSceneChange(v: string) { setScene(v); localStorage.setItem('ffw_scene', v) }
 
   return (
     <div className="app-shell" role="application" aria-label="FFW Visualizer">
@@ -108,26 +99,27 @@ export default function App() {
                     reducedMotion: accessibility.reducedMotion,
                     highContrast: accessibility.highContrast
                   }}
+                  settings={houseSettings}
                 />
               ) : (
-                <BlankScene
-                  auth={auth}
-                  quality={quality}
-                  accessibility={accessibility}
-                />
+                <BlankScene auth={auth} quality={quality} accessibility={accessibility} />
               )}
             </Suspense>
           } />
         </Routes>
         <div className="cyber-panel" aria-hidden={false}>
           <strong>FFW</strong> — <span style={{ color: 'var(--accent)' }}>Cyber</span> Visualizer
-          <span style={{ marginLeft: 8, color: 'var(--muted)' }}>(Q, V, D)</span>
+          <span style={{ marginLeft: 8, color: 'var(--muted)' }}>(Q Quality • V VJ • D Devices • S Scene)</span>
           <div style={{ display: 'inline-flex', gap: 8, marginLeft: 10, alignItems: 'center' }}>
             <label htmlFor="scene" style={{ fontSize: 11, color: 'var(--muted)' }}>Scene</label>
             <select id="scene" value={scene} onChange={(e) => onSceneChange(e.currentTarget.value)} title="Scene selector" aria-label="Scene selector">
               <option value="Blank">Blank</option>
               <option value="Wireframe House">Wireframe House</option>
             </select>
+
+            {scene === 'Wireframe House' && (
+              <button className="btn" onClick={() => setPanel('scene')} title="Scene settings" aria-label="Scene settings">⚙️</button>
+            )}
 
             <label htmlFor="theme" style={{ fontSize: 11, color: 'var(--muted)' }}>Theme</label>
             <select id="theme" value={theme} onChange={(e) => onThemeChange(e.currentTarget.value as ThemeName)} title="Theme" aria-label="Theme">
@@ -153,17 +145,15 @@ export default function App() {
       <PlayerController auth={auth} onOpenDevices={() => setPanel('devices')} />
 
       <Popup open={panel === 'quality'} title="Quality" onClose={() => setPanel(null)}>
-        <QualityPanel
-          value={quality}
-          onChange={setQuality}
-        />
+        <QualityPanel value={quality} onChange={setQuality} />
       </Popup>
 
       <Popup open={panel === 'vj'} title="VJ / Accessibility" onClose={() => setPanel(null)}>
-        <VJPanel
-          value={accessibility}
-          onChange={setAccessibility}
-        />
+        <VJPanel value={accessibility} onChange={setAccessibility} />
+      </Popup>
+
+      <Popup open={panel === 'scene'} title="Wireframe House" onClose={() => setPanel(null)}>
+        <HousePanel value={houseSettings} onChange={setHouseSettings} />
       </Popup>
 
       <Popup open={panel === 'devices'} title="Devices" onClose={() => setPanel(null)}>

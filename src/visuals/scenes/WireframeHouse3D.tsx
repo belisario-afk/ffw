@@ -164,6 +164,36 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       for (let i = 0; i < data.length; i += 4) { const r = data[i], gr = data[i + 1], b = data[i + 2]; sum += (0.2126*r + 0.7152*gr + 0.0722*b) / 255 }
       return sum / (w * h)
     }
+    // MISSING helper added here
+    function addMansionWindows(add: (p: THREE.Vector3, out: THREE.Vector3) => void) {
+      const storyY = [0.6, 1.7, 2.8]
+      const CF = { minX:-2.0, maxX:2.0, minZ:-1.2, maxZ:1.2 }
+      const LW = { minX:-4.0, maxX:-2.2, minZ:-1.4, maxZ:1.4 }
+      const RW = { minX: 2.2, maxX: 4.0, minZ:-1.4, maxZ:1.4 }
+      const addFace = (minX:number, maxX:number, z:number, out:THREE.Vector3, cols:number) => {
+        for (let s=0; s<storyY.length; s++) {
+          for (let i=0;i<cols;i++) {
+            const x = THREE.MathUtils.lerp(minX+0.22, maxX-0.22, (i+0.5)/cols)
+            add(new THREE.Vector3(x, storyY[s], z), out)
+          }
+        }
+      }
+      // front/back faces
+      addFace(CF.minX, CF.maxX, CF.maxZ+0.001, new THREE.Vector3(0,0, 1), 6)
+      addFace(CF.minX, CF.maxX, CF.minZ-0.001, new THREE.Vector3(0,0,-1), 6)
+      addFace(LW.minX, LW.maxX, LW.maxZ+0.001, new THREE.Vector3(0,0, 1), 4)
+      addFace(LW.minX, LW.maxX, LW.minZ-0.001, new THREE.Vector3(0,0,-1), 4)
+      addFace(RW.minX, RW.maxX, RW.maxZ+0.001, new THREE.Vector3(0,0, 1), 4)
+      addFace(RW.minX, RW.maxX, RW.minZ-0.001, new THREE.Vector3(0,0,-1), 4)
+      // left/right sides
+      for (let s=0; s<storyY.length; s++) {
+        for (let i=0;i<4;i++) {
+          const z = THREE.MathUtils.lerp(CF.minZ+0.1, CF.maxZ-0.1, (i+0.5)/4)
+          add(new THREE.Vector3(-2.201, storyY[s], z), new THREE.Vector3(-1,0,0))
+          add(new THREE.Vector3( 2.201, storyY[s], z), new THREE.Vector3( 1,0,0))
+        }
+      }
+    }
 
     // Scene/camera/renderer
     const scene = new THREE.Scene()

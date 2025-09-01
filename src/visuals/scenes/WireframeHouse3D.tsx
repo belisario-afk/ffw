@@ -12,7 +12,7 @@ import { cacheAlbumArt } from '../../utils/idb'
 import { ensurePlayerConnected, hasSpotifyTokenProvider, setSpotifyTokenProvider } from '../../spotify/player'
 import { fetchLyrics, type SyncedLine } from '../../lyrics/provider'
 
-// Minimal in-scene auth UI so you can Sign in / Play in Browser even if TopBar isn't mounted.
+// Inline auth UI so you can sign in even if a TopBar isn’t mounted
 import { bootstrapAuthFromHash, getAccessToken, ensureAuth } from '../../auth/spotifyAuth'
 import { loadWebPlaybackSDK } from '../../spotify/sdk'
 import { transferPlaybackToDevice } from '../../spotify/connect'
@@ -68,8 +68,8 @@ function defaults(initial?: any): LocalCfg {
     orbitSpeed: initial?.orbitSpeed ?? 0.35,
     orbitRadius: initial?.orbitRadius ?? 9.5,
     orbitElev: initial?.orbitElev ?? 0.06,
-    camBob: initial?.camBob ?? 0.08,
-    lineWidthPx: initial?.lineWidthPx ?? 1.6,
+    camBob: initial?.camBob ?? 0.12, // a touch higher so it’s noticeable
+    lineWidthPx: initial?.lineWidthPx ?? 1.8,
     camera: {
       fov: clamp(initial?.camera?.fov ?? 50, 30, 85),
       minDistance: clamp(initial?.camera?.minDistance ?? 5, 3, 30),
@@ -111,16 +111,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // In-scene auth UI state (so you can sign in even if TopBar is absent)
+  // Inline auth mini-UI
   const [token, setToken] = useState<string | null>(null)
   useEffect(() => {
     bootstrapAuthFromHash()
-    setToken(getAccessToken())
-    // Provide token to the player provider as well
     const t = getAccessToken()
-    if (t) {
-      try { setSpotifyTokenProvider(async () => t) } catch {}
-    }
+    setToken(t)
+    if (t) { try { setSpotifyTokenProvider(async () => t) } catch {} }
   }, [])
 
   // stable refs
@@ -129,11 +126,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const currentLineRef = useRef<number>(-1)
   const pbClock = useRef<{ playing: boolean; startedAt: number; offsetMs: number }>({ playing: false, startedAt: 0, offsetMs: 0 })
 
-  // Also support auth passed via props
+  // also accept token from props.auth
   useEffect(() => {
     const t = (auth as any)?.accessToken
     if (t) {
       try { setSpotifyTokenProvider(async () => t) } catch {}
+      setToken(t)
     }
   }, [auth])
 
@@ -141,8 +139,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     if (hasSpotifyTokenProvider()) {
       ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
         .catch(e => console.warn('Spotify ensurePlayerConnected (3D) failed:', e))
-    } else {
-      console.warn('WireframeHouse3D: Spotify token provider not set. Skipping player connect.')
     }
   }, [])
 
@@ -193,11 +189,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const LW = { minX:-4.0, maxX:-2.2, minZ:-1.4, maxZ:1.4 }
       const RW = { minX: 2.2, maxX: 4.0, minZ:-1.4, maxZ:1.4 }
       const addFace = (minX:number, maxX:number, z:number, out:THREE.Vector3, cols:number) => {
-        for (let s=0; s<storyY.length; s++) {
-          for (let i=0;i<cols;i++) {
-            const x = THREE.MathUtils.lerp(minX+0.22, maxX-0.22, (i+0.5)/cols)
-            add(new THREE.Vector3(x, storyY[s], z), out)
-          }
+        for (let s=0; s<storyY.length; s++) for (let i=0;i<cols;i++) {
+          const x = THREE.MathUtils.lerp(minX+0.22, maxX-0.22, (i+0.5)/cols)
+          add(new THREE.Vector3(x, storyY[s], z), out)
         }
       }
       addFace(CF.minX, CF.maxX, CF.maxZ+0.001, new THREE.Vector3(0,0, 1), 6)
@@ -206,12 +200,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       addFace(LW.minX, LW.maxX, LW.minZ-0.001, new THREE.Vector3(0,0,-1), 4)
       addFace(RW.minX, RW.maxX, RW.maxZ+0.001, new THREE.Vector3(0,0, 1), 4)
       addFace(RW.minX, RW.maxX, RW.minZ-0.001, new THREE.Vector3(0,0,-1), 4)
-      for (let s=0; s<storyY.length; s++) {
-        for (let i=0;i<4;i++) {
-          const z = THREE.MathUtils.lerp(CF.minZ+0.1, CF.maxZ-0.1, (i+0.5)/4)
-          add(new THREE.Vector3(-2.201, storyY[s], z), new THREE.Vector3(-1,0,0))
-          add(new THREE.Vector3( 2.201, storyY[s], z), new THREE.Vector3( 1,0,0))
-        }
+      for (let s=0; s<storyY.length; s++) for (let i=0;i<4;i++) {
+        const z = THREE.MathUtils.lerp(CF.minZ+0.1, CF.maxZ-0.1, (i+0.5)/4)
+        add(new THREE.Vector3(-2.201, storyY[s], z), new THREE.Vector3(-1,0,0))
+        add(new THREE.Vector3( 2.201, storyY[s], z), new THREE.Vector3( 1,0,0))
       }
     }
 
@@ -240,8 +232,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
     // Controls
     const controls = new OrbitControls(camera, renderer.domElement)
-
-    // One-time setup (we'll update these live each frame from cfgRef)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
     controls.enablePan = true
@@ -322,7 +312,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     ;(fatMat as any).worldUnits = false
     const setLinePixels = (px: number) => {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-      // push a slightly higher minimum linewidth for reliability
       fatMat.linewidth = Math.max(0.0015, px / Math.max(1, draw.y))
       fatMat.needsUpdate = true
     }
@@ -355,9 +344,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       scene.add(windowGroup)
     }
 
-    // Optional starfield
-    let starfield: THREE.Points | null = null
-    if (cfgRef.current.fx.starfield) {
+    // Starfield — always create so the toggle works post-mount
+    const starfield = (() => {
       const g = new THREE.BufferGeometry()
       const N = 900
       const positions = new Float32Array(N * 3)
@@ -372,11 +360,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
       g.setAttribute('position', new THREE.BufferAttribute(positions, 3))
       const m = new THREE.PointsMaterial({ color: 0xeaf3ff, size: 0.7, sizeAttenuation: true, transparent: true, opacity: 0.45, depthWrite: false })
-      starfield = new THREE.Points(g, m)
-      scene.add(starfield)
-    }
+      const s = new THREE.Points(g, m)
+      s.visible = !!cfgRef.current.fx.starfield
+      scene.add(s)
+      return s
+    })()
 
-    // Haze (keep a direct ref to material; no lookup in animate)
+    // Haze
     const fogMat = (() => {
       const geom = new THREE.PlaneGeometry(34, 12)
       const mat = new THREE.ShaderMaterial({
@@ -397,10 +387,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       return mat
     })()
 
-    // Lyrics marquee (synced support)
+    // Lyrics marquee — always create so toggle works
     let marqueeMat: THREE.ShaderMaterial | null = null
     let marqueeTex: THREE.Texture | null = null
-    let marqueeText = ''
+    let marqueeText = 'FFw Visualizer'
     const setupMarquee = (text: string, opacity = 0.8) => {
       const canvas = document.createElement('canvas')
       canvas.width = 2048; canvas.height = 128
@@ -426,12 +416,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
       if (!marqueeMat) {
         marqueeMat = new THREE.ShaderMaterial({
-          uniforms: {
-            tText: { value: marqueeTex },
-            uScroll: { value: 0 },
-            uOpacity: { value: opacity },
-            uTint: { value: new THREE.Color(0xffffff) },
-          },
+          uniforms: { tText: { value: marqueeTex }, uScroll: { value: 0 }, uOpacity: { value: opacity }, uTint: { value: new THREE.Color(0xffffff) } },
           transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
           vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
           fragmentShader: `
@@ -454,7 +439,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         marqueeMat.needsUpdate = true
       }
     }
-    if (cfgRef.current.fx.lyricsMarquee) { marqueeText = 'FFw Visualizer'; setupMarquee(marqueeText, 0.85) }
+    // initialize once (opacity 0 if user disabled)
+    setupMarquee(marqueeText, cfgRef.current.fx.lyricsMarquee ? 0.85 : 0.0)
 
     // Covers + lyrics
     let floorTex: THREE.Texture | null = null
@@ -514,7 +500,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           } catch {}
           syncedRef.current = synced || null
           currentLineRef.current = -1
-          if (line && line !== marqueeText) { marqueeText = line; setupMarquee(line, 0.9) }
+          if (line && line !== marqueeText) { marqueeText = line; setupMarquee(line, cfgRef.current.fx.lyricsMarquee ? 0.9 : 0.0) }
         }
       } catch {}
     }
@@ -530,14 +516,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
       const view = renderer.getSize(new THREE.Vector2())
       camera.aspect = view.x / Math.max(1, view.y)
-      // live-apply FOV from cfgRef
-      const desiredFov = cfgRef.current.camera.fov
-      if (camera.fov !== desiredFov) {
-        camera.fov = desiredFov
-        camera.updateProjectionMatrix()
-      } else {
-        camera.updateProjectionMatrix()
-      }
+      camera.updateProjectionMatrix()
       comp.onResize()
       fatMat.resolution.set(draw.x, draw.y)
       setLinePixels(cfgRef.current.lineWidthPx)
@@ -565,7 +544,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const high = latest?.bands.high ?? 0.08
       const loud = latest?.loudness ?? 0.15
 
-      // Controls live updates from cfg
+      // Live-apply FOV from slider
+      if (camera.fov !== cfgC.camera.fov) {
+        camera.fov = cfgC.camera.fov
+        camera.updateProjectionMatrix()
+      }
+
+      // Controls live updates
       controls.enableDamping = cfgC.camera.enableDamping
       controls.dampingFactor = cfgC.camera.dampingFactor
       controls.enablePan = cfgC.camera.enablePan
@@ -602,38 +587,40 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       floorMesh.visible = !mosaicGroup.visible
 
       // lyrics (synced if available)
-      if (cfgC.fx.lyricsMarquee && marqueeMat) {
-        const lines = syncedRef.current
-        if (lines?.length) {
-          const pb = pbClock.current
-          const ms = pb.playing ? (Date.now() - pb.startedAt) : pb.offsetMs
-          let idx = currentLineRef.current
-          if (idx < 0 || idx >= lines.length || ms < lines[idx].timeMs || (idx < lines.length - 1 && ms >= lines[idx + 1].timeMs)) {
-            // binary search
-            let lo = 0, hi = lines.length - 1, found = 0
-            while (lo <= hi) {
-              const midIdx = (lo + hi) >> 1
-              if (lines[midIdx].timeMs <= ms) { found = midIdx; lo = midIdx + 1 } else { hi = midIdx - 1 }
+      if (marqueeMat) {
+        if (cfgC.fx.lyricsMarquee) {
+          const lines = syncedRef.current
+          if (lines?.length) {
+            const pb = pbClock.current
+            const ms = pb.playing ? (Date.now() - pb.startedAt) : pb.offsetMs
+            let idx = currentLineRef.current
+            if (idx < 0 || idx >= lines.length || ms < lines[idx].timeMs || (idx < lines.length - 1 && ms >= lines[idx + 1].timeMs)) {
+              // binary search
+              let lo = 0, hi = lines.length - 1, found = 0
+              while (lo <= hi) {
+                const midIdx = (lo + hi) >> 1
+                if (lines[midIdx].timeMs <= ms) { found = midIdx; lo = midIdx + 1 } else { hi = midIdx - 1 }
+              }
+              idx = found
+              if (idx !== currentLineRef.current) {
+                currentLineRef.current = idx
+                const text = lines[idx].text || ''
+                if (text && text !== marqueeText) { marqueeText = text; setupMarquee(text, 0.92) }
+              }
             }
-            idx = found
-            if (idx !== currentLineRef.current) {
-              currentLineRef.current = idx
-              const text = lines[idx].text || ''
-              if (text && text !== marqueeText) { marqueeText = text; setupMarquee(text, 0.92) }
-            }
+            marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.03) % 1
+          } else {
+            marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.045) % 1
+            marqueeMat.uniforms.uOpacity.value = 0.85
           }
-          marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.03) % 1
+          ;(marqueeMat.uniforms.uTint.value as THREE.Color).copy(accent)
         } else {
-          // plain fallback
-          marqueeMat.uniforms.uScroll.value = (marqueeMat.uniforms.uScroll.value + dt * 0.045) % 1
-          marqueeMat.uniforms.uOpacity.value = 0.85
+          marqueeMat.uniforms.uOpacity.value = 0.0
         }
-        ;(marqueeMat.uniforms.uTint.value as THREE.Color).copy(accent)
-      } else if (marqueeMat) {
-        marqueeMat.uniforms.uOpacity.value = 0.0
       }
 
-      // camera autopilot (works even with no analysis)
+      // camera autopilot + bob (bob visible; works live)
+      const bob = Math.sin(t * 1.4) * cfgC.camBob // visible amplitude from slider
       if (cfgC.camera.autoPath && !userInteracting) {
         const baseSpeed = cfgC.orbitSpeed
         const audioBoost = 0.4 * (low + mid + high)
@@ -641,16 +628,20 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const radius = THREE.MathUtils.clamp(cfgC.orbitRadius, 6.0, 12.0)
         const elev = cfgC.orbitElev
         const pos = pathPoint(cfgC.path, angleRef.current, radius)
-        camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + cfgC.camBob * (0.05 + low * 0.2), pos.z)
+        camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
         camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
         controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
+      } else {
+        // manual: only add bob on Y to avoid fighting user controls
+        camera.position.y += (bob - (camera as any).__lastBobY || 0)
+        ;(camera as any).__lastBobY = bob
       }
 
       ;(grid.material as THREE.Material).opacity = 0.05 * (stale ? 0.6 : 1.0)
       controls.update()
       comp.composer.render()
 
-      // Robust fallback: if fat lines aren't drawing, show thin lines too
+      // fallback: if fat lines aren’t drawing, swap to thin
       frames++
       if (!fallbackArmed && frames > 12) {
         const dc = (renderer.info.render.calls || 0)
@@ -786,10 +777,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
-  // In-scene auth UI handlers
-  const signIn = () => {
-    ensureAuth()
-  }
+  // Inline auth UI handlers
+  const signIn = () => ensureAuth()
   const playInBrowser = async () => {
     try {
       const t = getAccessToken()
@@ -816,7 +805,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   return (
     <div data-visual="wireframe3d" style={{ position: 'relative', width: '100%', height: '100%' }}>
-      {/* Inline auth UI if TopBar is missing */}
+      {/* Inline auth UI if no TopBar */}
       <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 50, display: 'flex', gap: 8, pointerEvents: 'auto' }}>
         {!token ? (
           <button onClick={signIn} style={btnStyle}>Sign in with Spotify</button>
@@ -853,12 +842,8 @@ function Wire3DPanel(props: {
   )
 
   return (
-    <div data-panel="wireframe3d" style={{
-      position:'absolute', top:44, right:12, zIndex:10, userSelect:'none', pointerEvents:'auto',
-      display: props.open ? 'block' : 'none'
-    }}>
-      <div style={{ width: 300, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
-        background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
+    <div data-panel="wireframe3d" style={{ position:'absolute', top:44, right:12, zIndex:10, userSelect:'none', pointerEvents:'auto', display: open ? 'block' : 'none' }}>
+      <div style={{ width: 300, padding:12, border:'1px solid #2b2f3a', borderRadius:8, background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
         <Card title="Camera">
           <Row label={`FOV: ${cfg.camera.fov.toFixed(0)}`}>
             <input type="range" min={30} max={85} step={1} value={cfg.camera.fov}
@@ -877,7 +862,7 @@ function Wire3DPanel(props: {
                    onChange={e => onChange(prev => ({ ...prev, orbitElev: +e.target.value }))} />
           </Row>
           <Row label={`Camera bob: ${cfg.camBob.toFixed(2)}`}>
-            <input type="range" min={0} max={0.5} step={0.01} value={cfg.camBob}
+            <input type="range" min={0} max={0.6} step={0.01} value={cfg.camBob}
                    onChange={e => onChange(prev => ({ ...prev, camBob: +e.target.value }))} />
           </Row>
           <Row label={`Auto path`}>
@@ -901,7 +886,7 @@ function Wire3DPanel(props: {
 
         <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
           <button onClick={() => onChange(defaults())} style={btnStyle}>Reset</button>
-          <button onClick={props.onToggle} style={btnStyle}>Close</button>
+          <button onClick={onToggle} style={btnStyle}>Close</button>
         </div>
       </div>
     </div>

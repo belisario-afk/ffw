@@ -1,23 +1,25 @@
-// Lightweight lyrics helper (best-effort).
-// 1) If window.__ffw__getLyrics is provided, use it.
-//    Expected return: string | string[] | { text?: string; lines?: string[] }.
+// Lyrics provider with synced (LRC) support + plain fallback.
+// Order:
+// 1) If window.__ffw__getLyrics is provided, use it (string | string[] | {text|lines}).
 // 2) Else try LRCLIB (no auth) by title/artist.
-// Returns a "plain" marquee-friendly string (no timestamps).
+// Returns both plain (for marquee) and synced lines when available.
 
 export type LyricsQuery = { title: string; artist: string }
+export type SyncedLine = { timeMs: number; text: string }
 
-export async function fetchLyrics(q: LyricsQuery): Promise<{ plain: string } | null> {
-  // Try user hook first
+export async function fetchLyrics(q: LyricsQuery): Promise<{ plain: string; synced?: SyncedLine[] } | null> {
+  // Custom hook first
   try {
     const hook = (window as any).__ffw__getLyrics
     if (typeof hook === 'function') {
       const res = await hook(q)
       const plain = normalize(res)
-      if (plain) return { plain }
+      const synced = tryParseSynced(res)
+      return plain || synced ? { plain, synced } : null
     }
   } catch {}
 
-  // LRCLIB (free): https://lrclib.net/api/get?track_name=...&artist_name=...
+  // LRCLIB
   try {
     if (!q.title && !q.artist) return null
     const url = new URL('https://lrclib.net/api/get')
@@ -27,11 +29,11 @@ export async function fetchLyrics(q: LyricsQuery): Promise<{ plain: string } | n
     if (!r.ok) return null
     const data = await r.json().catch(() => null)
     if (!data) return null
-    // Prefer synced if available, else plain
-    const synced: string = data.syncedLyrics || ''
-    const plain: string = data.plainLyrics || ''
-    const out = normalize(synced || plain)
-    return out ? { plain: out } : null
+    const syncedRaw: string = data.syncedLyrics || ''
+    const plainRaw: string = data.plainLyrics || ''
+    const synced = parseLRC(syncedRaw)
+    const plain = synced.length ? synced.map(s => s.text).join('  •  ') : collapse(plainRaw)
+    return plain ? { plain, synced: synced.length ? synced : undefined } : null
   } catch {
     return null
   }
@@ -48,10 +50,38 @@ function normalize(input: any): string {
   return ''
 }
 
+function tryParseSynced(input: any): SyncedLine[] | undefined {
+  if (!input) return
+  if (typeof input === 'string') return parseLRC(input)
+  if (typeof input === 'object' && typeof input.synced === 'string') return parseLRC(input.synced)
+  return
+}
+
 function collapse(s: string): string {
-  // Remove timestamps like [mm:ss.xx], condense whitespace/newlines
-  return s
-    .replace(/\[[0-9:.]+\]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
+  return String(s).replace(/\[[0-9:.]+\]/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+export function parseLRC(src: string): SyncedLine[] {
+  if (!src) return []
+  const lines = String(src).split(/\r?\n/)
+  const out: SyncedLine[] = []
+  const tag = /\[([0-9]{1,2}):([0-9]{2})(?:\.([0-9]{1,3}))?]/g
+  for (const line of lines) {
+    let lastIndex = 0
+    let match: RegExpExecArray | null
+    const stamps: number[] = []
+    while ((match = tag.exec(line)) !== null) {
+      lastIndex = match.index + match[0].length
+      const m = parseInt(match[1], 10)
+      const s = parseInt(match[2], 10)
+      const f = match[3] ? parseInt(match[3].padEnd(3, '0'), 10) : 0
+      stamps.push((m * 60 + s) * 1000 + f)
+    }
+    const text = line.slice(lastIndex).trim()
+    if (text && stamps.length) {
+      stamps.forEach(ms => out.push({ timeMs: ms, text }))
+    }
+  }
+  out.sort((a, b) => a.timeMs - b.timeMs)
+  return out
 }

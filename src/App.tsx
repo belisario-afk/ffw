@@ -13,8 +13,9 @@ import { ThemeManager, setTheme, getTheme, ThemeName, setAlbumSkinEnabled, isAlb
 import { getFPS } from './utils/fps'
 import { detectGPUInfo } from './utils/gpu'
 import { HousePanel, defaultHouseSettings, type HouseSettings } from './ui/HousePanel'
-import { initTransitionManager, requestSceneChange } from './visuals/TransitionManager'
+import { initTransitionManager /* requestSceneChange */ } from './visuals/TransitionManager'
 import { startReactivityOrchestrator } from './audio/ReactivityOrchestrator'
+import { startFallbackTicker } from './audio/FallbackTicker'
 
 type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
 
@@ -37,6 +38,7 @@ export default function App() {
   })
   const [theme, setThemeState] = useState<ThemeName>(getTheme())
   const [scene, setScene] = useState<string>(() => localStorage.getItem('ffw_scene') || 'Blank')
+
   const [houseSettings, setHouseSettings] = useState<HouseSettings>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('ffw_house_settings') || '{}')
@@ -79,7 +81,7 @@ export default function App() {
     localStorage.setItem('ffw_house_settings', JSON.stringify(houseSettings))
   }, [houseSettings])
 
-  // Initialize beat-synced transitions
+  // Initialize transition manager (kept for future use)
   useEffect(() => {
     initTransitionManager((name) => {
       setScene(name)
@@ -87,17 +89,25 @@ export default function App() {
     })
   }, [])
 
-  // Start reactivity orchestrator once (loads analysis, schedules bars/sections)
+  // Start orchestration (precise bar/section) and the fallback ticker (always-on safety)
   useEffect(() => {
-    const stop = startReactivityOrchestrator()
-    return () => stop()
+    const stopOrch = startReactivityOrchestrator()
+    const stopFallback = startFallbackTicker({ maxStaleMs: 250, fps: 60 })
+    return () => { stopOrch(); stopFallback() }
   }, [])
 
   function handleLogin() { loginWithSpotify({ scopes: defaultScopes() }) }
   function handleSignOut() { signOut(); setAuth(null); navigate('/'); location.reload() }
 
   function onThemeChange(t: ThemeName) { setThemeState(t); setTheme(t) }
-  function onSceneChange(v: string) { requestSceneChange(v, { waitForBeat: true, timeoutMs: 1200 }) }
+
+  // IMPORTANT: switch scene immediately so UI never “waits for next beat”
+  function onSceneChange(v: string) {
+    setScene(v)
+    localStorage.setItem('ffw_scene', v)
+    // If you prefer beat-synced later, re-enable:
+    // requestSceneChange(v, { waitForBeat: true, timeoutMs: 1200 })
+  }
 
   return (
     <div className="app-shell" role="application" aria-label="FFW Visualizer">

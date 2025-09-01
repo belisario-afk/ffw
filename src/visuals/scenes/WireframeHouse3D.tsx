@@ -45,9 +45,9 @@ type LocalCfg = {
     autoPath: boolean
     target: { x:number, y:number, z:number }
   }
-  cameraPresets: {
+  cameraPresets?: {
     enabled: boolean
-    strength: number // 0..1
+    strength: number
   }
   fx: {
     beams: boolean
@@ -89,8 +89,8 @@ function defaults(initial?: any): LocalCfg {
       target: { x: 0, y: 2.2, z: 0 }
     },
     cameraPresets: {
-      enabled: initial?.cameraPresets?.enabled ?? true,
-      strength: clamp(initial?.cameraPresets?.strength ?? 0.7, 0, 1)
+      enabled: true,
+      strength: 0.7
     },
     fx: {
       beams: false,
@@ -120,17 +120,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const syncedRef = useRef<SyncedLine[] | null>(null)
   const currentLineRef = useRef<number>(-1)
   const pbClock = useRef<{ playing: boolean; startedAt: number; offsetMs: number }>({ playing: false, startedAt: 0, offsetMs: 0 })
-
-  // chorus detection helpers
-  const lyricCountsRef = useRef<Map<string, number>>(new Map())
-  const chorusRef = useRef<{ active: boolean; lastSwitch: number }>({ active: false, lastSwitch: 0 })
-  const normalizeText = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim()
+  const lastVisualMsRef = useRef<number>(0)
 
   useEffect(() => {
     const token = (auth as any)?.accessToken
     if (token) { try { setSpotifyTokenProvider(async () => token) } catch {} }
   }, [auth])
 
+  // Scenes should not create the SDK, but keeping this connect is harmless if the provider already did.
   useEffect(() => {
     if (hasSpotifyTokenProvider()) {
       ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
@@ -456,8 +453,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
     // Covers + lyrics
     let floorTex: THREE.Texture | null = null
-    const coverTextures: THREE.Texture[] = []
     let currentTrackId: string | null = null
+
+    // Sync the playback clock more frequently for tighter lyric sync
+    const syncPlaybackClock = async () => {
+      try {
+        const s = await getPlaybackState().catch(() => null)
+        if (!s?.item?.id) return
+        pbClock.current.playing = !!s.is_playing
+        pbClock.current.offsetMs = s.progress_ms ?? 0
+        pbClock.current.startedAt = Date.now() - (s.progress_ms ?? 0)
+      } catch {}
+    }
 
     const loadAlbumCoverAndLyrics = async () => {
       try {
@@ -493,15 +500,23 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           floorTex?.dispose(); floorTex = tex
           floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
 
-          coverTextures.push(tex)
-          if (cfgRef.current.fx.mosaicFloor && tiles.length && coverTextures.length === 1) {
+          // FIX: always update the mosaic tiles when new art arrives (was only doing it on first cover)
+          if (cfgRef.current.fx.mosaicFloor && tiles.length) {
             mosaicGroup.visible = true
-            tiles.forEach(t => { t.material.map = tex; t.material.toneMapped = false; t.material.color.setScalar(0.85); t.material.needsUpdate = true })
+            for (const t of tiles) {
+              t.material.map = tex
+              t.material.toneMapped = false
+              t.material.color.setScalar(0.85)
+              t.material.needsUpdate = true
+            }
+          } else {
+            mosaicGroup.visible = false
           }
         } else {
           mosaicGroup.visible = false
         }
 
+        // Load lyrics once per track and initialize billboard
         if (cfgRef.current.fx.lyricsMarquee && id && id !== currentTrackId) {
           currentTrackId = id
           let line = title && artist ? `${title} — ${artist}` : (title || artist || '')
@@ -514,29 +529,19 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           currentLineRef.current = -1
           if (line && line !== marqueeText) { marqueeText = line; setupMarquee(line, 0.9) }
 
-          // Build lyric repetition map for chorus detection
-          if (synced && synced.length) {
-            const counts = new Map<string, number>()
-            for (const l of synced) {
-              const k = normalizeText(l.text || '')
-              if (k) counts.set(k, (counts.get(k) || 0) + 1)
-            }
-            lyricCountsRef.current = counts
-          }
-
-          // Initialize billboard with first visible line
           if (synced?.length) {
             const first = synced[0]?.text || line
-            billboard.setLineNow(first)
-            if (synced[1]?.text) billboard.prepareNext(synced[1].text)
+            await billboard.setLineNow(first)
+            if (synced[1]?.text) await billboard.prepareNext(synced[1].text)
           } else if (line) {
-            billboard.setLineNow(line)
+            await billboard.setLineNow(line)
           }
         }
       } catch {}
     }
     loadAlbumCoverAndLyrics()
     const albumIv = window.setInterval(loadAlbumCoverAndLyrics, 5000)
+    const pbIv = window.setInterval(syncPlaybackClock, 2000)
 
     // Reactivity
     let latest: ReactiveFrame | null = null
@@ -622,7 +627,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       if (starfield) starfield.visible = !!cfgC.fx.starfield
 
       // mosaic/floor
-      mosaicGroup.visible = !!cfgC.fx.mosaicFloor && coverTextures.length > 0
+      mosaicGroup.visible = !!cfgC.fx.mosaicFloor && !!floorTex
       floorMesh.visible = !mosaicGroup.visible
 
       // lyrics timing -> billboard progress and swapping
@@ -630,6 +635,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       if (cfgC.fx.lyricsMarquee && lines?.length) {
         const pb = pbClock.current
         const ms = pb.playing ? (Date.now() - pb.startedAt) : pb.offsetMs
+
+        // detect large seeks/drift and force re-index
+        if (Math.abs(ms - lastVisualMsRef.current) > 2000) {
+          currentLineRef.current = -1
+        }
+        lastVisualMsRef.current = ms
 
         // Compute current line idx via binary search
         let idx = currentLineRef.current
@@ -644,7 +655,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             currentLineRef.current = idx
             const text = lines[idx].text || ''
             if (text) {
-              // Queue next, then begin swap to new current
               const nextText = lines[idx + 1]?.text || ''
               billboard.prepareNext(nextText)
               if (idx === 0 && !text) {
@@ -677,46 +687,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       // Animate billboard transitions
       billboard.update(dt)
 
-      // Determine verse/chorus and compute camera multipliers
-      let isChorus = false
-      if (cfgC.camera.autoPath && cfgC.cameraPresets?.enabled && lines?.length) {
-        const rawText = lines[currentLineRef.current]?.text || ''
-        const key = normalizeText(rawText)
-        const repeats = (lyricCountsRef.current.get(key) || 0)
-        const candidate = repeats >= 2 && key.length >= 6
-        const nowMs = Date.now()
-        if (candidate && !chorusRef.current.active && nowMs - chorusRef.current.lastSwitch > 800) {
-          chorusRef.current.active = true
-          chorusRef.current.lastSwitch = nowMs
-        } else if (!candidate && chorusRef.current.active && nowMs - chorusRef.current.lastSwitch > 1500) {
-          chorusRef.current.active = false
-          chorusRef.current.lastSwitch = nowMs
-        }
-        isChorus = chorusRef.current.active
-      }
-
-      let speedMul = 1, radiusMul = 1, elevMul = 1
-      if (cfgC.camera.autoPath && cfgC.cameraPresets?.enabled) {
-        const k = clamp(cfgC.cameraPresets.strength ?? 0.7, 0, 1)
-        if (isChorus) {
-          speedMul = THREE.MathUtils.lerp(1, 1.16, k)
-          radiusMul = THREE.MathUtils.lerp(1, 1.12, k)
-          elevMul = THREE.MathUtils.lerp(1, 1.35, k)
-        } else {
-          speedMul = THREE.MathUtils.lerp(1, 0.90, k)
-          radiusMul = THREE.MathUtils.lerp(1, 0.93, k)
-          elevMul = THREE.MathUtils.lerp(1, 0.82, k)
-        }
-      }
-
       // camera autopilot + bob
       const bob = Math.sin(t * 1.4) * cfgC.camBob
       if (cfgC.camera.autoPath && !userInteracting) {
-        const baseSpeed = cfgC.orbitSpeed * speedMul
+        const baseSpeed = cfgC.orbitSpeed
         const audioBoost = 0.4 * (low + mid + high)
         angleRef.current += dt * (baseSpeed + audioBoost)
-        const radius = THREE.MathUtils.clamp(cfgC.orbitRadius * radiusMul, 6.0, 14.0)
-        const elev = cfgC.orbitElev * elevMul
+        const radius = THREE.MathUtils.clamp(cfgC.orbitRadius, 6.0, 12.0)
+        const elev = cfgC.orbitElev
         const pos = pathPoint(cfgC.path, angleRef.current, radius)
         camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
         camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
@@ -749,6 +727,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       window.removeEventListener('resize', updateSizes)
       cancelAnimationFrame(raf)
       clearInterval(albumIv)
+      clearInterval(pbIv)
       offFrame?.()
       controls.dispose()
       floorTex?.dispose()
@@ -927,27 +906,6 @@ function Wire3DPanel(props: {
             <Row label={`Auto path`}>
               <input type="checkbox" checked={cfg.camera.autoPath}
                      onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoPath: e.target.checked } }))}/>
-            </Row>
-          </Card>
-
-          <Card title="Camera presets (Verse/Chorus)">
-            <Row label="Auto framing">
-              <input
-                type="checkbox"
-                checked={!!cfg.cameraPresets.enabled}
-                onChange={e => onChange(prev => ({
-                  ...prev,
-                  cameraPresets: { ...prev.cameraPresets, enabled: e.target.checked }
-                }))} />
-            </Row>
-            <Row label={`Strength: ${cfg.cameraPresets.strength.toFixed(2)}`}>
-              <input
-                type="range" min={0} max={1} step={0.01}
-                value={cfg.cameraPresets.strength}
-                onChange={e => onChange(prev => ({
-                  ...prev,
-                  cameraPresets: { ...prev.cameraPresets, strength: +e.target.value }
-                }))} />
             </Row>
           </Card>
 

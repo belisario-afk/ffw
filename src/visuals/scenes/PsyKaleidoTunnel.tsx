@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { createRenderer, createComposer } from '../../three/Renderer'
 import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
+import { getPlaybackState } from '../../spotify/api'
 
 type Props = {
   auth: any
@@ -10,20 +11,20 @@ type Props = {
 }
 
 type Cfg = {
-  intensity: number // overall effect strength
-  speed: number     // forward scroll speed
-  slices: number    // kaleidoscope slices
-  chroma: number    // pseudo chromatic aberration
+  intensity: number
+  speed: number
+  slices: number
+  chroma: number
   particleDensity: number
 }
 
-const LS_KEY = 'ffw.kaleido.cfg.v1'
+const LS_KEY = 'ffw.kaleido.cfg.v2'
 
 export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [panelOpen, setPanelOpen] = useState(false)
   const [cfg, setCfg] = useState<Cfg>(() => {
-    try { const saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); return { intensity: 0.9, speed: 0.55, slices: 8, chroma: 0.4, particleDensity: 0.8, ...saved } } catch { return { intensity: 0.9, speed: 0.55, slices: 8, chroma: 0.4, particleDensity: 0.8 } }
+    try { const saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); return { intensity: 0.9, speed: 0.55, slices: 10, chroma: 0.35, particleDensity: 0.9, ...saved } } catch { return { intensity: 0.9, speed: 0.55, slices: 10, chroma: 0.35, particleDensity: 0.9 } }
   })
   const cfgRef = useRef(cfg)
   useEffect(() => { cfgRef.current = cfg; try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)) } catch {} }, [cfg])
@@ -34,13 +35,13 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const scene = new THREE.Scene()
     scene.background = new THREE.Color('#05070b')
 
-    const camera = new THREE.PerspectiveCamera(60, 1, 0.02, 200)
-    camera.position.set(0, 0, 0.4)
+    const camera = new THREE.PerspectiveCamera(62, 1, 0.05, 500)
+    camera.position.set(0, 0, 0)
 
     const { renderer, dispose: disposeRenderer } = createRenderer(canvasRef.current, quality.renderScale)
     const comp = createComposer(renderer, scene, camera, {
       bloom: quality.bloom,
-      bloomStrength: 0.85,
+      bloomStrength: 0.9,
       bloomRadius: 0.42,
       bloomThreshold: 0.25,
       fxaa: true,
@@ -52,27 +53,54 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     })
 
     const clock = new THREE.Clock()
+    const aliveRef = useRef(true)
+    aliveRef.current = true
 
     // Audio frame
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Tunnel geometry (inside-out cylinder so we see interior)
-    const radius = 6
-    const tunnelLen = 80
+    // Album tint (updated periodically)
+    const albumTint = new THREE.Color(0.55, 0.7, 1.0)
+    const sampleAlbumTint = async () => {
+      try {
+        const s = await getPlaybackState().catch(() => null)
+        const url = (s?.item?.album?.images?.[0]?.url as string) || ''
+        if (!url) return
+        const img = await new Promise<HTMLImageElement>((res, rej) => { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => res(im); im.onerror = rej; im.src = url })
+        const c = document.createElement('canvas'); const w = 32, h = 32; c.width = w; c.height = h
+        const g = c.getContext('2d'); if (!g) return
+        g.drawImage(img, 0, 0, w, h)
+        const data = g.getImageData(0, 0, w, h).data
+        let r=0, gr=0, b=0
+        for (let i=0;i<data.length;i+=4){ r += data[i]; gr += data[i+1]; b += data[i+2] }
+        const n = data.length/4 || 1
+        albumTint.setRGB((r/n)/255, (gr/n)/255, (b/n)/255)
+        // normalize towards pleasing accent
+        const maxc = Math.max(albumTint.r, albumTint.g, albumTint.b) || 1
+        albumTint.multiplyScalar(0.9 / maxc).lerp(new THREE.Color('#77d0ff'), 0.25)
+      } catch {}
+    }
+    sampleAlbumTint()
+    const albumIv = window.setInterval(sampleAlbumTint, 7000)
+
+    // Tunnel geometry (bigger radius to fill FOV; place camera inside)
+    const radius = 14
+    const tunnelLen = 160
     const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 256, 1, true)
-    tunnel.rotateZ(Math.PI) // flip UV seam orientation slightly
+    tunnel.rotateZ(Math.PI * 0.5) // shift seam
     const uniforms = {
       uTime: { value: 0 },
       uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) }, // low, mid, high
       uLoud: { value: 0.15 },
       uBeat: { value: 0.0 },
-      uSlices: { value: cfgRef.current.slices },
+      uSlices: { value: Math.max(1, Math.round(cfgRef.current.slices)) },
       uIntensity: { value: cfgRef.current.intensity },
       uChroma: { value: cfgRef.current.chroma },
       uScroll: { value: 0.0 },
       uSafe: { value: (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0 },
-      uContrastBoost: { value: accessibility.highContrast ? 1.0 : 0.0 }
+      uContrastBoost: { value: accessibility.highContrast ? 1.0 : 0.0 },
+      uAlbumTint: { value: albumTint.clone() }
     }
     const mat = new THREE.ShaderMaterial({
       uniforms,
@@ -102,9 +130,9 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         uniform float uSafe;
         uniform float uContrastBoost;
         uniform float uSlices;
+        uniform vec3 uAlbumTint;
         const float PI = 3.141592653589793;
 
-        // hash/noise
         float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
         float noise(vec2 p){
           vec2 i = floor(p), f = fract(p);
@@ -114,18 +142,15 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         }
         float fbm(vec2 p){
           float v=0.0, a=0.5;
-          for(int i=0;i<5;i++){
-            v += a * noise(p); p *= 2.02; a *= 0.52;
-          }
+          for(int i=0;i<5;i++){ v += a * noise(p); p *= 2.02; a *= 0.52; }
           return v;
         }
 
-        // kaleidoscope fold across X (around tunnel)
         float foldKaleido(float x, float slices){
           float seg = 1.0 / max(1.0, slices);
-          float xf = fract(x);
-          float m = mod(xf, seg) / seg; // 0..1 within segment
-          m = abs(m - 0.5) * 2.0;       // mirror
+          float xf = fract(x + 1.0);
+          float m = mod(xf, seg) / seg;
+          m = abs(m - 0.5) * 2.0;
           return m * seg + floor(xf/seg)*seg;
         }
 
@@ -133,62 +158,59 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           return a + b*cos(6.28318*(c*t + d));
         }
 
-        vec3 psychedelic(vec2 uv, float time, vec3 audio, float loud, float intensity, float slices, float chroma, float safe, float cboost){
-          // uv.x around tunnel, uv.y along depth; add scroll
+        vec3 psychedelic(vec2 uv, float time, vec3 audio, float loud, float intensity, float slices, float chroma, float safe, float cboost, vec3 album) {
           uv.y = fract(uv.y - time*0.035 - uScroll);
-          // kaleido on x
           uv.x = foldKaleido(uv.x, slices);
 
-          // base field
           float warp = fbm(uv * (2.5 + 3.5*intensity) + vec2(time*0.12, -time*0.09));
           float rings = sin((uv.y*36.0 + warp*8.0) - time*8.0 * (0.6 + 0.8*loud));
           float spokes = sin((uv.x*64.0 + warp*9.0) + time*5.0 * (0.4 + 0.9*audio.z));
           float field = smoothstep(-1.0, 1.0, rings*spokes);
 
-          // audio pushes saturation/contrast
           float sat = clamp(0.55 + intensity*0.35 + audio.z*0.35 + cboost*0.25, 0.0, 1.5);
           float brt = clamp(0.42 + loud*0.45 + audio.x*0.2, 0.0, 2.0);
           float hueShift = 0.15*intensity + 0.12*audio.y + 0.05*loud + 0.07*sin(time*0.3);
 
-          // base palette
           vec3 colA = palette(fract(field*0.25 + hueShift), vec3(0.52,0.32,0.89), vec3(0.45,0.55,0.45), vec3(1.0,0.7,0.4), vec3(0.0,0.2,0.4));
           vec3 colB = palette(fract(field*0.5 + hueShift*1.4), vec3(0.18,0.45,0.96), vec3(0.55,0.45,0.45), vec3(0.8,0.9,0.5), vec3(0.2,0.0,0.6));
           vec3 col = mix(colA, colB, 0.45 + 0.25*audio.y);
 
-          // chromatic split by sampling offset variants
           float off = 0.002 * chroma * (0.4 + 0.6*intensity);
           float fR = smoothstep(0.25, 0.75, fbm((uv + vec2(off,0.0))*4.0 + time*0.06));
           float fG = smoothstep(0.25, 0.75, fbm((uv + vec2(0.0,off))*4.0 - time*0.04));
           float fB = smoothstep(0.25, 0.75, fbm((uv + vec2(-off,off))*4.0 + time*0.02));
           vec3 chrom = vec3(fR, fG, fB);
 
-          // combine with brightness and safety clamp for flashes
           float flash = 0.35*loud + 0.45*audio.z + 0.25*audio.y;
-          float maxFlash = mix(1.0, 0.35, safe); // reduce flash if safe
+          float maxFlash = mix(1.0, 0.35, safe);
           flash = min(flash, maxFlash);
           col *= (0.8 + 0.7*flash);
           col = mix(col, chrom, 0.25 * chroma);
 
-          // final contrast/saturation
+          // album tint
+          col = mix(col, album, 0.22 + 0.18*audio.y);
+
+          // contrast/saturation and brightness
           col = mix(vec3(dot(col, vec3(0.2126,0.7152,0.0722))), col, sat);
+          col *= (0.9 + 0.4*brt);
           col = pow(col, vec3(0.95));
           return col;
         }
 
         void main(){
           vec2 uv = vUv;
-          vec3 col = psychedelic(uv, uTime, uAudio, uLoud, uIntensity, max(1.0,uSlices), uChroma, uSafe, uContrastBoost);
+          vec3 col = psychedelic(uv, uTime, uAudio, uLoud, uIntensity, max(1.0,uSlices), uChroma, uSafe, uContrastBoost, uAlbumTint);
           gl_FragColor = vec4(col, 1.0);
         }
       `
     })
     const tunnelMesh = new THREE.Mesh(tunnel, mat)
-    tunnelMesh.position.z = -tunnelLen*0.35
+    tunnelMesh.position.z = -tunnelLen * 0.25
     scene.add(tunnelMesh)
 
     // Particles (comet flecks rushing by)
     const makeParticles = (density: number) => {
-      const count = Math.floor(1500 * THREE.MathUtils.clamp(density, 0.1, 2.0))
+      const count = Math.floor(1600 * THREE.MathUtils.clamp(density, 0.1, 2.0))
       const geo = new THREE.BufferGeometry()
       const positions = new Float32Array(count * 3)
       const speeds = new Float32Array(count)
@@ -203,8 +225,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       }
       geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
       geo.setAttribute('speed', new THREE.BufferAttribute(speeds, 1))
-      const mat = new THREE.PointsMaterial({ color: 0xaad8ff, size: 0.045, sizeAttenuation: true, transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending })
-      const pts = new THREE.Points(geo, mat)
+      const pm = new THREE.PointsMaterial({ color: 0xaad8ff, size: 0.045, sizeAttenuation: true, transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending })
+      const pts = new THREE.Points(geo, pm)
       pts.name = 'kaleido_particles'
       return pts
     }
@@ -235,67 +257,64 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       const loud = latest?.loudness ?? 0.12
       const beat = latest?.beat ? 1.0 : 0.0
 
-      // Safety clamps
+      // Safety clamps + live cfg
       const safe = (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0
-      uniforms.uSafe.value = safe
       const kIntensity = THREE.MathUtils.lerp(cfgRef.current.intensity, Math.min(cfgRef.current.intensity, 0.6), safe)
       const kSpeed = THREE.MathUtils.lerp(cfgRef.current.speed, Math.min(cfgRef.current.speed, 0.35), safe)
-
+      uniforms.uSafe.value = safe
+      uniforms.uContrastBoost.value = accessibility.highContrast ? 1.0 : 0.0
       uniforms.uAudio.value.set(low, mid, high)
       uniforms.uLoud.value = loud
       uniforms.uBeat.value = beat
-      uniforms.uSlices.value = Math.max(1, Math.round(cfgRef.current.slices))
-      uniforms.uIntensity.value = kIntensity
-      uniforms.uChroma.value = THREE.MathUtils.lerp(cfgRef.current.chroma, Math.min(cfgRef.current.chroma, 0.2), safe)
-      uniforms.uScroll.value += dt * (0.25 + 0.9 * kSpeed + 0.4 * loud)
+      uniforms.uSlices.value = Math.max(1, Math.round(cfgRef.current.slices || 1))
+      uniforms.uIntensity.value = isFinite(kIntensity) ? kIntensity : 0.8
+      uniforms.uChroma.value = isFinite(cfgRef.current.chroma) ? THREE.MathUtils.clamp(cfgRef.current.chroma, 0, 1) : 0.3
+      uniforms.uScroll.value += dt * (0.2 + 0.9 * kSpeed + 0.4 * loud)
+      ;(uniforms.uAlbumTint.value as THREE.Color).copy(albumTint)
 
-      // Particle motion toward camera
-      const pos = (particles.geometry.getAttribute('position') as THREE.BufferAttribute)
-      const spd = (particles.geometry.getAttribute('speed') as THREE.BufferAttribute)
-      const v = new THREE.Vector3()
-      const base = (0.8 + 1.8 * kSpeed) + (loud * 1.6)
-      for (let i = 0; i < spd.count; i++) {
-        const speed = spd.getX(i) * (0.6 + 0.7 * kSpeed) * (1.0 + 0.5 * high)
-        const z = pos.getZ(i) + dt * (base + speed)
-        if (z > 2.0) {
-          // respawn far away at random theta/r
-          const theta = Math.random() * Math.PI * 2
-          const r = radius * (0.9 + Math.random() * 0.25)
-          const x = Math.cos(theta) * r
-          const y = Math.sin(theta) * r
-          pos.setXYZ(i, x, y, -tunnelLen)
-        } else {
-          pos.setZ(i, z)
+      // Particle motion toward camera (guard if disposed)
+      if (particles && (particles.geometry as THREE.BufferGeometry).attributes?.position) {
+        const pos = (particles.geometry.getAttribute('position') as THREE.BufferAttribute)
+        const spd = (particles.geometry.getAttribute('speed') as THREE.BufferAttribute)
+        const base = (0.8 + 1.8 * kSpeed) + (loud * 1.6)
+        for (let i = 0; i < spd.count; i++) {
+          const speed = spd.getX(i) * (0.6 + 0.7 * kSpeed) * (1.0 + 0.5 * high)
+          const z = pos.getZ(i) + dt * (base + speed)
+          if (z > 2.0) {
+            const theta = Math.random() * Math.PI * 2
+            const r = radius * (0.9 + Math.random() * 0.25)
+            const x = Math.cos(theta) * r
+            const y = Math.sin(theta) * r
+            pos.setXYZ(i, x, y, -tunnelLen)
+          } else {
+            pos.setZ(i, z)
+          }
         }
+        pos.needsUpdate = true
       }
-      pos.needsUpdate = true
+
+      // Live density check without setInterval rebuild thrash: rebuild only if delta large
+      const desired = Math.floor(1600 * THREE.MathUtils.clamp(cfgRef.current.particleDensity, 0.1, 2.0))
+      const current = (particles?.geometry.getAttribute('position') as THREE.BufferAttribute | undefined)?.count ?? desired
+      if (Math.abs(desired - current) > 400) {
+        if (particles) {
+          scene.remove(particles)
+          particles.geometry.dispose(); (particles.material as THREE.Material).dispose()
+        }
+        particles = makeParticles(cfgRef.current.particleDensity)
+        scene.add(particles)
+      }
 
       comp.composer.render()
     }
 
     animate()
 
-    // react to cfg changes that affect geometry/material immediately
-    const cfgIv = setInterval(() => {
-      uniforms.uSlices.value = Math.max(1, Math.round(cfgRef.current.slices))
-      uniforms.uIntensity.value = cfgRef.current.intensity
-      uniforms.uChroma.value = cfgRef.current.chroma
-      // Rebuild particles if density changes significantly (cheap guard)
-      const desired = Math.floor(1500 * THREE.MathUtils.clamp(cfgRef.current.particleDensity, 0.1, 2.0))
-      const current = (particles.geometry.getAttribute('position') as THREE.BufferAttribute).count
-      if (Math.abs(desired - current) > 200) {
-        scene.remove(particles)
-        particles.geometry.dispose(); (particles.material as THREE.Material).dispose()
-        particles = makeParticles(cfgRef.current.particleDensity)
-        scene.add(particles)
-      }
-    }, 300)
-
     return () => {
-      cancelAnimationFrame(raf)
-      clearInterval(cfgIv)
-      offFrame?.()
       window.removeEventListener('resize', onResize)
+      cancelAnimationFrame(raf)
+      window.clearInterval(albumIv)
+      offFrame?.()
       scene.traverse(obj => {
         const any = obj as any
         if (any.geometry?.dispose) any.geometry.dispose()
@@ -349,31 +368,31 @@ function Panel(props: { open: boolean, cfg: Cfg, onToggle: () => void, onChange:
           <Card title="Intensity">
             <Row label={`Overall: ${cfg.intensity.toFixed(2)}`}>
               <input type="range" min={0} max={1.2} step={0.01} value={cfg.intensity}
-                     onChange={e => onChange(prev => ({ ...prev, intensity: +e.currentTarget.value }))}/>
+                     onChange={e => onChange(prev => ({ ...prev, intensity: Math.max(0, Math.min(1.2, +e.currentTarget.value || 0)) }))}/>
             </Row>
             <Row label={`Speed: ${cfg.speed.toFixed(2)}`}>
               <input type="range" min={0} max={1.5} step={0.01} value={cfg.speed}
-                     onChange={e => onChange(prev => ({ ...prev, speed: +e.currentTarget.value }))}/>
+                     onChange={e => onChange(prev => ({ ...prev, speed: Math.max(0, Math.min(1.5, +e.currentTarget.value || 0)) }))}/>
             </Row>
           </Card>
           <Card title="Kaleidoscope">
             <Row label={`Slices: ${cfg.slices}`}>
               <input type="range" min={1} max={24} step={1} value={cfg.slices}
-                     onChange={e => onChange(prev => ({ ...prev, slices: Math.max(1, Math.round(+e.currentTarget.value)) }))}/>
+                     onChange={e => onChange(prev => ({ ...prev, slices: Math.max(1, Math.round(+e.currentTarget.value || 1)) }))}/>
             </Row>
             <Row label={`Chroma: ${cfg.chroma.toFixed(2)}`}>
               <input type="range" min={0} max={1} step={0.01} value={cfg.chroma}
-                     onChange={e => onChange(prev => ({ ...prev, chroma: +e.currentTarget.value }))}/>
+                     onChange={e => onChange(prev => ({ ...prev, chroma: Math.max(0, Math.min(1, +e.currentTarget.value || 0)) }))}/>
             </Row>
           </Card>
           <Card title="Particles">
             <Row label={`Density: ${cfg.particleDensity.toFixed(2)}`}>
               <input type="range" min={0.2} max={2} step={0.01} value={cfg.particleDensity}
-                     onChange={e => onChange(prev => ({ ...prev, particleDensity: +e.currentTarget.value }))}/>
+                     onChange={e => onChange(prev => ({ ...prev, particleDensity: Math.max(0.2, Math.min(2, +e.currentTarget.value || 0.2)) }))}/>
             </Row>
           </Card>
           <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
-            <button onClick={() => onChange({ intensity: 0.9, speed: 0.55, slices: 8, chroma: 0.4, particleDensity: 0.8 })} style={btnStyle}>Reset</button>
+            <button onClick={() => onChange({ intensity: 0.9, speed: 0.55, slices: 10, chroma: 0.35, particleDensity: 0.9 })} style={btnStyle}>Reset</button>
             <button onClick={onToggle} style={btnStyle}>Close</button>
           </div>
         </div>

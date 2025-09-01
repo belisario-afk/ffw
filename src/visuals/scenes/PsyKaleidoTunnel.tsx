@@ -20,12 +20,12 @@ type Cfg = {
   exposure: number
 }
 
-const LS_KEY = 'ffw.kaleido.cfg.safe.v1'
+const LS_KEY = 'ffw.kaleido.cfg.safe.v2'
 
 export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
-  // Strong refs so we never read a uniform.value directly (avoids "reading 'value' of null")
+  // Strong refs so we never read uniform.value directly
   const matRef = useRef<THREE.ShaderMaterial | null>(null)
   const particlesRef = useRef<THREE.Points | null>(null)
   const scrollRef = useRef(0)
@@ -109,7 +109,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 256, 1, true)
     tunnel.rotateZ(Math.PI * 0.5)
 
-    // Build material with uniforms (we WON'T store direct pointers to uniform values)
+    // Build material with uniforms
     const uniforms = {
       uTime: { value: 0.0 },
       uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
@@ -249,23 +249,30 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     particlesRef.current = makeParticles(cfgRef.current.particleDensity)
     scene.add(particlesRef.current)
 
-    // Uniform helpers (never read uniform.value; only set if present)
-    const setF = (name: string, v: number) => {
-      const m = matRef.current; if (!m) return
-      const u = (m.uniforms as any)[name]; if (!u || typeof u.value === 'undefined' || u.value === null) return
+    // Safe uniform setters (no reads of .value on null)
+    const setF = (name: keyof typeof uniforms, v: number) => {
+      const m = matRef.current as THREE.ShaderMaterial | null
+      if (!m || !m.uniforms) return
+      const u = (m.uniforms as any)[name]
+      if (!u || u.value === undefined || u.value === null) return
       u.value = v
     }
-    const setV3 = (name: string, x: number, y: number, z: number) => {
-      const m = matRef.current; if (!m) return
-      const u = (m.uniforms as any)[name]; if (!u) return
+    const setV3 = (name: keyof typeof uniforms, x: number, y: number, z: number) => {
+      const m = matRef.current as THREE.ShaderMaterial | null
+      if (!m || !m.uniforms) return
+      const u = (m.uniforms as any)[name]
+      if (!u || !u.value) return
       const val = u.value
-      if (val && val.isVector3) { val.set(x, y, z) }
+      if ((val as any).isVector3) { (val as THREE.Vector3).set(x, y, z) }
+      else { u.value = new THREE.Vector3(x, y, z) }
     }
-    const setColor = (name: string, col: THREE.Color) => {
-      const m = matRef.current; if (!m) return
-      const u = (m.uniforms as any)[name]; if (!u) return
-      const val = u.value
-      if (val && val.isColor) { val.copy(col) } else { u.value = col.clone() }
+    const setColor = (name: keyof typeof uniforms, col: THREE.Color) => {
+      const m = matRef.current as THREE.ShaderMaterial | null
+      if (!m || !m.uniforms) return
+      const u = (m.uniforms as any)[name]
+      if (!u) return
+      if (u.value && (u.value as any).isColor) { (u.value as THREE.Color).copy(col) }
+      else { u.value = col.clone() }
     }
 
     // Resize
@@ -421,6 +428,12 @@ function Panel(props: { open: boolean, cfg: Cfg, onToggle: () => void, onChange:
     background:'rgba(16,18,22,0.8)', color:'#cfe7ff', cursor:'pointer'
   }
 
+  // IMPORTANT: capture slider value before setState to avoid React pooled event issues
+  const onRange = (cb: (v: number) => void) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = Number(e.currentTarget.value)
+    cb(v)
+  }
+
   return (
     <div style={{ position:'absolute', top:12, right:12, zIndex:10, userSelect:'none', pointerEvents:'auto' }}>
       <button onClick={(e) => { e.stopPropagation(); onToggle() }} style={btnStyle}>
@@ -431,36 +444,53 @@ function Panel(props: { open: boolean, cfg: Cfg, onToggle: () => void, onChange:
           background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
           <Card title="Intensity & Speed">
             <Row label={`Intensity: ${cfg.intensity.toFixed(2)}`}>
-              <input type="range" min={0} max={1.2} step={0.01} value={cfg.intensity}
-                     onChange={e => onChange(prev => ({ ...prev, intensity: Math.max(0, Math.min(1.2, +e.currentTarget.value || 0)) }))}/>
+              <input
+                type="range" min={0} max={1.2} step={0.01} value={cfg.intensity}
+                onChange={onRange(v => onChange(prev => ({ ...prev, intensity: Math.max(0, Math.min(1.2, v || 0)) })))}
+              />
             </Row>
             <Row label={`Speed: ${cfg.speed.toFixed(2)}`}>
-              <input type="range" min={0} max={1.5} step={0.01} value={cfg.speed}
-                     onChange={e => onChange(prev => ({ ...prev, speed: Math.max(0, Math.min(1.5, +e.currentTarget.value || 0)) }))}/>
+              <input
+                type="range" min={0} max={1.5} step={0.01} value={cfg.speed}
+                onChange={onRange(v => onChange(prev => ({ ...prev, speed: Math.max(0, Math.min(1.5, v || 0)) })))}
+              />
             </Row>
             <Row label={`Exposure: ${cfg.exposure.toFixed(2)}`}>
-              <input type="range" min={0} max={1.2} step={0.01} value={cfg.exposure}
-                     onChange={e => onChange(prev => ({ ...prev, exposure: Math.max(0, Math.min(1.2, +e.currentTarget.value || 0.7)) }))}/>
+              <input
+                type="range" min={0} max={1.2} step={0.01} value={cfg.exposure}
+                onChange={onRange(v => onChange(prev => ({ ...prev, exposure: Math.max(0, Math.min(1.2, v || 0.7)) })))}
+              />
             </Row>
           </Card>
           <Card title="Kaleidoscope">
             <Row label={`Slices: ${cfg.slices}`}>
-              <input type="range" min={1} max={24} step={1} value={cfg.slices}
-                     onChange={e => onChange(prev => ({ ...prev, slices: Math.max(1, Math.round(+e.currentTarget.value || 1)) }))}/>
+              <input
+                type="range" min={1} max={24} step={1} value={cfg.slices}
+                onChange={onRange(v => onChange(prev => ({ ...prev, slices: Math.max(1, Math.round(v || 1)) })))}
+              />
             </Row>
             <Row label={`Chroma: ${cfg.chroma.toFixed(2)}`}>
-              <input type="range" min={0} max={1} step={0.01} value={cfg.chroma}
-                     onChange={e => onChange(prev => ({ ...prev, chroma: Math.max(0, Math.min(1, +e.currentTarget.value || 0)) }))}/>
+              <input
+                type="range" min={0} max={1} step={0.01} value={cfg.chroma}
+                onChange={onRange(v => onChange(prev => ({ ...prev, chroma: Math.max(0, Math.min(1, v || 0)) })))}
+              />
             </Row>
           </Card>
           <Card title="Particles">
             <Row label={`Density: ${cfg.particleDensity.toFixed(2)}`}>
-              <input type="range" min={0.2} max={2} step={0.01} value={cfg.particleDensity}
-                     onChange={e => onChange(prev => ({ ...prev, particleDensity: Math.max(0.2, Math.min(2, +e.currentTarget.value || 0.9)) }))}/>
+              <input
+                type="range" min={0.2} max={2} step={0.01} value={cfg.particleDensity}
+                onChange={onRange(v => onChange(prev => ({ ...prev, particleDensity: Math.max(0.2, Math.min(2, v || 0.9)) })))}
+              />
             </Row>
           </Card>
           <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
-            <button onClick={() => onChange({ intensity: 0.7, speed: 0.5, slices: 10, chroma: 0.28, particleDensity: 0.9, exposure: 0.7 })} style={btnStyle}>Reset</button>
+            <button
+              onClick={() => onChange({ intensity: 0.7, speed: 0.5, slices: 10, chroma: 0.28, particleDensity: 0.9, exposure: 0.7 })}
+              style={btnStyle}
+            >
+              Reset
+            </button>
             <button onClick={onToggle} style={btnStyle}>Close</button>
           </div>
         </div>

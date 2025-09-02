@@ -3,10 +3,8 @@ import { Route, Routes, useNavigate } from 'react-router-dom'
 import { loginWithSpotify, restoreFromStorage, type AuthState, signOut } from './auth/token'
 import Callback from './auth/Callback'
 import PlayerController from './controllers/PlayerController'
-const WireframeHouse = React.lazy(() => import('./visuals/scenes/WireframeHouse'))
 const WireframeHouse3D = React.lazy(() => import('./visuals/scenes/WireframeHouse3D'))
 const PsyKaleidoTunnel = React.lazy(() => import('./visuals/scenes/PsyKaleidoTunnel'))
-const OrigamiFold = React.lazy(() => import('./visuals/scenes/OrigamiFold'))
 import Popup from './ui/Popup'
 import QualityPanel from './ui/QualityPanel'
 import VJPanel from './ui/VJPanel'
@@ -18,8 +16,12 @@ import { detectGPUInfo } from './utils/gpu'
 import { HousePanel, defaultHouseSettings, type HouseSettings } from './ui/HousePanel'
 import { startReactivityOrchestrator } from './audio/ReactivityOrchestrator'
 import { startFallbackTicker } from './audio/FallbackTicker'
+
+// App-wide playback provider + global top bar (Sign in / Play in Browser)
 import { PlaybackProvider } from './playback/PlaybackProvider'
 import GlobalTopBar from './ui/GlobalTopBar'
+
+// Bridge: when we already have a token (your existing auth flow), expose it to the player
 import { setSpotifyTokenProvider } from './spotify/player'
 
 type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
@@ -43,8 +45,10 @@ export default function App() {
   })
   const [theme, setThemeState] = useState<ThemeName>(getTheme())
   const [scene, setScene] = useState<string>(() => {
-    const saved = localStorage.getItem('ffw_scene') || 'Origami Fold'
-    return saved === 'Blank' ? 'Origami Fold' : saved
+    const saved = localStorage.getItem('ffw_scene') || 'Wireframe House 3D'
+    // Migrate any old/removed scene names to a valid default
+    if (saved === 'Blank' || saved === 'Origami Fold' || saved === 'Wireframe House') return 'Wireframe House 3D'
+    return saved
   })
   const [houseSettings, setHouseSettings] = useState<HouseSettings>(() => {
     try {
@@ -108,18 +112,7 @@ export default function App() {
           <Route path="/callback" element={<Callback onAuth={a => setAuth(a)} />} />
           <Route path="/*" element={
             <Suspense fallback={<div className="badge" style={{ position: 'absolute', left: 16, top: 72 }}>Loading scene…</div>}>
-              {scene === 'Wireframe House' ? (
-                <WireframeHouse
-                  auth={auth}
-                  quality={quality}
-                  accessibility={{
-                    epilepsySafe: accessibility.epilepsySafe,
-                    reducedMotion: accessibility.reducedMotion,
-                    highContrast: accessibility.highContrast
-                  }}
-                  settings={houseSettings}
-                />
-              ) : scene === 'Wireframe House 3D' ? (
+              {scene === 'Wireframe House 3D' ? (
                 <WireframeHouse3D
                   auth={auth}
                   quality={quality}
@@ -130,16 +123,11 @@ export default function App() {
                   }}
                   settings={houseSettings}
                 />
-              ) : scene === 'Psychedelic Tunnel' ? (
+              ) : (
                 <PsyKaleidoTunnel
                   auth={auth}
                   quality={quality}
                   accessibility={accessibility}
-                />
-              ) : (
-                <OrigamiFold
-                  quality={{ renderScale: quality.renderScale, bloom: quality.bloom }}
-                  accessibility={{ epilepsySafe: accessibility.epilepsySafe, reducedMotion: accessibility.reducedMotion, highContrast: accessibility.highContrast }}
                 />
               )}
             </Suspense>
@@ -152,13 +140,11 @@ export default function App() {
           <div style={{ display: 'inline-flex', gap: 8, marginLeft: 10, alignItems: 'center' }}>
             <label htmlFor="scene" style={{ fontSize: 11, color: 'var(--muted)' }}>Scene</label>
             <select id="scene" value={scene} onChange={(e) => onSceneChange(e.currentTarget.value)} title="Scene selector" aria-label="Scene selector">
-              <option value="Origami Fold">Origami Fold</option>
-              <option value="Wireframe House">Wireframe House (2D)</option>
               <option value="Wireframe House 3D">Wireframe House 3D (Three)</option>
               <option value="Psychedelic Tunnel">Psychedelic Kaleido Tunnel</option>
             </select>
 
-            {(scene === 'Wireframe House' || scene === 'Wireframe House 3D') && (
+            {scene === 'Wireframe House 3D' && (
               <button className="btn" onClick={() => setPanel('scene')} title="Scene settings" aria-label="Scene settings">⚙️</button>
             )}
 

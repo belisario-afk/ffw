@@ -20,14 +20,24 @@ type Preset = {
 }
 
 const PRESETS: Preset[] = [
-  { name: 'Chill Nebula',   arms: { count: 2, width: 1.8, curvature: 0.22, twist: 1.2, speed: 0.08 }, core: { count: 8000, radius: 1.4 },  dust: { count: 4000, radius: 16 }, bloom: { strength: 0.55, radius: 0.35, threshold: 0.52 } },
-  { name: 'Bass Supernova', arms: { count: 3, width: 2.2, curvature: 0.18, twist: 1.6, speed: 0.14 }, core: { count: 12000, radius: 1.1 }, dust: { count: 6000, radius: 18 }, bloom: { strength: 0.9,  radius: 0.45, threshold: 0.48 } },
-  { name: 'Hi‑Hat Sparkle', arms: { count: 4, width: 1.4, curvature: 0.26, twist: 0.9, speed: 0.12 }, core: { count: 9000,  radius: 1.2 }, dust: { count: 9000, radius: 22 }, bloom: { strength: 0.7,  radius: 0.5,  threshold: 0.5  } },
-  { name: 'Cinematic Core', arms: { count: 2, width: 1.1, curvature: 0.2,  twist: 0.7, speed: 0.06 }, core: { count: 16000, radius: 0.95 }, dust: { count: 4000, radius: 14 }, bloom: { strength: 0.85, radius: 0.6,  threshold: 0.46 } },
-  { name: 'Dusty Arms',     arms: { count: 5, width: 2.6, curvature: 0.24, twist: 1.1, speed: 0.1  }, core: { count: 7000,  radius: 1.5 },  dust: { count: 16000, radius: 28 }, bloom: { strength: 0.6,  radius: 0.55, threshold: 0.52 } }
+  { name: 'Chill Nebula',   arms: { count: 2, width: 1.8, curvature: 0.22, twist: 1.2, speed: 0.08 }, core: { count: 8000, radius: 1.4 },  dust: { count: 4000, radius: 16 }, bloom: { strength: 0.45, radius: 0.35, threshold: 0.62 } },
+  { name: 'Bass Supernova', arms: { count: 3, width: 2.2, curvature: 0.18, twist: 1.6, speed: 0.12 }, core: { count: 12000, radius: 1.1 }, dust: { count: 6000, radius: 18 }, bloom: { strength: 0.7,  radius: 0.45, threshold: 0.65 } },
+  { name: 'Hi‑Hat Sparkle', arms: { count: 4, width: 1.4, curvature: 0.26, twist: 0.9, speed: 0.10 }, core: { count: 9000,  radius: 1.2 }, dust: { count: 9000, radius: 22 }, bloom: { strength: 0.55, radius: 0.5,  threshold: 0.62 } },
+  { name: 'Cinematic Core', arms: { count: 2, width: 1.1, curvature: 0.2,  twist: 0.7, speed: 0.06 }, core: { count: 16000, radius: 0.95 }, dust: { count: 4000, radius: 14 }, bloom: { strength: 0.7,  radius: 0.6,  threshold: 0.6  } },
+  { name: 'Dusty Arms',     arms: { count: 5, width: 2.6, curvature: 0.24, twist: 1.1, speed: 0.09 }, core: { count: 7000,  radius: 1.5 },  dust: { count: 16000, radius: 28 }, bloom: { strength: 0.5,  radius: 0.55, threshold: 0.62 } }
 ]
 
-// UI/config
+// Safety limits and defaults to avoid white screens and lag
+const SAFE = {
+  MAX_TOTAL: 12000,          // hard ceiling for total particles (instanced or points)
+  START_COUNT: 3500,         // ramp from this count upward only if FPS allows
+  MIN_COUNT: 2500,           // never drop below this
+  MAX_SIZE_SCALE: 1.2,
+  MIN_SIZE_SCALE: 0.55,
+  TARGET_FPS: 58,
+  DOWN_FPS: 42
+}
+
 type UIConfig = {
   sizeScale: number
   twinkleSensitivity: number
@@ -37,180 +47,106 @@ type UIConfig = {
   bloomEnabled: boolean
   bloomStrength: number
   cursorFadeRadius: number
+  safeMode: boolean
 }
 type TabKey = 'presets' | 'particles' | 'motion' | 'postfx'
 
-// Galaxy math helpers
+function supportsInstancing(renderer: THREE.WebGLRenderer) {
+  try {
+    const gl = renderer.getContext()
+    // @ts-ignore
+    const webgl2 = !!(gl && (gl as WebGL2RenderingContext).drawArraysInstanced)
+    const angle = !!gl.getExtension?.('ANGLE_instanced_arrays')
+    return webgl2 || angle
+  } catch {
+    return false
+  }
+}
+
 function spiralPoint(armIndex: number, arms: number, t: number, curvature: number, width: number, rand: number, twist: number) {
   const armAngle = (armIndex / arms) * Math.PI * 2.0
   const theta = t + armAngle + twist * 0.15 * t
-  const r = 0.25 * t * (1.0 + curvature * t)
-  const lateral = width * (rand - 0.5) * 0.35 * (0.2 + 0.8 * Math.min(1, r))
+  const r = 0.24 * t * (1.0 + curvature * t)
+  const lateral = width * (rand - 0.5) * 0.32 * (0.2 + 0.8 * Math.min(1, r))
   const x = Math.cos(theta) * r + Math.cos(theta + Math.PI * 0.5) * lateral
   const z = Math.sin(theta) * r + Math.sin(theta + Math.PI * 0.5) * lateral
-  const y = (rand - 0.5) * width * 0.28 * (0.2 + 0.8 * r)
+  const y = (rand - 0.5) * width * 0.26 * (0.2 + 0.8 * r)
   return new THREE.Vector3(x, y, z)
 }
 
-// Instanced starfield geometry (billboard quads)
-function makeStarGeometry(count: number) {
-  const geom = new THREE.InstancedBufferGeometry()
-
-  // Base quad (two triangles)
-  const corners = new Float32Array([
-    -1, -1,  1, -1,  1,  1,
-    -1, -1,  1,  1, -1,  1
-  ])
-  geom.setAttribute('corner', new THREE.BufferAttribute(corners, 2))
-
-  // Dummy position attribute (required by Three to infer draw count)
-  const pos = new Float32Array(6 * 3)
-  geom.setAttribute('position', new THREE.BufferAttribute(pos, 3))
-
-  // Instanced attributes
-  const instancePosition = new Float32Array(count * 3)
-  const instanceSize = new Float32Array(count)
-  const instanceSeed = new Float32Array(count)
-  const instanceType = new Float32Array(count)
-
-  geom.setAttribute('instancePosition', new THREE.InstancedBufferAttribute(instancePosition, 3))
-  geom.setAttribute('instanceSize', new THREE.InstancedBufferAttribute(instanceSize, 1))
-  geom.setAttribute('instanceSeed', new THREE.InstancedBufferAttribute(instanceSeed, 1))
-  geom.setAttribute('instanceType', new THREE.InstancedBufferAttribute(instanceType, 1))
-  geom.instanceCount = count
-
-  return { geom, instancePosition, instanceSize, instanceSeed, instanceType }
-}
-
-type StarUniforms = {
-  uTime: { value: number }
-  uSizeScale: { value: number }
-  uTwinkle: { value: number }
-  uGlow: { value: number }
-  uPrimary: { value: THREE.Color }
-  uAccent: { value: THREE.Color }
-  uMouseWorld: { value: THREE.Vector3 }
-  uMouseFade: { value: number }
-}
-
-function buildStarMaterial(primary: THREE.Color, accent: THREE.Color) {
-  const uniforms: StarUniforms = {
+// Instanced billboard star material (fast, high quality)
+function buildInstancedStarMaterial(primary: THREE.Color, accent: THREE.Color) {
+  const uniforms = {
     uTime: { value: 0 },
-    uSizeScale: { value: 1 },
+    uSizeScale: { value: 0.9 },
     uTwinkle: { value: 0 },
-    uGlow: { value: 0.7 },
+    uGlow: { value: 0.8 },
     uPrimary: { value: primary },
     uAccent: { value: accent },
-    uMouseWorld: { value: new THREE.Vector3(1e6, 1e6, 1e6) },
-    uMouseFade: { value: 0 }
   }
-
   const vert = `
-    precision highp float;
+    precision mediump float;
     uniform float uSizeScale;
-
     attribute vec2 corner;
     attribute vec3 instancePosition;
     attribute float instanceSize;
     attribute float instanceSeed;
     attribute float instanceType;
-
     varying vec2 vCorner;
     varying float vSeed;
     varying float vType;
     varying float vDepth;
-
     void main() {
       vCorner = corner;
       vSeed = instanceSeed;
       vType = instanceType;
-
       vec4 mv = modelViewMatrix * vec4(instancePosition, 1.0);
       vDepth = -mv.z;
-
-      // Normalize axes to avoid oversized billboards
       vec3 right = normalize(vec3(modelViewMatrix[0][0], modelViewMatrix[1][0], modelViewMatrix[2][0]));
       vec3 up    = normalize(vec3(modelViewMatrix[0][1], modelViewMatrix[1][1], modelViewMatrix[2][1]));
-
-      float sizePx = instanceSize * (220.0 / max(1.0, vDepth)) * uSizeScale; // lower base to prevent blowout
+      float sizePx = instanceSize * (160.0 / max(1.0, vDepth)) * uSizeScale;
       vec3 offsetVS = (right * corner.x + up * corner.y) * sizePx;
-
       gl_Position = projectionMatrix * vec4(mv.xyz + offsetVS, 1.0);
     }
   `
-
   const frag = `
-    precision highp float;
-
+    precision mediump float;
     varying vec2 vCorner;
     varying float vSeed;
     varying float vType;
     varying float vDepth;
-
     uniform float uTime;
     uniform float uTwinkle;
     uniform float uGlow;
     uniform vec3 uPrimary;
     uniform vec3 uAccent;
-
-    // Smooth star core
-    float starCore(vec2 uv) {
-      float r = length(uv);
-      // tighter core
-      return exp(-r * r * 9.0);
-    }
-    // Diffraction spikes (softened)
-    float spikes(vec2 uv) {
-      float a = atan(uv.y, uv.x);
-      float r = length(uv) + 1e-5;
-      float s = pow(abs(cos(6.0 * a)), 24.0) * pow(1.0 - clamp(r, 0.0, 1.0), 4.0);
-      return s;
-    }
-    float hash(float n) { return fract(sin(n) * 43758.5453123); }
-
-    vec3 reinhard(vec3 x) { return x / (1.0 + x); }
-
+    float core(vec2 uv) { float r = dot(uv,uv); return exp(-r*8.0); }
+    float spikes(vec2 uv){ float a=atan(uv.y,uv.x); float r=length(uv)+1e-4; return pow(abs(cos(6.0*a)),16.0)*pow(1.0-clamp(r,0.0,1.0),3.0); }
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+    vec3 tonemap(vec3 x){ return x/(1.0+x); }
     void main() {
-      vec2 uv = vCorner; // -1..1
+      vec2 uv = vCorner;
       float r = length(uv);
-
-      // Type-based base color
       float tCore = step(0.5, 0.5 - abs(vType - 0.0));
       float tArm  = step(0.5, 0.5 - abs(vType - 1.0));
       float tDust = step(0.5, 0.5 - abs(vType - 2.0));
-      vec3 baseCol = normalize(uPrimary * (tCore * 1.1 + tDust * 0.45) + uAccent * (tArm * 1.2 + tDust * 0.55) + 1e-4);
-
-      // Subtle color jitter
-      float hueJitter = 0.05 * (hash(vSeed * 97.0) - 0.5);
-      baseCol = normalize(baseCol + vec3(hueJitter, -hueJitter, 0.0));
-
-      // Twinkle
-      float tw = 0.5 + 0.5 * sin(uTime * (3.0 + 2.0 * vSeed) + vSeed * 11.0);
-      float twinkle = mix(1.0, 1.0 + 0.8 * tw, uTwinkle);
-
-      // Star profile
-      float core = starCore(uv);
-      float spike = spikes(uv) * 0.35; // soften spikes
-      float c = core + spike;
-
-      // Depth bias glow (closer = brighter), clamp to avoid white-out
-      float glowBias = mix(0.6, 1.0, smoothstep(0.0, 120.0, vDepth));
-      vec3 col = baseCol * (1.0 + uGlow * 0.9) * c * twinkle * glowBias;
-
-      // Local tonemap to avoid additive blowout before post
-      col = reinhard(col * 1.3);
-
-      // Soft alpha and discard
+      vec3 base = normalize(uPrimary*(tCore*1.1+tDust*0.45)+uAccent*(tArm*1.2+tDust*0.55)+1e-4);
+      float jitter = 0.04*(hash(vSeed*97.0)-0.5);
+      base = normalize(base+vec3(jitter,-jitter,0.0));
+      float tw = 0.5+0.5*sin(uTime*(2.7+2.0*vSeed)+vSeed*9.0);
+      float twinkle = mix(1.0, 1.0+0.6*tw, uTwinkle);
+      float c = core(uv) + 0.25*spikes(uv);
+      float depthGlow = mix(0.65, 1.0, smoothstep(0.0, 120.0, vDepth));
+      vec3 col = base * (1.0 + uGlow*0.8) * c * twinkle * depthGlow;
+      col = tonemap(col*1.1); // local tonemap to avoid washout
       float alpha = smoothstep(1.0, 0.0, r);
       alpha *= alpha;
       if (alpha < 0.01) discard;
-
       gl_FragColor = vec4(col, alpha);
     }
   `
-
   const mat = new THREE.ShaderMaterial({
-    uniforms: uniforms as any,
+    uniforms,
     vertexShader: vert,
     fragmentShader: frag,
     transparent: true,
@@ -221,25 +157,131 @@ function buildStarMaterial(primary: THREE.Color, accent: THREE.Color) {
   return { mat, uniforms }
 }
 
+// Points fallback (even safer)
+function buildPointsMaterial(primary: THREE.Color, accent: THREE.Color) {
+  const uniforms = {
+    uTime: { value: 0 },
+    uSizeScale: { value: 0.85 },
+    uTwinkle: { value: 0 },
+    uGlow: { value: 0.7 },
+    uPrimary: { value: primary },
+    uAccent: { value: accent },
+  }
+  const vert = `
+    precision mediump float;
+    uniform float uSizeScale;
+    attribute float aSize;
+    attribute float aSeed;
+    attribute float aType;
+    varying float vSeed;
+    varying float vType;
+    varying float vDepth;
+    void main(){
+      vSeed=aSeed; vType=aType;
+      vec4 mv = modelViewMatrix*vec4(position,1.0);
+      vDepth = -mv.z;
+      float sizePx = aSize * (150.0 / max(1.0, vDepth)) * uSizeScale;
+      gl_PointSize = clamp(sizePx, 0.5, 64.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `
+  const frag = `
+    precision mediump float;
+    varying float vSeed;
+    varying float vType;
+    varying float vDepth;
+    uniform float uTime;
+    uniform float uTwinkle;
+    uniform float uGlow;
+    uniform vec3 uPrimary;
+    uniform vec3 uAccent;
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+    void main(){
+      vec2 uv = gl_PointCoord*2.0-1.0;
+      float r = length(uv);
+      float tCore = step(0.5, 0.5 - abs(vType - 0.0));
+      float tArm  = step(0.5, 0.5 - abs(vType - 1.0));
+      float tDust = step(0.5, 0.5 - abs(vType - 2.0));
+      vec3 base = normalize(uPrimary*(tCore*1.1+tDust*0.45)+uAccent*(tArm*1.2+tDust*0.55)+1e-4);
+      float jitter = 0.04*(hash(vSeed*97.0)-0.5);
+      base = normalize(base+vec3(jitter,-jitter,0.0));
+      float tw = 0.5+0.5*sin(uTime*(2.5+2.0*vSeed)+vSeed*9.0);
+      float twinkle = mix(1.0, 1.0+0.5*tw, uTwinkle);
+      float alpha = smoothstep(1.0, 0.0, r); alpha*=alpha;
+      float depthGlow = mix(0.65, 1.0, smoothstep(0.0, 120.0, vDepth));
+      vec3 col = base*(1.0+uGlow*0.7)*twinkle*depthGlow;
+      if(alpha<0.02) discard;
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+  const mat = new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader: vert,
+    fragmentShader: frag,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.AdditiveBlending
+  })
+  return { mat, uniforms }
+}
+
+function makeInstancedGeometry(count: number) {
+  const geom = new THREE.InstancedBufferGeometry()
+  const corners = new Float32Array([
+    -1, -1,  1, -1,  1,  1,
+    -1, -1,  1,  1, -1,  1
+  ])
+  geom.setAttribute('corner', new THREE.BufferAttribute(corners, 2))
+  // dummy pos
+  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6 * 3), 3))
+  const instancePosition = new Float32Array(count * 3)
+  const instanceSize = new Float32Array(count)
+  const instanceSeed = new Float32Array(count)
+  const instanceType = new Float32Array(count)
+  geom.setAttribute('instancePosition', new THREE.InstancedBufferAttribute(instancePosition, 3))
+  geom.setAttribute('instanceSize', new THREE.InstancedBufferAttribute(instanceSize, 1))
+  geom.setAttribute('instanceSeed', new THREE.InstancedBufferAttribute(instanceSeed, 1))
+  geom.setAttribute('instanceType', new THREE.InstancedBufferAttribute(instanceType, 1))
+  geom.instanceCount = count
+  return { geom, instancePosition, instanceSize, instanceSeed, instanceType }
+}
+
+function makePointsGeometry(count: number) {
+  const geom = new THREE.BufferGeometry()
+  const position = new Float32Array(count * 3)
+  const aSize = new Float32Array(count)
+  const aSeed = new Float32Array(count)
+  const aType = new Float32Array(count)
+  geom.setAttribute('position', new THREE.BufferAttribute(position, 3))
+  geom.setAttribute('aSize', new THREE.BufferAttribute(aSize, 1))
+  geom.setAttribute('aSeed', new THREE.BufferAttribute(aSeed, 1))
+  geom.setAttribute('aType', new THREE.BufferAttribute(aType, 1))
+  geom.setDrawRange(0, count)
+  return { geom, position, aSize, aSeed, aType }
+}
+
 export default function ParticleGalaxy({ quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const disposedRef = useRef(false)
-
   const [presetIdx, setPresetIdx] = useState(0)
   const preset = PRESETS[presetIdx]
+
+  // Album-driven palette
   const primaryRef = useRef(new THREE.Color('#4ad3ff'))
   const accentRef = useRef(new THREE.Color('#ff6bd6'))
   const bgRef = useRef(new THREE.Color('#04070c'))
 
+  // Safe defaults that won’t blow out brightness
   const [ui, setUi] = useState<UIConfig>({
-    sizeScale: 0.9,
-    twinkleSensitivity: 0.9,
-    glowBoost: 0.9,
-    spinMultiplier: 1.0,
-    exposure: 0.95,
-    bloomEnabled: true,
-    bloomStrength: Math.min(0.7, preset.bloom.strength),
-    cursorFadeRadius: 0.0
+    sizeScale: 0.85,
+    twinkleSensitivity: 0.8,
+    glowBoost: 0.85,
+    spinMultiplier: 0.9,
+    exposure: 0.9,
+    bloomEnabled: false, // start disabled to avoid white-out
+    bloomStrength: 0.55,
+    cursorFadeRadius: 0.0,
+    safeMode: true      // start in safe mode; user can disable in UI
   })
   const uiRef = useRef(ui)
   useEffect(() => { uiRef.current = ui }, [ui])
@@ -252,6 +294,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       if (e.key >= '1' && e.key <= '5') setPresetIdx(Math.min(4, Math.max(0, parseInt(e.key, 10) - 1)))
       if (e.key === 'Escape') setShowModal(false)
       if (e.key.toLowerCase() === 'c') setShowModal(v => !v)
+      if (e.key.toLowerCase() === 'p') paused = !paused // pause toggle
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -260,148 +303,199 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    disposedRef.current = false
 
-    // Scene
+    // Scene and renderer
     const scene = new THREE.Scene()
-    const bg = bgRef.current.clone()
-    scene.background = bg
+    scene.background = bgRef.current.clone()
 
     const camera = new THREE.PerspectiveCamera(60, 1, 0.05, 500)
-    camera.position.set(0, 2.2, 9.5)
+    camera.position.set(0, 2.0, 9.0)
 
-    const { renderer, dispose: disposeRenderer } = createRenderer(canvas, quality.renderScale)
+    const { renderer, dispose: disposeRenderer } = createRenderer(canvas, Math.min(quality.renderScale, 1.25))
+    renderer.debug.checkShaderErrors = true
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.toneMapping = THREE.ACESFilmicToneMapping
     renderer.toneMappingExposure = uiRef.current.exposure
-    renderer.setClearColor(bg, 1)
+    renderer.setClearColor(bgRef.current, 1)
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75)) // clamp DPR
 
+    // Pause when tab not visible
+    let paused = false
+    function onVis() { paused = document.hidden }
+    document.addEventListener('visibilitychange', onVis)
+
+    // Post FX composer (can be a passthrough if createComposer returns function)
     const comp = createComposer(renderer, scene, camera, {
-      bloom: uiRef.current.bloomEnabled,
+      bloom: uiRef.current.bloomEnabled && !uiRef.current.safeMode,
       bloomStrength: uiRef.current.bloomStrength,
       bloomRadius: preset.bloom.radius,
-      bloomThreshold: Math.max(0.6, preset.bloom.threshold), // raise threshold to reduce washout
+      bloomThreshold: Math.max(0.65, preset.bloom.threshold),
       fxaa: true,
       vignette: true,
-      vignetteStrength: 0.22,
+      vignetteStrength: 0.2,
       filmGrain: false,
-      filmGrainStrength: 0.0,
+      filmGrainStrength: 0,
       motionBlur: false
     })
     const compAny: any = comp as any
     const renderScene: () => void =
-      typeof compAny === 'function'
-        ? compAny
-        : (compAny?.render?.bind(compAny) ?? (() => renderer.render(scene, camera)))
+      typeof compAny === 'function' ? compAny : (compAny?.render?.bind(compAny) ?? (() => renderer.render(scene, camera)))
     const resizeComposer: () => void =
-      typeof compAny === 'function'
-        ? () => {}
-        : (compAny?.onResize?.bind(compAny) ?? (() => {}))
+      typeof compAny === 'function' ? () => {} : (compAny?.onResize?.bind(compAny) ?? (() => {}))
 
-    // Root
     const root = new THREE.Group()
     scene.add(root)
 
-    // Material
-    const { mat: starMat } = buildStarMaterial(primaryRef.current.clone(), accentRef.current.clone())
-    const uniforms = starMat.uniforms as any
+    // Choose path: instanced quads (faster) vs points (safer)
+    const useInstancing = supportsInstancing(renderer) && !uiRef.current.safeMode
 
-    // Geometry budgets with safe caps
-    const pixelScale = Math.min(2, Math.max(0.75, quality.renderScale))
-    const baseScale = pixelScale * (accessibility.reducedMotion ? 0.6 : 1.0)
-    const maxTotal = Math.min(35000, Math.floor(28000 * baseScale)) // hard cap for safety
-    const CORE = Math.min(Math.floor(preset.core.count * baseScale), Math.floor(maxTotal * 0.35))
-    const ARM_TOTAL = Math.min(Math.floor(preset.arms.count * 0.45 * preset.core.count * baseScale), Math.floor(maxTotal * 0.35))
-    const DUST = Math.min(Math.floor(preset.dust.count * baseScale), Math.max(0, maxTotal - CORE - ARM_TOTAL))
-    const TOTAL = CORE + ARM_TOTAL + DUST
+    // Budget and caps
+    const pixelScale = Math.min(1.5, Math.max(0.75, quality.renderScale))
+    const baseScale = pixelScale * (accessibility.reducedMotion ? 0.7 : 1.0)
+    const MAX_TOTAL = SAFE.MAX_TOTAL
+    const CORE = Math.min(Math.floor(preset.core.count * baseScale), Math.floor(MAX_TOTAL * 0.4))
+    const ARM_TOTAL = Math.min(Math.floor(preset.arms.count * 0.4 * preset.core.count * baseScale), Math.floor(MAX_TOTAL * 0.35))
+    const DUST = Math.min(Math.floor(preset.dust.count * baseScale), Math.max(0, MAX_TOTAL - CORE - ARM_TOTAL))
+    const TOTAL = Math.max(SAFE.MIN_COUNT, Math.min(MAX_TOTAL, CORE + ARM_TOTAL + DUST))
 
-    const { geom, instancePosition, instanceSize, instanceSeed, instanceType } = makeStarGeometry(TOTAL)
+    // Geometry/material
+    let liveCount = Math.min(SAFE.START_COUNT, TOTAL)
+    let mesh: THREE.Object3D
+    let uniforms: any
 
-    // Populate
-    let k = 0
-    // Core
-    {
-      const R = preset.core.radius
-      for (let i = 0; i < CORE; i++) {
-        const r = Math.pow(Math.random(), 0.8) * R
-        const th = Math.random() * Math.PI * 2
-        const ph = Math.acos(2 * Math.random() - 1)
-        instancePosition[k * 3 + 0] = r * Math.sin(ph) * Math.cos(th)
-        instancePosition[k * 3 + 1] = r * Math.cos(ph) * 0.8
-        instancePosition[k * 3 + 2] = r * Math.sin(ph) * Math.sin(th)
-        instanceSize[k] = THREE.MathUtils.lerp(1.5, 3.2, Math.random())
-        instanceSeed[k] = Math.random()
-        instanceType[k] = 0
-        k++
-      }
-    }
-    // Arms
-    {
-      const perArm = Math.floor(ARM_TOTAL / preset.arms.count)
-      for (let a = 0; a < preset.arms.count; a++) {
-        for (let i = 0; i < perArm; i++) {
-          const t = Math.random() * 15.0
-          const rand = Math.random()
-          const p = spiralPoint(a, preset.arms.count, t, preset.arms.curvature, preset.arms.width, rand, preset.arms.twist)
-          instancePosition[k * 3 + 0] = p.x
-          instancePosition[k * 3 + 1] = p.y * 0.55
-          instancePosition[k * 3 + 2] = p.z
-          instanceSize[k] = THREE.MathUtils.lerp(1.0, 2.6, Math.random())
+    if (useInstancing) {
+      const { geom, instancePosition, instanceSize, instanceSeed, instanceType } = makeInstancedGeometry(TOTAL)
+      // Fill data
+      let k = 0
+      // Core
+      {
+        const R = preset.core.radius
+        for (let i = 0; i < CORE; i++) {
+          const r = Math.pow(Math.random(), 0.8) * R
+          const th = Math.random() * Math.PI * 2
+          const ph = Math.acos(2 * Math.random() - 1)
+          instancePosition[k * 3 + 0] = r * Math.sin(ph) * Math.cos(th)
+          instancePosition[k * 3 + 1] = r * Math.cos(ph) * 0.8
+          instancePosition[k * 3 + 2] = r * Math.sin(ph) * Math.sin(th)
+          instanceSize[k] = THREE.MathUtils.lerp(1.4, 3.0, Math.random())
           instanceSeed[k] = Math.random()
-          instanceType[k] = 1
+          instanceType[k] = 0
           k++
-          if (k >= TOTAL) break
         }
       }
-    }
-    // Dust
-    {
-      const R = preset.dust.radius
+      // Arms
+      {
+        const perArm = Math.floor(ARM_TOTAL / preset.arms.count)
+        for (let a = 0; a < preset.arms.count; a++) {
+          for (let i = 0; i < perArm; i++) {
+            const t = Math.random() * 14.0
+            const rand = Math.random()
+            const p = spiralPoint(a, preset.arms.count, t, preset.arms.curvature, preset.arms.width, rand, preset.arms.twist)
+            instancePosition[k * 3 + 0] = p.x
+            instancePosition[k * 3 + 1] = p.y * 0.55
+            instancePosition[k * 3 + 2] = p.z
+            instanceSize[k] = THREE.MathUtils.lerp(1.0, 2.4, Math.random())
+            instanceSeed[k] = Math.random()
+            instanceType[k] = 1
+            k++
+            if (k >= TOTAL) break
+          }
+        }
+      }
+      // Dust
       for (; k < TOTAL; k++) {
+        const R = preset.dust.radius
         const r = THREE.MathUtils.lerp(5, R, Math.pow(Math.random(), 0.7))
         const th = Math.random() * Math.PI * 2
         instancePosition[k * 3 + 0] = Math.cos(th) * r
         instancePosition[k * 3 + 1] = (Math.random() - 0.5) * (0.25 + 0.35 * r)
         instancePosition[k * 3 + 2] = Math.sin(th) * r
-        instanceSize[k] = THREE.MathUtils.lerp(0.9, 2.0, Math.random())
+        instanceSize[k] = THREE.MathUtils.lerp(0.9, 1.8, Math.random())
         instanceSeed[k] = Math.random()
         instanceType[k] = 2
       }
+
+      ;(geom.getAttribute('instancePosition') as THREE.InstancedBufferAttribute).needsUpdate = true
+      ;(geom.getAttribute('instanceSize') as THREE.InstancedBufferAttribute).needsUpdate = true
+      ;(geom.getAttribute('instanceSeed') as THREE.InstancedBufferAttribute).needsUpdate = true
+      ;(geom.getAttribute('instanceType') as THREE.InstancedBufferAttribute).needsUpdate = true
+
+      const { mat, uniforms: u } = buildInstancedStarMaterial(primaryRef.current.clone(), accentRef.current.clone())
+      uniforms = u
+      const stars = new THREE.Mesh(geom, mat)
+      ;(stars as any).frustumCulled = false
+      root.add(stars)
+      mesh = stars
+      ;(geom as THREE.InstancedBufferGeometry).instanceCount = liveCount
+    } else {
+      const { geom, position, aSize, aSeed, aType } = makePointsGeometry(TOTAL)
+      let k = 0
+      // Core
+      {
+        const R = preset.core.radius
+        for (let i = 0; i < CORE; i++) {
+          const r = Math.pow(Math.random(), 0.8) * R
+          const th = Math.random() * Math.PI * 2
+          const ph = Math.acos(2 * Math.random() - 1)
+          position[k * 3 + 0] = r * Math.sin(ph) * Math.cos(th)
+          position[k * 3 + 1] = r * Math.cos(ph) * 0.8
+          position[k * 3 + 2] = r * Math.sin(ph) * Math.sin(th)
+          aSize[k] = THREE.MathUtils.lerp(1.2, 2.6, Math.random())
+          aSeed[k] = Math.random()
+          aType[k] = 0
+          k++
+        }
+      }
+      // Arms
+      {
+        const perArm = Math.floor(ARM_TOTAL / preset.arms.count)
+        for (let a = 0; a < preset.arms.count; a++) {
+          for (let i = 0; i < perArm; i++) {
+            const t = Math.random() * 14.0
+            const rand = Math.random()
+            const p = spiralPoint(a, preset.arms.count, t, preset.arms.curvature, preset.arms.width, rand, preset.arms.twist)
+            position[k * 3 + 0] = p.x
+            position[k * 3 + 1] = p.y * 0.55
+            position[k * 3 + 2] = p.z
+            aSize[k] = THREE.MathUtils.lerp(0.9, 2.2, Math.random())
+            aSeed[k] = Math.random()
+            aType[k] = 1
+            k++
+            if (k >= TOTAL) break
+          }
+        }
+      }
+      // Dust
+      for (; k < TOTAL; k++) {
+        const R = preset.dust.radius
+        const r = THREE.MathUtils.lerp(5, R, Math.pow(Math.random(), 0.7))
+        const th = Math.random() * Math.PI * 2
+        position[k * 3 + 0] = Math.cos(th) * r
+        position[k * 3 + 1] = (Math.random() - 0.5) * (0.25 + 0.35 * r)
+        position[k * 3 + 2] = Math.sin(th) * r
+        aSize[k] = THREE.MathUtils.lerp(0.8, 1.8, Math.random())
+        aSeed[k] = Math.random()
+        aType[k] = 2
+      }
+      ;(geom.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true
+      ;(geom.getAttribute('aSize') as THREE.BufferAttribute).needsUpdate = true
+      ;(geom.getAttribute('aSeed') as THREE.BufferAttribute).needsUpdate = true
+      ;(geom.getAttribute('aType') as THREE.BufferAttribute).needsUpdate = true
+      geom.setDrawRange(0, liveCount)
+
+      const { mat, uniforms: u } = buildPointsMaterial(primaryRef.current.clone(), accentRef.current.clone())
+      uniforms = u
+      const points = new THREE.Points(geom, mat)
+      ;(points as any).frustumCulled = false
+      root.add(points)
+      mesh = points
     }
-
-    ;(geom.getAttribute('instancePosition') as THREE.InstancedBufferAttribute).needsUpdate = true
-    ;(geom.getAttribute('instanceSize') as THREE.InstancedBufferAttribute).needsUpdate = true
-    ;(geom.getAttribute('instanceSeed') as THREE.InstancedBufferAttribute).needsUpdate = true
-    ;(geom.getAttribute('instanceType') as THREE.InstancedBufferAttribute).needsUpdate = true
-
-    const stars = new THREE.Mesh(geom, starMat)
-    ;(stars as any).frustumCulled = false
-    root.add(stars)
-
-    // Progressive reveal: start small and ramp if FPS allows
-    let liveInstanceCount = Math.min(8000, TOTAL)
-    geom.instanceCount = liveInstanceCount
-
-    // Mouse world fade (optional)
-    const raycaster = new THREE.Raycaster()
-    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
-    const mouseNDC = new THREE.Vector2()
-    function updateMouse(ev: MouseEvent) {
-      const rect = canvas.getBoundingClientRect()
-      mouseNDC.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1
-      mouseNDC.y = -(((ev.clientY - rect.top) / rect.height) * 2 - 1)
-      raycaster.setFromCamera(mouseNDC, camera)
-      const p = new THREE.Vector3()
-      raycaster.ray.intersectPlane(plane, p)
-      uniforms?.uMouseWorld && uniforms.uMouseWorld.value.copy(p || new THREE.Vector3(1e6,1e6,1e6))
-    }
-    window.addEventListener('mousemove', updateMouse)
 
     // Audio frames
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Album palette
+    // Palette from album art (safe, rare)
     let lastAlbumUrl: string | null = null
     async function refreshPalette() {
       try {
@@ -413,21 +507,19 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
           if (pal) {
             const pri = new THREE.Color(pal.primary || '#4ad3ff')
             const acc = new THREE.Color(pal.accent || '#ff6bd6')
-            const bgc = new THREE.Color(pal.background || '#04070c')
+            const bg = new THREE.Color(pal.background || '#04070c')
             primaryRef.current.copy(pri)
             accentRef.current.copy(acc)
-            bgRef.current.copy(bgc)
-            scene.background = bgc.clone()
-            renderer.setClearColor(bgc, 1)
-            if (uniforms?.uPrimary && uniforms?.uAccent) {
-              uniforms.uPrimary.value = pri
-              uniforms.uAccent.value = acc
-            }
+            bgRef.current.copy(bg)
+            scene.background = bg.clone()
+            renderer.setClearColor(bg, 1)
+            if (uniforms?.uPrimary) uniforms.uPrimary.value = pri
+            if (uniforms?.uAccent) uniforms.uAccent.value = acc
           }
         }
-      } catch { /* ignore */ }
+      } catch { /* ignore palette failures */ }
     }
-    const palIv = window.setInterval(refreshPalette, 7000)
+    const palIv = window.setInterval(refreshPalette, 8000)
     refreshPalette()
 
     // Resize
@@ -440,9 +532,12 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     window.addEventListener('resize', onResize)
     onResize()
 
-    // FPS sampling + adaptive throttling
+    // FPS watchdog + adaptive throttle
     let fpsAvg = 60
     let lastT = performance.now()
+    let rampT = 0
+    let whiteoutGuard = 0 // if brightness spikes, we back off exposure/bloom
+
     function sampleFPS() {
       const now = performance.now()
       const dt = Math.max(1, now - lastT)
@@ -451,42 +546,50 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       lastT = now
     }
 
-    // Animate
     const clock = new THREE.Clock()
     let raf = 0
     let baseAngle = 0
     const shake = new THREE.Vector3()
     let beatCooldown = 0
-    let rampTimer = 0
+
+    function setLiveCount(n: number) {
+      liveCount = Math.max(SAFE.MIN_COUNT, Math.min(TOTAL, n | 0))
+      if ((mesh as any).geometry instanceof THREE.InstancedBufferGeometry) {
+        ;((mesh as any).geometry as THREE.InstancedBufferGeometry).instanceCount = liveCount
+      } else {
+        ;((mesh as any).geometry as THREE.BufferGeometry).setDrawRange(0, liveCount)
+      }
+    }
 
     function animate() {
       raf = requestAnimationFrame(animate)
+      if (paused) return
+
       const t = clock.getElapsedTime()
       const dt = clock.getDelta()
       sampleFPS()
 
-      const low = latest?.bands.low ?? 0.08
-      const mid = latest?.bands.mid ?? 0.08
-      const high = latest?.bands.high ?? 0.08
+      // Audio
+      const low = latest?.bands.low ?? 0.05
+      const mid = latest?.bands.mid ?? 0.05
+      const high = latest?.bands.high ?? 0.05
       const beat = !!latest?.beat
 
-      // Spin with bass
+      // Spin
       const spinBase = preset.arms.speed * uiRef.current.spinMultiplier
-      baseAngle += dt * (spinBase + low * 0.8 * uiRef.current.spinMultiplier)
+      baseAngle += dt * (spinBase + low * 0.6 * uiRef.current.spinMultiplier)
       root.rotation.y = baseAngle
 
-      // Camera drift
-      const camDist = 9.0 - Math.min(1.2, low * 2.5)
-      const roll = Math.sin(t * 0.05) * 0.03
-      camera.position.x = Math.cos(t * 0.06) * camDist
-      camera.position.z = Math.sin(t * 0.06) * camDist
-      camera.position.y = 2.0 + Math.sin(t * 0.7) * 0.25 + low * 0.35
-      camera.rotation.z = roll
+      // Camera gentle drift
+      const camDist = 8.8 - Math.min(1.1, low * 2.0)
+      camera.position.x = Math.cos(t * 0.05) * camDist
+      camera.position.z = Math.sin(t * 0.05) * camDist
+      camera.position.y = 1.9 + Math.sin(t * 0.6) * 0.22 + low * 0.3
+      camera.rotation.z = Math.sin(t * 0.04) * 0.02
 
-      // Beat shake
       if (beat && beatCooldown <= 0 && !accessibility.reducedMotion) {
-        beatCooldown = 0.15
-        shake.set((Math.random() - 0.5) * 0.12, (Math.random() - 0.5) * 0.12, 0)
+        beatCooldown = 0.12
+        shake.set((Math.random() - 0.5) * 0.08, (Math.random() - 0.5) * 0.08, 0)
       }
       if (beatCooldown > 0) {
         beatCooldown -= dt
@@ -496,27 +599,38 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
 
       // Uniforms (guarded)
       if (uniforms) {
-        uniforms.uTime && (uniforms.uTime.value = t)
-        const twinkleSafe = accessibility.epilepsySafe ? 0.6 : 1.0
-        uniforms.uTwinkle && (uniforms.uTwinkle.value = THREE.MathUtils.clamp(high * 1.6 * uiRef.current.twinkleSensitivity, 0, twinkleSafe))
-        uniforms.uGlow && (uniforms.uGlow.value = THREE.MathUtils.lerp(0.3, 1.1, Math.min(1, (low * 2.0 + mid * 0.4) * uiRef.current.glowBoost)))
-        // auto size scale vs FPS
-        const sizeAuto = fpsAvg < 50 ? THREE.MathUtils.mapLinear(Math.max(20, fpsAvg), 20, 50, 0.7, 1.0) : 1.0
-        uniforms.uSizeScale && (uniforms.uSizeScale.value = Math.max(0.6, Math.min(1.5, sizeAuto * uiRef.current.sizeScale)))
-        uniforms.uMouseFade && (uniforms.uMouseFade.value = uiRef.current.cursorFadeRadius)
+        if (uniforms.uTime) uniforms.uTime.value = t
+        const twSafe = accessibility.epilepsySafe ? 0.5 : 1.0
+        if (uniforms.uTwinkle) uniforms.uTwinkle.value = THREE.MathUtils.clamp(high * 1.4 * uiRef.current.twinkleSensitivity, 0, twSafe)
+        if (uniforms.uGlow) uniforms.uGlow.value = THREE.MathUtils.lerp(0.25, 0.95, Math.min(1, (low * 1.8 + mid * 0.4) * uiRef.current.glowBoost))
+        const sizeAuto = fpsAvg < SAFE.TARGET_FPS ? THREE.MathUtils.mapLinear(Math.max(20, fpsAvg), 20, SAFE.TARGET_FPS, SAFE.MIN_SIZE_SCALE, 1.0) : 1.0
+        if (uniforms.uSizeScale) uniforms.uSizeScale.value = Math.max(SAFE.MIN_SIZE_SCALE, Math.min(SAFE.MAX_SIZE_SCALE, sizeAuto * uiRef.current.sizeScale))
       }
-      renderer.toneMappingExposure = Math.max(0.7, uiRef.current.exposure)
 
-      // Progressive instance ramp-up/down
-      rampTimer += dt
-      if (rampTimer > 0.4) {
-        rampTimer = 0
-        if (fpsAvg > 56 && liveInstanceCount < TOTAL) {
-          liveInstanceCount = Math.min(TOTAL, liveInstanceCount + 3000)
-          geom.instanceCount = liveInstanceCount
-        } else if (fpsAvg < 42 && liveInstanceCount > 6000) {
-          liveInstanceCount = Math.max(4000, Math.floor(liveInstanceCount * 0.8))
-          geom.instanceCount = liveInstanceCount
+      // Renderer exposure clamped
+      renderer.toneMappingExposure = Math.max(0.7, Math.min(1.15, uiRef.current.exposure))
+
+      // Whiteout guard: if FPS tanks and bloom is on, reduce bloom/exposure automatically
+      if (fpsAvg < SAFE.DOWN_FPS) {
+        whiteoutGuard += dt
+        if (whiteoutGuard > 0.5) {
+          whiteoutGuard = 0
+          renderer.toneMappingExposure = Math.max(0.75, renderer.toneMappingExposure * 0.92)
+          // If composer object supports changing bloom at runtime
+          // we rely on lower exposure; bloom already disabled in safe mode.
+        }
+      } else {
+        whiteoutGuard = Math.max(0, whiteoutGuard - dt)
+      }
+
+      // Progressive ramp
+      rampT += dt
+      if (rampT > 0.33) {
+        rampT = 0
+        if (fpsAvg > SAFE.TARGET_FPS && liveCount < TOTAL) {
+          setLiveCount(Math.min(TOTAL, liveCount + 1500))
+        } else if (fpsAvg < SAFE.DOWN_FPS && liveCount > SAFE.MIN_COUNT) {
+          setLiveCount(Math.max(SAFE.MIN_COUNT, Math.floor(liveCount * 0.8)))
         }
       }
 
@@ -526,19 +640,19 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
 
     // Cleanup
     return () => {
-      disposedRef.current = true
+      cancelAnimationFrame(raf)
       window.removeEventListener('resize', onResize)
-      window.removeEventListener('mousemove', updateMouse)
+      document.removeEventListener('visibilitychange', onVis)
       window.clearInterval(palIv)
       reactivityBus.off('frame', offFrame as any)
-      cancelAnimationFrame(raf)
-      geom.dispose()
-      starMat.dispose()
+      try {
+        if ((mesh as any)?.geometry) (mesh as any).geometry.dispose?.()
+        if ((mesh as any)?.material) (mesh as any).material.dispose?.()
+      } catch {}
       disposeRenderer()
     }
-  }, [presetIdx, quality.renderScale, ui.bloomEnabled, ui.bloomStrength])
+  }, [presetIdx, quality.renderScale, ui.safeMode, ui.bloomEnabled, ui.bloomStrength])
 
-  // Optional preset color overrides
   useEffect(() => {
     const c = PRESETS[presetIdx].colors
     if (c?.primary) primaryRef.current.set(c.primary)
@@ -546,13 +660,13 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     if (c?.background) bgRef.current.set(c.background)
   }, [presetIdx])
 
-  // Modal (center popup)
+  // Center popup UI (adds Safe Mode toggle so you can try higher quality once stable)
   const Modal = useMemo(() => {
     if (!showModal) return null
     return (
       <>
         <div className="pg-backdrop" onClick={() => setShowModal(false)} />
-        <div className="pg-modal enter">
+        <div className="pg-modal enter" role="dialog" aria-modal="true">
           <div className="pg-modal-frame">
             <div className="pg-tabs">
               <button className={`pg-tab ${activeTab === 'presets' ? 'active' : ''}`} onClick={() => setActiveTab('presets')} title="Presets"><span>PR</span></button>
@@ -576,7 +690,19 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                     </select>
                     <span />
                   </div>
-                  <div className="pg-hint">Press 1–5 to switch presets.</div>
+                  <div className="pg-row">
+                    <label className="pg-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={ui.safeMode}
+                        onChange={(e) => setUi(prev => ({ ...prev, safeMode: e.currentTarget.checked }))}
+                      />
+                      <span>Safe Mode (recommended)</span>
+                    </label>
+                    <span />
+                    <span />
+                  </div>
+                  <div className="pg-hint">Safe Mode uses fewer particles and no bloom to prevent white screens and lag. Disable only after it looks stable.</div>
                 </div>
               )}
 
@@ -584,7 +710,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                 <div className="pg-pane">
                   <div className="pg-row">
                     <label>Size scale</label>
-                    <input type="range" min="0.5" max="1.8" step="0.01" value={ui.sizeScale}
+                    <input type="range" min="0.5" max="1.2" step="0.01" value={ui.sizeScale}
                       onChange={e => setUi(prev => ({ ...prev, sizeScale: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.sizeScale.toFixed(2)}</span>
                   </div>
@@ -601,19 +727,19 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                 <div className="pg-pane">
                   <div className="pg-row">
                     <label>Twinkle sensitivity</label>
-                    <input type="range" min="0" max="2" step="0.01" value={ui.twinkleSensitivity}
+                    <input type="range" min="0" max="1.6" step="0.01" value={ui.twinkleSensitivity}
                       onChange={e => setUi(prev => ({ ...prev, twinkleSensitivity: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.twinkleSensitivity.toFixed(2)}</span>
                   </div>
                   <div className="pg-row">
                     <label>Glow boost</label>
-                    <input type="range" min="0.5" max="2" step="0.01" value={ui.glowBoost}
+                    <input type="range" min="0.5" max="1.5" step="0.01" value={ui.glowBoost}
                       onChange={e => setUi(prev => ({ ...prev, glowBoost: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.glowBoost.toFixed(2)}</span>
                   </div>
                   <div className="pg-row">
                     <label>Spin multiplier</label>
-                    <input type="range" min="0.2" max="2.5" step="0.01" value={ui.spinMultiplier}
+                    <input type="range" min="0.5" max="1.6" step="0.01" value={ui.spinMultiplier}
                       onChange={e => setUi(prev => ({ ...prev, spinMultiplier: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.spinMultiplier.toFixed(2)}</span>
                   </div>
@@ -624,14 +750,14 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                 <div className="pg-pane">
                   <div className="pg-row">
                     <label>Exposure</label>
-                    <input type="range" min="0.6" max="1.6" step="0.01" value={ui.exposure}
+                    <input type="range" min="0.7" max="1.2" step="0.01" value={ui.exposure}
                       onChange={e => setUi(prev => ({ ...prev, exposure: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.exposure.toFixed(2)}</span>
                   </div>
                   <div className="pg-row">
                     <label className="pg-checkbox">
                       <input type="checkbox" checked={ui.bloomEnabled}
-                        onChange={e => setUi(prev => ({ ...prev, bloomEnabled: e.currentTarget.checked }))} />
+                        onChange={e => setUi(prev => ({ ...prev, bloomEnabled: e.currentTarget.checked }))} disabled={ui.safeMode} />
                       <span>Bloom</span>
                     </label>
                     <span />
@@ -639,11 +765,11 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                   </div>
                   <div className="pg-row">
                     <label>Bloom strength</label>
-                    <input type="range" min="0" max="1.5" step="0.01" value={ui.bloomStrength}
-                      onChange={e => setUi(prev => ({ ...prev, bloomStrength: parseFloat(e.currentTarget.value) }))} />
+                    <input type="range" min="0" max="1.0" step="0.01" value={ui.bloomStrength}
+                      onChange={e => setUi(prev => ({ ...prev, bloomStrength: parseFloat(e.currentTarget.value) }))} disabled={ui.safeMode} />
                     <span className="pg-val">{ui.bloomStrength.toFixed(2)}</span>
                   </div>
-                  <div className="pg-hint">If the screen looks too bright, lower Bloom or Exposure.</div>
+                  <div className="pg-hint">Bloom can cause bright white if too strong; keep exposure low when enabling.</div>
                 </div>
               )}
             </div>

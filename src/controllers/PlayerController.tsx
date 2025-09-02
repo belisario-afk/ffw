@@ -17,6 +17,17 @@ Full transport bar with album art and safe guards:
 
 type RepeatMode = 'off' | 'context' | 'track'
 
+const SCOPES = [
+  // Web API control
+  'user-read-playback-state',
+  'user-modify-playback-state',
+  'user-read-currently-playing',
+  // Web Playback SDK
+  'streaming',
+  'user-read-email',
+  'user-read-private'
+]
+
 function mmss(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000))
   const m = Math.floor(s / 60)
@@ -25,8 +36,8 @@ function mmss(ms: number) {
 }
 
 export default function PlayerController({ auth, onOpenDevices }: Props) {
-  const hasToken = !!auth?.access_token
-  const token = auth?.access_token || ''
+  const hasToken = !!auth?.accessToken
+  const token = auth?.accessToken || ''
 
   // Playback state
   const [state, setState] = useState<any | null>(null)
@@ -80,7 +91,6 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
       if (me.repeat_state) setRepeat(me.repeat_state as RepeatMode)
       if (typeof me.device?.volume_percent === 'number') setVolume(me.device.volume_percent)
     } catch (e: any) {
-      // Avoid spamming errors; swallow when unauthorized
       if (!/401/.test(String(e))) setError(humanizeError(e))
     }
   }
@@ -161,7 +171,7 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
     try { await call('PUT', `/me/player/repeat?state=${next}`) }
     catch (e: any) { setError(humanizeError(e)) }
   }
-  const doVolume = async (vol: number) => {
+  const doVol = async (vol: number) => {
     if (!hasToken) return
     setVolume(vol)
     try { await call('PUT', `/me/player/volume?volume_percent=${Math.max(0, Math.min(100, Math.round(vol)))}`) }
@@ -170,11 +180,8 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
 
   const onSignIn = () => {
     try {
-      // loginWithSpotify may be sync in your env; wrap to avoid .catch on undefined
-      const maybe = loginWithSpotify()
-      // If it returns a promise in some envs, allow it to reject silently
-      // @ts-ignore
-      if (maybe && typeof maybe.then === 'function') (maybe as Promise<any>).catch(() => {})
+      // Ensure required scopes are provided
+      loginWithSpotify({ scopes: SCOPES })
     } catch (e: any) {
       setError(humanizeError(e))
     }
@@ -212,7 +219,7 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
         )}
       </div>
 
-      {/* Title/artist */}
+      {/* Title/artist and progress */}
       <div style={{ minWidth: 0, flex: '1 1 auto' }}>
         <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {title || '—'}
@@ -221,7 +228,6 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
           {artist || '—'}
         </div>
 
-        {/* Progress */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
           <span style={{ fontSize: 11, color: '#9bb3cc', minWidth: 36, textAlign: 'right' }}>{mmss(position)}</span>
           <input
@@ -270,8 +276,8 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
                 step={1}
                 value={volume}
                 onChange={(e) => setVolume(Number(e.currentTarget.value))}
-                onPointerUp={() => doVolume(volume)}
-                onKeyUp={(e) => { if (e.key === 'Enter') doVolume(volume) }}
+                onPointerUp={() => doVol(volume)}
+                onKeyUp={(e) => { if (e.key === 'Enter') doVol(volume) }}
                 disabled={!hasToken}
                 aria-label="Volume"
                 style={{ width: 140 }}

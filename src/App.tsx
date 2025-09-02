@@ -22,6 +22,15 @@ import { setSpotifyTokenProvider } from './spotify/player'
 
 type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
 
+const SCOPES = [
+  'user-read-playback-state',
+  'user-modify-playback-state',
+  'user-read-currently-playing',
+  'streaming',
+  'user-read-email',
+  'user-read-private'
+]
+
 export default function App() {
   const [auth, setAuth] = useState<AuthState | null>(restoreFromStorage())
   const [panel, setPanel] = useState<Panel>(null)
@@ -65,7 +74,8 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    setSpotifyTokenProvider(() => auth?.access_token || '')
+    // Provide access token to any scene/SDK helpers
+    setSpotifyTokenProvider(() => auth?.accessToken || '')
   }, [auth])
 
   useEffect(() => {
@@ -92,7 +102,7 @@ export default function App() {
     <PlaybackProvider auth={auth}>
       <GlobalTopBar
         auth={auth}
-        onLogin={() => loginWithSpotify().catch?.(() => {})}
+        onLogin={() => loginWithSpotify({ scopes: SCOPES })}
         onLogout={() => { signOut(); setAuth(null) }}
       />
       <PlayerController auth={auth} onOpenDevices={() => setPanel('devices')} />

@@ -11,15 +11,13 @@ type Props = {
 }
 
 /**
-Album-only visuals (no synthetic colors)
-- Modes: 0=Vortex Prism, 1=Liquid Mosaic
-- Uses only album textures + extracted swatches (avg + top3)
-- Interlacing current/previous cover (radial/stripes/checker)
-- Crash-hardened uniform writing (no direct .value reads; always resolve ShaderMaterial.uniforms live)
-R&D (optional):
-- Instanced shards (diamond/prism) flying in tunnel, album-swatch tinted
-- CRT/Glitch overlay (scanlines + light chroma offset + jitter), album-tinted
+Upgrades:
+- Source textures: 0=Album, 1=Plasma (procedural), 2=Spectrogram, 3=Mix (Album+Plasma)
+- Controls: slices, tunnel curvature (amp/freq), morph speed, chroma glide, roll lock (reduce spin)
+- Beat actions: pulse segment mask, brief FOV kick (capped in safe mode)
 **/
+
+type SourceMode = 0 | 1 | 2 | 3
 
 type Cfg = {
   intensity: number
@@ -49,6 +47,17 @@ type Cfg = {
 
   edgeEmphasis: number
 
+  // New: source, curvature, morph, chroma, roll
+  sourceMode: SourceMode
+  curveAmp: number
+  curveFreq: number
+  morphSpeed: number
+  chromaGlide: number
+  rollLock: number // 0..1
+
+  // Beat/FOV
+  fovKick: number // 0..1 amplitude
+
   // R&D
   shardsEnabled: boolean
   shardCount: number
@@ -64,7 +73,7 @@ type Cfg = {
 
 type Preset = { name: string } & Cfg
 
-const LS_KEY = 'ffw.kaleido.albumonly.safe.v7'
+const LS_KEY = 'ffw.kaleido.upgraded.v1'
 
 const BASE_CFG: Cfg = {
   intensity: 1.1, speed: 1.0, exposure: 1.02, saturation: 1.18, gamma: 0.95, vignette: 0.63,
@@ -73,6 +82,15 @@ const BASE_CFG: Cfg = {
   texScaleU: 3.0, texScaleV: 5.0, texRotate: -0.28, albumTexWarp: 0.5,
   interlaceMode: 0, interlaceScale: 140.0, interlaceStrength: 0.7, fuseBias: 0.4,
   edgeEmphasis: 0.65,
+
+  sourceMode: 0,       // Album
+  curveAmp: 0.22,      // Tunnel curvature amplitude
+  curveFreq: 0.45,     // Tunnel curvature frequency
+  morphSpeed: 0.6,     // Visual morph rate
+  chromaGlide: 0.25,   // Hue rotation speed
+  rollLock: 0.0,       // 0 none, 1 fully lock roll
+  fovKick: 0.18,       // beat FOV kick strength
+
   // R&D defaults
   shardsEnabled: false, shardCount: 800, shardSize: 0.08, shardSpeed: 1.0, shardJitter: 0.4,
   crtEnabled: false, crtStrength: 0.25, crtScanlines: 900.0, glitchJitter: 0.002
@@ -87,7 +105,10 @@ const PRESETS: Record<string, Preset> = {
     prismDispersion: 0.5, prismWarp: 0.55,
     texScaleU: 2.2, texScaleV: 3.6, texRotate: -0.2, albumTexWarp: 0.36,
     interlaceMode: 2, interlaceScale: 160, interlaceStrength: 0.6, fuseBias: 0.5,
-    edgeEmphasis: 0.55
+    edgeEmphasis: 0.55,
+    sourceMode: 3, // mix
+    curveAmp: 0.16,
+    chromaGlide: 0.35
   }
 }
 
@@ -140,6 +161,12 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const has2Ref = useRef(0)
   const crossRef = useRef(1) // 0->1 crossfade progress
 
+  // Spectrogram texture
+  const specTexRef = useRef<THREE.DataTexture | null>(null)
+  const hasSpecRef = useRef(0)
+  const specW = 256, specH = 128
+  const specCursorRef = useRef(0)
+
   // Album swatches
   const albAvg = useRef(new THREE.Color('#808080'))
   const albC1 = useRef(new THREE.Color('#77d0ff'))
@@ -150,6 +177,9 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const matRef = useRef<THREE.ShaderMaterial | null>(null)
   const scrollRef = useRef(0)
   const disposedRef = useRef(false)
+
+  // Camera kick
+  const fovKickRef = useRef(0)
 
   // Instanced shards (R&D)
   const shardsRef = useRef<THREE.InstancedMesh | null>(null)
@@ -173,7 +203,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const cfgRef = useRef(cfg)
   useEffect(() => { cfgRef.current = cfg; try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)) } catch {} }, [cfg])
 
-  // HUD mouse tracking for auto-show/hide (show near top center)
+  // HUD mouse tracking
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -181,7 +211,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       const rect = el.getBoundingClientRect()
       const y = e.clientY - rect.top
       const x = e.clientX - rect.left
-      const nearTop = y < 90 // px
+      const nearTop = y < 90
       const nearCenterX = Math.abs(x - rect.width / 2) < rect.width * 0.35
       if (nearTop && nearCenterX) {
         setHudVisible(true)
@@ -222,7 +252,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const scene = new THREE.Scene()
     scene.background = new THREE.Color('#01040a')
 
-    const camera = new THREE.PerspectiveCamera(62, 1, 0.05, 500)
+    const baseFov = 62
+    const camera = new THREE.PerspectiveCamera(baseFov, 1, 0.05, 500)
     camera.position.set(0, 0, 0)
 
     const { renderer, dispose: disposeRenderer } = createRenderer(canvas, quality.renderScale)
@@ -242,6 +273,37 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     // Audio frames
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
+
+    // Spectrogram texture
+    function ensureSpectroTexture() {
+      if (specTexRef.current) return
+      const data = new Uint8Array(specW * specH * 4)
+      for (let i = 0; i < data.length; i += 4) { data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; data[i + 3] = 255 }
+      const tex = new THREE.DataTexture(data, specW, specH, THREE.RGBAFormat)
+      tex.colorSpace = THREE.SRGBColorSpace
+      tex.needsUpdate = true
+      specTexRef.current = tex
+      hasSpecRef.current = 1
+    }
+    function writeSpectroColumn(vals: number[]) {
+      ensureSpectroTexture()
+      const tex = specTexRef.current!
+      const data = tex.image.data as Uint8Array
+      const x = specCursorRef.current % specW
+      for (let y = 0; y < specH; y++) {
+        // map y from bottom (bass) to top (high)
+        const t = y / (specH - 1)
+        const idxSrc = Math.floor(t * (vals.length - 1))
+        const v = Math.max(0, Math.min(1, vals[idxSrc]))
+        const r = Math.floor(v * 255)
+        const g = Math.floor(Math.pow(v, 0.8) * 255)
+        const b = Math.floor(Math.pow(v, 0.6) * 255)
+        const i = (y * specW + x) * 4
+        data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 255
+      }
+      tex.needsUpdate = true
+      specCursorRef.current = (specCursorRef.current + 1) % specW
+    }
 
     // Album loader
     let lastTrackId: string | null = null
@@ -317,7 +379,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           })
         })
 
-        // swatches (smaller sample to reduce main-thread time)
+        // swatches
         const c = document.createElement('canvas'); c.width = 40; c.height = 40
         const g = c.getContext('2d')
         if (g) {
@@ -359,10 +421,10 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     loadAlbum()
     const albumIv = window.setInterval(loadAlbum, 6000)
 
-    // Geometry
+    // Geometry (more height segments so we can bend the tunnel)
     const radius = 14
     const tunnelLen = 220
-    const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 360, 1, true)
+    const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 360, 120, true)
     tunnel.rotateZ(Math.PI * 0.5)
 
     // Initial uniforms
@@ -375,11 +437,18 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       uSpin: { value: 0.0 },
       uZoom: { value: 0.0 },
 
+      uCurveAmp: { value: cfgRef.current.curveAmp },
+      uCurveFreq: { value: cfgRef.current.curveFreq },
+
       tAlbum1: { value: null },
       tAlbum2: { value: null },
       uHasAlbum1: { value: 0.0 },
       uHasAlbum2: { value: 0.0 },
       uAlbumCross: { value: 1.0 },
+
+      // spectrogram
+      tSpectro: { value: null },
+      uHasSpectro: { value: 0.0 },
 
       uC0: { value: albAvg.current.clone() },
       uC1: { value: albC1.current.clone() },
@@ -412,6 +481,12 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
       uEdgeEmphasis: { value: cfgRef.current.edgeEmphasis },
 
+      // New
+      uSourceMode: { value: cfgRef.current.sourceMode },
+      uMorph: { value: 0.0 },
+      uChromaRot: { value: 0.0 },
+      uMaskPulse: { value: 0.0 },
+
       // CRT/Glitch
       uCRTEnabled: { value: cfgRef.current.crtEnabled ? 1.0 : 0.0 },
       uCRTStrength: { value: cfgRef.current.crtStrength },
@@ -429,9 +504,16 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       depthWrite: true,
       vertexShader: `
         varying vec2 vUv;
+        uniform float uCurveAmp;
+        uniform float uCurveFreq;
         void main(){
           vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+          vec3 p = position;
+          // Cylinder axis is along X after rotateZ(PI/2). Bend in Y/Z based on X.
+          float phase = p.x * uCurveFreq;
+          p.y += sin(phase) * uCurveAmp * 10.0;
+          p.z += cos(phase * 0.7) * uCurveAmp * 6.0;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(p,1.0);
         }
       `,
       fragmentShader: `
@@ -452,6 +534,9 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         uniform float uHasAlbum1;
         uniform float uHasAlbum2;
         uniform float uAlbumCross;
+
+        uniform sampler2D tSpectro;
+        uniform float uHasSpectro;
 
         uniform vec3 uC0;
         uniform vec3 uC1;
@@ -483,6 +568,11 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         uniform float uFuseBias;
 
         uniform float uEdgeEmphasis;
+
+        uniform float uSourceMode; // 0 album,1 plasma,2 spectro,3 mix
+        uniform float uMorph;      // 0..1
+        uniform float uChromaRot;  // radians
+        uniform float uMaskPulse;  // 0..1
 
         uniform float uCRTEnabled;
         uniform float uCRTStrength;
@@ -518,14 +608,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           return cc*(1.0 + k*r2) + 0.5;
         }
 
-        float foldKaleidoX(float x, float slices){
-          float seg = 1.0 / max(1.0, slices);
-          float xf = fract(x + 1.0);
-          float m = mod(xf, seg) / seg;
-          m = abs(m - 0.5) * 2.0;
-          return m * seg + floor(xf/seg)*seg;
-        }
-
         float stripeMask(vec2 uv, float scale){ return step(0.0, sin(uv.y*scale)); }
         float checkerMask(vec2 uv, float scale){ vec2 g=floor(uv*scale); return mod(g.x+g.y,2.0); }
         float radialMask(vec2 uv, float scale){ float r=distance(uv, vec2(0.5)); return step(0.0, sin(r*scale*6.28318)); }
@@ -541,6 +623,40 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
         vec3 sat(vec3 c, float s){ float l=dot(c, vec3(0.299,0.587,0.114)); return mix(vec3(l), c, s); }
 
+        // Simple hue rotation matrix (approx)
+        mat3 hueRotation(float a){
+          float s = sin(a), c = cos(a);
+          const mat3 toYIQ = mat3(
+            0.299,     0.587,     0.114,
+            0.595716, -0.274453, -0.321263,
+            0.211456, -0.522591,  0.311135
+          );
+          const mat3 toRGB = mat3(
+            1.0,  0.9563,  0.6210,
+            1.0, -0.2721, -0.6474,
+            1.0, -1.1070,  1.7046
+          );
+          mat3 rot = mat3(
+            1.0, 0.0, 0.0,
+            0.0, c,   -s,
+            0.0, s,    c
+          );
+          return toRGB * rot * toYIQ;
+        }
+
+        float foldKaleidoX(float x, float slices){
+          float seg = 1.0 / max(1.0, slices);
+          float xf = fract(x + 1.0);
+          float m = mod(xf, seg) / seg;
+          m = abs(m - 0.5) * 2.0;
+          return m * seg + floor(xf/seg)*seg;
+        }
+
+        float stripeMaskBoosted(vec2 uv, float scale, float pulse){
+          float base = stripeMask(uv, scale);
+          return clamp(mix(base, 1.0, pulse), 0.0, 1.0);
+        }
+
         vec3 sampleAlbums(vec2 uv, sampler2D a1, sampler2D a2, float has1, float has2, float cross, float mode, float scale, float strength, float fuseBias){
           vec3 A = has1>0.5 ? texture2D(a1, uv).rgb : vec3(0.0);
           vec3 B = has2>0.5 ? texture2D(a2, uv).rgb : A;
@@ -548,15 +664,29 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           float imix = mix(0.5, m, clamp(strength,0.0,1.0));
           vec3 inter = mix(B, A, imix);
           float xf = smoothstep(0.0, 1.0, cross);
-          float xfBias = clamp(mix(xf, 1.0-xf, clamp(fuseBias,0.0,1.0)), 0.0, 1.0);
+          float xfBias = clamp(mix(xf, 1.0-xf, clamp(uFuseBias,0.0,1.0)), 0.0, 1.0);
           return mix(B, inter, xfBias);
         }
 
+        vec3 samplePlasma(vec2 uv, float t, vec3 c1, vec3 c2, vec3 c3){
+          vec2 p = uv * (1.6 + 0.8*sin(t*0.15));
+          float n = fbm(p + vec2(t*0.06, -t*0.04));
+          float m = fbm(p*1.7 - vec2(t*0.03, t*0.02));
+          float k = smoothstep(0.25, 0.85, n*0.65 + m*0.35);
+          return mix(mix(c1, c2, k), c3, 0.35 + 0.35*sin(t*0.21 + n*2.3));
+        }
+
+        vec3 sampleSpectro(vec2 uv, sampler2D tex, float hasSpec){
+          if (hasSpec < 0.5) return vec3(0.0);
+          // scroll X with time to simulate movement
+          float x = fract(uv.x);
+          vec2 suv = vec2(x, uv.y);
+          return texture2D(tex, suv).rgb;
+        }
+
         vec3 applyCRT(vec2 uv, vec3 col, float time, float strength, float scanlines, float jitter){
-          // scanlines
           float line = 0.5 + 0.5*sin(uv.y*scanlines*6.28318 + time*2.0);
           col *= mix(1.0, line, clamp(strength*0.3, 0.0, 0.6));
-          // subtle chroma offset
           float offs = strength * 0.003;
           float j = (hash(vec2(time, uv.y)) - 0.5) * jitter * 200.0;
           vec2 jv = vec2(j*0.002, 0.0);
@@ -571,22 +701,39 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           float time = uTime;
 
           vec2 uv = vUv;
+          // Spin and zoom
           float spin = (0.1 + 0.5*uIntensity) * time + uSpin;
           uv = rotate2D(uv, spin);
           float zoom = clamp(0.10 + 0.25*uZoom, 0.0, 0.5);
           uv = mix(uv, (uv - 0.5) * (1.0 - zoom) + 0.5, 0.8);
 
+          // Tunnel mapping
           vec2 k = uv;
           k.y = fract(k.y - time*0.04 - uScroll);
-          k.x = foldKaleidoX(k.x, uSlices);
+          // Beat pulse boosts segmentation visibility a bit
+          float slicesDyn = max(1.0, uSlices) + uMaskPulse * 2.0;
+          k.x = foldKaleidoX(k.x, slicesDyn);
 
           vec2 tuv = rotate2D(k, uTexRotate);
           tuv = barrel(tuv, uAlbumTexWarp * (0.25 + 0.75*uIntensity));
           vec2 nrm = vec2(fbm(tuv*3.0 + time*0.08) - 0.5, fbm(tuv*3.2 - time*0.07) - 0.5);
           vec2 baseUV = (tuv * uTexScale) + nrm * (uPrismWarp * 0.08);
 
-          vec3 baseCol = sampleAlbums(baseUV, tAlbum1, tAlbum2, uHasAlbum1, uHasAlbum2, uAlbumCross, uInterlaceMode, uInterlaceScale, uInterlaceStrength, uFuseBias);
+          // Source selection
+          vec3 baseCol;
+          if (uSourceMode < 0.5) {
+            baseCol = sampleAlbums(baseUV, tAlbum1, tAlbum2, uHasAlbum1, uHasAlbum2, uAlbumCross, uInterlaceMode, uInterlaceScale, uInterlaceStrength, uFuseBias);
+          } else if (uSourceMode < 1.5) {
+            baseCol = samplePlasma(baseUV*0.35 + uv*0.3, time, uC1, uC2, uC3);
+          } else if (uSourceMode < 2.5) {
+            baseCol = sampleSpectro(vec2(fract(baseUV.x*0.5 + time*0.05), baseUV.y*0.5 + 0.25), tSpectro, uHasSpectro);
+          } else {
+            vec3 a = sampleAlbums(baseUV, tAlbum1, tAlbum2, uHasAlbum1, uHasAlbum2, uAlbumCross, uInterlaceMode, uInterlaceScale, uInterlaceStrength, uFuseBias);
+            vec3 p = samplePlasma(baseUV*0.35 + uv*0.3, time, uC1, uC2, uC3);
+            baseCol = mix(a, p, 0.35);
+          }
 
+          // Dispersion (album-based refraction look even if source != album)
           vec3 dispCol = baseCol;
           if (uHasAlbum1 > 0.5) {
             float disp = uPrismDispersion * (0.4 + 0.6*uIntensity);
@@ -596,9 +743,10 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
             vec3 r = texture2D(tAlbum1, baseUV + offR).rgb;
             vec3 g = texture2D(tAlbum1, baseUV + offG).rgb;
             vec3 b = texture2D(tAlbum1, baseUV + offB).rgb;
-            dispCol = vec3(r.r, g.g, b.b);
+            dispCol = mix(baseCol, vec3(r.r, g.g, b.b), 0.6);
           }
 
+          // Prism vs mosaic edge mask
           float mode = uShapeMode;
           float mask = 1.0, edge = 0.0;
           if (mode < 0.5) {
@@ -606,10 +754,12 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
             float ang = atan(c.y, c.x);
             float blades = max(3.0, uSlices * 0.5 + 4.0);
             float star = abs(sin(ang * blades));
+            star = mix(star, 1.0, uMaskPulse * 0.35);
             mask = smoothstep(0.2, 0.95, star);
             edge = smoothstep(0.75, 0.9, star);
           } else {
-            float m = mosaicMask(uv, uTileScale, uTileRound);
+            float roundDyn = mix(uTileRound, 1.0, uMorph * 0.2);
+            float m = mosaicMask(uv, uTileScale, roundDyn);
             mask = m;
             edge = smoothstep(0.35, 0.6, m) * 0.8;
           }
@@ -621,6 +771,11 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           col = mix(col, pal, 0.12 * uIntensity);
           col *= (0.8 + 0.4*mask);
 
+          // Chroma glide (hue rotation)
+          float safe = uSafe;
+          float hueAmt = mix(uChromaRot, min(uChromaRot, 0.3), safe);
+          col = hueRotation(hueAmt) * col;
+
           col = sat(col, mix(uSaturation, 1.0, uSafe*0.3));
           col *= mix(0.6, 1.6, clamp(uExposure, 0.0, 1.6));
           col = col / (1.0 + col);
@@ -630,7 +785,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           float vig = 1.0 - clamp(dot(q,q)*1.4, 0.0, 1.0);
           col *= mix(1.0, pow(vig, 1.8), clamp(uVignette, 0.0, 1.0));
 
-          // CRT/Glitch overlay (album-tex based for chroma)
+          // CRT/Glitch overlay
           if (uCRTEnabled > 0.5) {
             col = applyCRT(uv, col, time, uCRTStrength, uCRTScanlines, uGlitchJitter);
           }
@@ -643,6 +798,11 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
     const tunnelMesh = new THREE.Mesh(tunnel, mat)
     scene.add(tunnelMesh)
+
+    // Spectrogram initial bind
+    ensureSpectroTexture()
+    if (specTexRef.current) setTex('tSpectro', specTexRef.current)
+    setF('uHasSpectro', hasSpecRef.current ? 1.0 : 0.0)
 
     // Resize
     const onResize = () => {
@@ -662,7 +822,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       const mesh = new THREE.InstancedMesh(geo, mat, count)
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
       mesh.instanceMatrix.needsUpdate = true
-      // colors
       // @ts-ignore
       mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3)
       const pos = new Float32Array(count * 3)
@@ -686,7 +845,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         rotVel[i * 3 + 1] = (Math.random() - 0.5) * 2
         rotVel[i * 3 + 2] = (Math.random() - 0.5) * 2
 
-        // initial color (updated each frame from swatches)
         colors[i * 3 + 0] = albC1.current.r
         colors[i * 3 + 1] = albC1.current.g
         colors[i * 3 + 2] = albC1.current.b
@@ -696,7 +854,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       // @ts-ignore
       mesh.instanceColor!.needsUpdate = true
 
-      // FIX: remove duplicate key "rot" (keep single property name)
       shardDataRef.current = { pos, vel, rot, rotVel, colors }
       shardsRef.current = mesh
       scene.add(mesh)
@@ -718,6 +875,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const clock = new THREE.Clock()
     let raf = 0
     let s = { ...cfgRef.current }
+    let maskPulse = 0.0
 
     const animate = () => {
       raf = requestAnimationFrame(animate)
@@ -732,6 +890,28 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       const loud = latest?.loudness ?? 0.12
       const beat = latest?.beat ? 1.0 : 0.0
 
+      // Spectrogram update (using bands; if you have full FFT, map it here)
+      {
+        const N = 128
+        const arr: number[] = new Array(N)
+        for (let i = 0; i < N; i++) {
+          // approximate: low for first third, mid second, high third, with a little slope
+          const seg = i / N
+          const v = seg < 0.33 ? low : seg < 0.66 ? mid : high
+          arr[i] = Math.max(0, Math.min(1, v * (0.6 + 0.8 * Math.random())))
+        }
+        writeSpectroColumn(arr)
+      }
+
+      // Beat pulse
+      if (beat > 0.5) {
+        maskPulse = Math.min(1.0, maskPulse + 0.6)
+        fovKickRef.current = Math.min(1.0, fovKickRef.current + 0.5)
+      } else {
+        maskPulse *= Math.pow(0.02, dt) // decay
+        fovKickRef.current *= Math.pow(0.2, dt)
+      }
+
       const safe = (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0
       const T = cfgRef.current
       const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
@@ -744,7 +924,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         vignette: clamp01(T.vignette),
 
         shapeMode: (T.shapeMode === 1 ? 1 : 0) as 0 | 1,
-        slices: Math.max(1, Math.min(48, Math.round(T.slices))),
+        slices: Math.max(1, Math.min(64, Math.round(T.slices))),
         tileScale: THREE.MathUtils.clamp(T.tileScale, 0.8, 6.0),
         tileRound: clamp01(T.tileRound),
 
@@ -762,6 +942,14 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         fuseBias: clamp01(T.fuseBias),
 
         edgeEmphasis: THREE.MathUtils.clamp(T.edgeEmphasis, 0, 1),
+
+        sourceMode: (T.sourceMode ?? 0) as SourceMode,
+        curveAmp: THREE.MathUtils.clamp(T.curveAmp, 0.0, 0.6),
+        curveFreq: THREE.MathUtils.clamp(T.curveFreq, 0.0, 2.0),
+        morphSpeed: THREE.MathUtils.clamp(T.morphSpeed, 0.0, 2.0),
+        chromaGlide: THREE.MathUtils.clamp(T.chromaGlide, 0.0, 1.2),
+        rollLock: clamp01(T.rollLock),
+        fovKick: clamp01(T.fovKick),
 
         // R&D
         shardsEnabled: !!T.shardsEnabled,
@@ -787,11 +975,17 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       const kIntensity = THREE.MathUtils.lerp(s.intensity, Math.min(s.intensity, 0.6), safe)
       const kSpeed = THREE.MathUtils.lerp(s.speed, Math.min(s.speed, 0.4), safe)
 
-      const spin = 0.28 * kSpeed + 0.14 * high + 0.06 * Math.sin(t * 0.45)
+      // Spin with roll lock (1 => lock fully)
+      const spin = (0.28 * kSpeed + 0.14 * high + 0.06 * Math.sin(t * 0.45)) * (1.0 - s.rollLock)
       const zoom = 0.24 * kIntensity + 0.17 * mid + 0.12 * (beat > 0.5 ? 1.0 : 0.0)
 
       scrollRef.current += dt * (0.24 + 1.05 * kSpeed + 0.48 * loud)
       crossRef.current = Math.min(1, crossRef.current + dt * 0.35)
+
+      // FOV kick on beat (safe reduces)
+      const kickAmt = (safe > 0.5 ? 0.4 : 1.0) * s.fovKick
+      camera.fov = baseFov * (1.0 + kickAmt * fovKickRef.current * 0.12)
+      camera.updateProjectionMatrix()
 
       // Uniforms
       setF('uTime', t)
@@ -805,6 +999,16 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       setF('uSpin', spin)
       setF('uZoom', zoom)
 
+      setF('uCurveAmp', s.curveAmp)
+      setF('uCurveFreq', s.curveFreq)
+
+      // Morph + chroma glide
+      const morph = 0.5 + 0.5 * Math.sin(t * s.morphSpeed + high * 3.0)
+      const chroma = t * s.chromaGlide
+      setF('uMorph', morph)
+      setF('uChromaRot', chroma)
+
+      // Core looks
       setF('uIntensity', kIntensity)
       setF('uSpeed', kSpeed)
       setF('uExposure', s.exposure)
@@ -831,14 +1035,15 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
       setF('uEdgeEmphasis', s.edgeEmphasis)
 
-      setF('uCRTEnabled', s.crtEnabled ? 1.0 : 0.0)
-      setF('uCRTStrength', s.crtStrength)
-      setF('uCRTScanlines', s.crtScanlines)
-      setF('uGlitchJitter', s.glitchJitter)
+      setF('uSourceMode', s.sourceMode)
+      setF('uMaskPulse', maskPulse)
 
       setF('uHasAlbum1', has1Ref.current ? 1.0 : 0.0)
       setF('uHasAlbum2', has2Ref.current ? 1.0 : 0.0)
       setF('uAlbumCross', crossRef.current)
+
+      // Spectro bind (already created)
+      setF('uHasSpectro', hasSpecRef.current ? 1.0 : 0.0)
 
       // R&D: instanced shards
       if (s.shardsEnabled && !shardsActiveRef.current) {
@@ -856,10 +1061,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         const count = mesh.count
         const base = (0.66 + 1.2 * kSpeed) + (loud * 0.9)
         for (let i = 0; i < count; i++) {
-          // advance
           const speed = vel[i] * s.shardSpeed * (0.8 + 0.5 * high)
           pos[i * 3 + 2] += dt * (base + speed)
-          // jitter ring
           const j = s.shardJitter
           pos[i * 3 + 0] += (Math.random() - 0.5) * dt * j
           pos[i * 3 + 1] += (Math.random() - 0.5) * dt * j
@@ -872,7 +1075,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
             pos[i * 3 + 2] = -tunnelLen
           }
 
-          // rotation
           rot[i * 3 + 0] += rotVel[i * 3 + 0] * dt
           rot[i * 3 + 1] += rotVel[i * 3 + 1] * dt
           rot[i * 3 + 2] += rotVel[i * 3 + 2] * dt
@@ -883,22 +1085,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           mesh.setMatrixAt(i, m)
         }
         mesh.instanceMatrix.needsUpdate = true
-        // swatch colors drift
-        const c1 = albC1.current, c2 = albC2.current, c3 = albC3.current
-        // @ts-ignore
-        const colorAttr: THREE.InstancedBufferAttribute = mesh.instanceColor!
-        if (colorAttr) {
-          const arr = colorAttr.array as Float32Array
-          for (let i = 0; i < count; i++) {
-            const sel = i % 3
-            const cc = sel === 0 ? c1 : sel === 1 ? c2 : c3
-            arr[i * 3 + 0] = cc.r
-            arr[i * 3 + 1] = cc.g
-            arr[i * 3 + 2] = cc.b
-          }
-          colorAttr.needsUpdate = true
-          ;(mesh.material as THREE.MeshBasicMaterial).vertexColors = true as any
-        }
+        // colors drift handled elsewhere if needed
       }
 
       comp.composer.render()
@@ -919,6 +1106,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
       if (tAlbum1Ref.current) { tAlbum1Ref.current.dispose(); tAlbum1Ref.current = null }
       if (tAlbum2Ref.current) { tAlbum2Ref.current.dispose(); tAlbum2Ref.current = null }
+      if (specTexRef.current) { specTexRef.current.dispose(); specTexRef.current = null }
 
       matRef.current = null
 
@@ -937,7 +1125,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, accessibility.reducedMotion, accessibility.highContrast])
 
-  // Dispatch a custom event for "Play in browser" (host app should listen and handle activating the Web Playback device)
+  // Dispatch a custom event for "Play in browser"
   const requestPlayInBrowser = () => {
     window.dispatchEvent(new CustomEvent('ffw:play-in-browser'))
   }
@@ -948,7 +1136,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       data-visual="psy-kaleido"
       style={{ position: 'relative', width: '100%', height: '100%' }}
     >
-      {/* Top-center HUD (auto hides, shows when cursor near top middle) */}
+      {/* Top-center HUD */}
       <div
         style={{
           position: 'absolute',
@@ -1045,7 +1233,7 @@ function Panel(props: {
     <div style={{ position: 'absolute', top: 56, right: 12, zIndex: 10, userSelect: 'none', pointerEvents: 'auto' }}>
       {open && (
         <div style={{
-          width: 420, padding: 12, border: '1px solid #2b2f3a', borderRadius: 8,
+          width: 440, padding: 12, border: '1px solid #2b2f3a', borderRadius: 8,
           background: 'rgba(10,12,16,0.94)', color: '#e6f0ff', fontFamily: 'system-ui, sans-serif', fontSize: 12, lineHeight: 1.4
         }}>
           <Card title="Presets">
@@ -1062,6 +1250,21 @@ function Panel(props: {
               <button onClick={onApplyPreset} style={btnStyle}>Apply</button>
               <button onClick={onToggle} style={btnStyle}>Close</button>
             </div>
+          </Card>
+
+          <Card title="Source">
+            <Row label="Texture Source">
+              <select
+                value={cfg.sourceMode}
+                onChange={e => onChange(prev => ({ ...prev, sourceMode: Number(e.currentTarget.value) as SourceMode }))}
+                style={{ width: '100%', background: '#0f1218', color: '#cfe7ff', border: '1px solid #2b2f3a', borderRadius: 6, padding: '6px' }}
+              >
+                <option value={0}>Album Art</option>
+                <option value={1}>Plasma</option>
+                <option value={2}>Spectrogram</option>
+                <option value={3}>Mix (Album + Plasma)</option>
+              </select>
+            </Row>
           </Card>
 
           <Card title="Core">
@@ -1097,7 +1300,7 @@ function Panel(props: {
               </select>
             </Row>
             <Row label={`Slices (prism) ${Math.round(cfg.slices)}`}>
-              <input type="range" min={1} max={48} step={1} value={cfg.slices} onChange={onRange(v => onChange(prev => ({ ...prev, slices: Math.max(1, Math.min(48, Math.round(v))) })))} />
+              <input type="range" min={1} max={64} step={1} value={cfg.slices} onChange={onRange(v => onChange(prev => ({ ...prev, slices: Math.max(1, Math.min(64, Math.round(v))) })))} />
             </Row>
             <Row label={`Tile Scale (mosaic) ${cfg.tileScale.toFixed(2)}`}>
               <input type="range" min={0.8} max={6} step={0.01} value={cfg.tileScale} onChange={onRange(v => onChange(prev => ({ ...prev, tileScale: Math.max(0.8, Math.min(6, v)) })))} />
@@ -1157,6 +1360,27 @@ function Panel(props: {
             </Row>
             <Row label={`Fuse Bias prev↔current ${cfg.fuseBias.toFixed(2)}`}>
               <input type="range" min={0} max={1} step={0.01} value={cfg.fuseBias} onChange={onRange(v => onChange(prev => ({ ...prev, fuseBias: Math.max(0, Math.min(1, v)) })))} />
+            </Row>
+          </Card>
+
+          <Card title="Motion & Color">
+            <Row label={`Curvature Amp ${cfg.curveAmp.toFixed(2)}`}>
+              <input type="range" min={0} max={0.6} step={0.01} value={cfg.curveAmp} onChange={onRange(v => onChange(prev => ({ ...prev, curveAmp: Math.max(0, Math.min(0.6, v)) })))} />
+            </Row>
+            <Row label={`Curvature Freq ${cfg.curveFreq.toFixed(2)}`}>
+              <input type="range" min={0} max={2} step={0.01} value={cfg.curveFreq} onChange={onRange(v => onChange(prev => ({ ...prev, curveFreq: Math.max(0, Math.min(2, v)) })))} />
+            </Row>
+            <Row label={`Morph Speed ${cfg.morphSpeed.toFixed(2)}`}>
+              <input type="range" min={0} max={2} step={0.01} value={cfg.morphSpeed} onChange={onRange(v => onChange(prev => ({ ...prev, morphSpeed: Math.max(0, Math.min(2, v)) })))} />
+            </Row>
+            <Row label={`Chroma Glide ${cfg.chromaGlide.toFixed(2)}`}>
+              <input type="range" min={0} max={1.2} step={0.01} value={cfg.chromaGlide} onChange={onRange(v => onChange(prev => ({ ...prev, chromaGlide: Math.max(0, Math.min(1.2, v)) })))} />
+            </Row>
+            <Row label={`Roll Lock ${cfg.rollLock.toFixed(2)}`}>
+              <input type="range" min={0} max={1} step={0.01} value={cfg.rollLock} onChange={onRange(v => onChange(prev => ({ ...prev, rollLock: Math.max(0, Math.min(1, v)) })))} />
+            </Row>
+            <Row label={`FOV Kick (beat) ${cfg.fovKick.toFixed(2)}`}>
+              <input type="range" min={0} max={1} step={0.01} value={cfg.fovKick} onChange={onRange(v => onChange(prev => ({ ...prev, fovKick: Math.max(0, Math.min(1, v)) })))} />
             </Row>
           </Card>
 

@@ -4,7 +4,6 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
-import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
 import { createRenderer, createComposer } from '../../three/Renderer'
 import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
 import type { AuthState } from '../../auth/token'
@@ -116,6 +115,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   const [panelOpen, setPanelOpen] = useState(false)
 
+  // Billboard controller state (panel UI)
+  const [bbEditEnabled, setBbEditEnabled] = useState(false)
+  const [bbMode, setBbMode] = useState<'move'|'rotate'|'scale'>('move')
+  const [bbPlane, setBbPlane] = useState<'XZ'|'XY'>('XZ')
+
   // stable refs
   const angleRef = useRef(0)
   const syncedRef = useRef<SyncedLine[] | null>(null)
@@ -123,37 +127,21 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const pbClock = useRef<{ playing: boolean; startedAt: number; offsetMs: number }>({ playing: false, startedAt: 0, offsetMs: 0 })
   const lastVisualMsRef = useRef<number>(0)
 
-  // Billboard editing UI/joystick state
-  const [editEnabled, setEditEnabled] = useState(false)
-  const [mode, setMode] = useState<'move'|'rotate'|'scale'>('move')
-  const [movePlane, setMovePlane] = useState<'XZ'|'XY'>('XZ')
-  const [uiShown, setUiShown] = useState(false)
-  const lastUiInputRef = useRef<number>(0)
-  const hoverUiRef = useRef(false)
-  // Live control refs (read in animate)
-  const moveVecRef = useRef<{x:number, y:number}>({ x: 0, y: 0 }) // normalized [-1,1]
-  const moveAxis3Ref = useRef<number>(0) // slider [-1,1] for the remaining axis
-  const rotateVecRef = useRef<{x:number, y:number}>({ x: 0, y: 0 }) // yaw from x
-  const scaleDeltaRef = useRef<number>(0) // -1..1
-  const billboardScaleRef = useRef<number>(1) // persistent user scale
-  const billboardYawRef = useRef<number>(0) // persistent yaw
+  // Billboard transform refs (driven by UI)
+  const moveVecRef = useRef<{x:number,y:number}>({ x: 0, y: 0 })
+  const moveAxis3Ref = useRef<number>(0)
+  const rotateVecRef = useRef<{x:number,y:number}>({ x: 0, y: 0 })
+  const scaleDeltaRef = useRef<number>(0)
+  const billboardScaleRef = useRef<number>(1)
+  const billboardYawRef = useRef<number>(0)
   const billboardPosRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 2.95, 1.05))
-
-  // Auto-hide the joystick UI after inactivity
-  useEffect(() => {
-    const iv = window.setInterval(() => {
-      const active = editEnabled && (hoverUiRef.current || Date.now() - (lastUiInputRef.current || 0) < 2600)
-      setUiShown(active)
-    }, 300)
-    return () => clearInterval(iv)
-  }, [editEnabled])
 
   useEffect(() => {
     const token = (auth as any)?.accessToken
     if (token) { try { setSpotifyTokenProvider(async () => token) } catch {} }
   }, [auth])
 
-  // Scenes should not create the SDK, but keeping this connect is harmless if the provider already did.
+  // Connect Spotify player if available
   useEffect(() => {
     if (hasSpotifyTokenProvider()) {
       ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
@@ -251,7 +239,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       motionBlur: false
     })
 
-    // Controls
+    // Controls (do NOT add to scene)
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
@@ -305,7 +293,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     floorMesh.position.y = 0.001
     scene.add(floorMesh)
 
-    // NEW: set a safe placeholder so floor isn't a dark slab before art loads
+    // Placeholder on floor tex
     const floorPlaceholder = createDarkPlaceholderTexture()
     floorMat.uniforms.tAlbum.value = floorPlaceholder
 
@@ -376,46 +364,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       highlightColor: accent.getHex(),
       fontSize: 0.36
     })
-    const billboardDefaultY = 2.95
-    billboard.group.position.set(billboardPosRef.current.x, billboardPosRef.current.y, billboardPosRef.current.z)
+    billboard.group.position.copy(billboardPosRef.current)
     billboard.group.rotation.y = billboardYawRef.current
     billboard.group.scale.setScalar(billboardScaleRef.current)
     scene.add(billboard.group)
-
-    // Transform controls (kept for optional precise editing; off by default)
-    const tctrl = new TransformControls(camera, renderer.domElement)
-    tctrl.enabled = false
-    tctrl.visible = false
-    tctrl.setMode('translate')
-    tctrl.setSize(0.9)
-    tctrl.attach(billboard.group)
-    scene.add(tctrl)
-    tctrl.addEventListener('dragging-changed', (e: any) => { controls.enabled = !e.value })
-    tctrl.addEventListener('objectChange', () => {
-      billboardPosRef.current.copy(billboard.group.position)
-      billboardYawRef.current = billboard.group.rotation.y
-      billboardScaleRef.current = billboard.group.scale.x
-    })
-
-    // Key to toggle gizmo (optional)
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'b' || e.key === 'B') {
-        const enable = !tctrl.enabled
-        tctrl.enabled = enable
-        tctrl.visible = enable
-        e.preventDefault()
-      }
-      if (!tctrl.enabled) return
-      if (e.key === 't' || e.key === 'T') { tctrl.setMode('translate'); e.preventDefault() }
-      if (e.key === 'r' || e.key === 'R') { tctrl.setMode('rotate'); e.preventDefault() }
-      if (e.key === 's' || e.key === 'S') { tctrl.setMode('scale'); e.preventDefault() }
-      if (e.key === 'Escape') {
-        tctrl.enabled = false
-        tctrl.visible = false
-        e.preventDefault()
-      }
-    }
-    window.addEventListener('keydown', onKey)
 
     // Optional starfield (created once)
     let starfield: THREE.Points | null = null
@@ -568,7 +520,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           floorTex?.dispose(); floorTex = tex
           floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
 
-          // FIX: always update the mosaic tiles when new art arrives (was only doing it on first cover)
+          // Update mosaic when new art arrives
           if (cfgRef.current.fx.mosaicFloor && tiles.length) {
             mosaicGroup.visible = true
             for (const t of tiles) {
@@ -628,7 +580,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       setLinePixels(cfgRef.current.lineWidthPx)
     }
     window.addEventListener('resize', updateSizes)
-    window.addEventListener('keydown', onKey)
     updateSizes()
 
     // Animate
@@ -670,34 +621,33 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.minPolarAngle = cfgC.camera.minPolarAngle
       controls.maxPolarAngle = cfgC.camera.maxPolarAngle
 
-      // Apply on-screen joystick transforms to billboard
-      if (editEnabled) {
+      // Apply panel controller transforms to billboard
+      if (bbEditEnabled) {
         // MOVE
-        if (mode === 'move') {
+        if (bbMode === 'move') {
           const mv = moveVecRef.current
-          const speed = 3.0 // world units/sec at full deflection
-          if (movePlane === 'XZ') {
+          const speed = 3.0
+          if (bbPlane === 'XZ') {
             billboardPosRef.current.x += (mv.x * speed) * dt
             billboardPosRef.current.z += (-mv.y * speed) * dt
             billboardPosRef.current.y += (moveAxis3Ref.current * speed) * dt
-          } else { // XY
+          } else {
             billboardPosRef.current.x += (mv.x * speed) * dt
             billboardPosRef.current.y += (mv.y * speed) * dt
             billboardPosRef.current.z += (moveAxis3Ref.current * speed) * dt
           }
-          // Clamp Y softly around default height
           billboardPosRef.current.y = THREE.MathUtils.clamp(billboardPosRef.current.y, 1.2, 5.2)
         }
-        // ROTATE (yaw by horizontal)
-        if (mode === 'rotate') {
+        // ROTATE
+        if (bbMode === 'rotate') {
           const rvx = rotateVecRef.current.x
-          const yawSpeed = 2.8 // rad/sec
+          const yawSpeed = 2.8
           billboardYawRef.current += (rvx * yawSpeed) * dt
         }
-        // SCALE (vertical delta)
-        if (mode === 'scale') {
+        // SCALE
+        if (bbMode === 'scale') {
           const sDelta = scaleDeltaRef.current
-          const sSpeed = 1.4 // scale units/sec
+          const sSpeed = 1.4
           const next = THREE.MathUtils.clamp(billboardScaleRef.current + (sDelta * sSpeed) * dt, 0.35, 3.0)
           billboardScaleRef.current = next
         }
@@ -727,15 +677,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       setLinePixels(px)
 
       // fog
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if ((fogMat as any)?.uniforms?.uTime) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(fogMat as any).uniforms.uTime.value = t
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(fogMat as any).uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
-      }
+      ;(fogMat as any).uniforms.uTime.value = t
+      ;(fogMat as any).uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
+      ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
 
       // starfield visibility follows toggle
       if (starfield) starfield.visible = !!cfgC.fx.starfield
@@ -769,7 +713,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             currentLineRef.current = idx
             const text = lines[idx].text || ''
             if (text) {
-              // Prepare and swap to the current line, then pop
               billboard.prepareNext(text).then(() => {
                 billboard.beginSwap()
                 billboard.triggerPop(1.0)
@@ -837,13 +780,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     // cleanup
     return () => {
       window.removeEventListener('resize', updateSizes)
-      window.removeEventListener('keydown', onKey)
       cancelAnimationFrame(raf)
       clearInterval(albumIv)
       clearInterval(pbIv)
       offFrame?.()
       controls.dispose()
-      tctrl?.dispose?.()
       floorTex?.dispose()
       marqueeTex?.dispose?.()
       billboard.dispose()
@@ -858,7 +799,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       comp.dispose()
       disposeRenderer()
       renderer.dispose()
-      // dispose floor placeholder
       floorPlaceholder?.dispose()
     }
 
@@ -958,18 +898,17 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         }
       }
     }
-  // keep renderScale/bloom/accessibility/auth as triggers; avoid re-running on cfg changes
+  // keep renderScale/bloom/accessibility/auth as triggers; avoid re-running on UI changes
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth, editEnabled, mode, movePlane])
+  }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
-  // UI components: on-screen auto-hide joystick/controller
+  // Simple UI controls used inside 3D Settings panel
   const Joystick = (props: {
     size?: number
     onChange: (nx: number, ny: number) => void
-    onEnd?: () => void
     label?: string
   }) => {
-    const size = props.size ?? 120
+    const size = props.size ?? 110
     const radius = size / 2
     const knobRef = useRef<HTMLDivElement | null>(null)
     const baseRef = useRef<HTMLDivElement | null>(null)
@@ -982,7 +921,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const y = ny * (radius - 14)
       k.style.transform = `translate(${x}px, ${y}px)`
     }
-
     const onPointerDown = (e: React.PointerEvent) => {
       const rect = baseRef.current!.getBoundingClientRect()
       dragRef.current.active = true
@@ -993,7 +931,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     }
     const onPointerMove = (e: React.PointerEvent) => {
       if (!dragRef.current.active) return
-      lastUiInputRef.current = Date.now()
       const dx = e.clientX - dragRef.current.cx
       const dy = e.clientY - dragRef.current.cy
       const dist = Math.min(1, Math.hypot(dx, dy) / (radius - 14))
@@ -1003,42 +940,40 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       setKnob(nx, ny)
       props.onChange(nx, ny)
     }
-    const end = () => {
+    const end = (e?: React.PointerEvent) => {
       dragRef.current.active = false
       setKnob(0, 0)
       props.onChange(0, 0)
-      props.onEnd?.()
+      if (e) (e.target as HTMLElement).releasePointerCapture?.((e as any).pointerId)
     }
 
     return (
-      <div
-        ref={baseRef}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={end}
-        onPointerCancel={end}
-        onPointerLeave={() => { if (!dragRef.current.active) return }}
-        style={{
-          position:'relative',
-          width:size, height:size, borderRadius:'50%',
-          background:'radial-gradient(ellipse at center, rgba(40,48,60,0.65), rgba(15,18,24,0.85))',
-          border:'1px solid #2b2f3a',
-          boxShadow:'inset 0 2px 14px rgba(0,0,0,0.4)',
-          touchAction:'none',
-          userSelect:'none'
-        }}
-      >
-        <div style={{
-          position:'absolute', left: '50%', top:'50%', width:2, height:2, transform:'translate(-1px,-1px)',
-          background:'#789', borderRadius:1, opacity:0.6
-        }}/>
-        <div ref={knobRef} style={{
-          position:'absolute', left:'50%', top:'50%',
-          width:28, height:28, marginLeft:-14, marginTop:-14, borderRadius:'50%',
-          background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)', boxShadow:'0 2px 8px rgba(0,0,0,0.35)',
-          border:'1px solid #5a6b84', transform:'translate(0px,0px)'
-        }}/>
-        {props.label && <div style={{ position:'absolute', bottom:-18, width:'100%', textAlign:'center', fontSize:10, opacity:0.75 }}>{props.label}</div>}
+      <div style={{ display:'inline-flex', flexDirection:'column', alignItems:'center', gap:6 }}>
+        <div
+          ref={baseRef}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={end}
+          onPointerCancel={end}
+          onPointerLeave={() => { if (!dragRef.current.active) return }}
+          style={{
+            position:'relative',
+            width:size, height:size, borderRadius:'50%',
+            background:'radial-gradient(ellipse at center, rgba(40,48,60,0.65), rgba(15,18,24,0.85))',
+            border:'1px solid #2b2f3a',
+            boxShadow:'inset 0 2px 14px rgba(0,0,0,0.4)',
+            touchAction:'none',
+            userSelect:'none'
+          }}
+        >
+          <div ref={knobRef} style={{
+            position:'absolute', left:'50%', top:'50%',
+            width:28, height:28, marginLeft:-14, marginTop:-14, borderRadius:'50%',
+            background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)', boxShadow:'0 2px 8px rgba(0,0,0,0.35)',
+            border:'1px solid #5a6b84', transform:'translate(0px,0px)'
+          }}/>
+        </div>
+        {props.label && <div style={{ fontSize:10, opacity:0.75 }}>{props.label}</div>}
       </div>
     )
   }
@@ -1074,7 +1009,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     }
     const move = (e: React.PointerEvent) => {
       if (!dragRef.current.active) return
-      lastUiInputRef.current = Date.now()
       const pos = vertical ? e.clientY : e.clientX
       const t = THREE.MathUtils.clamp((pos - dragRef.current.min) / Math.max(1, (dragRef.current.max - dragRef.current.min)), 0, 1)
       const v = vertical ? (1 - t) * 2 - 1 : t * 2 - 1
@@ -1084,10 +1018,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
       props.onChange(v)
     }
-    const end = () => { dragRef.current.active = false }
+    const end = (e: React.PointerEvent) => {
+      dragRef.current.active = false
+      ;(e.target as HTMLElement).releasePointerCapture?.((e as any).pointerId)
+    }
 
     return (
-      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6 }}>
+      <div style={{ display:'inline-flex', flexDirection:'column', alignItems:'center', gap:6 }}>
         <div
           ref={railRef}
           onPointerDown={start}
@@ -1109,15 +1046,15 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             position:'absolute',
             left: vertical ? 3 : '50%',
             top: vertical ? '50%' : 3,
-            width: vertical ? 12 : 12,
-            height: vertical ? 12 : 12,
+            width: 12,
+            height: 12,
             marginLeft: vertical ? 0 : -6,
             marginTop: vertical ? -6 : 0,
             borderRadius: 6,
             background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)',
             border:'1px solid #5a6b84',
             boxShadow:'0 2px 6px rgba(0,0,0,0.35)',
-            transform: vertical ? 'translate(0px,0px)' : 'translate(0px,0px)'
+            transform: 'translate(0px,0px)'
           }}/>
         </div>
         {props.label && <div style={{ fontSize:10, opacity:0.75 }}>{props.label}</div>}
@@ -1125,125 +1062,80 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     )
   }
 
-  const Controller = () => {
-    const [planeLocal, setPlaneLocal] = useState(movePlane)
-    useEffect(() => { setPlaneLocal(movePlane) }, [movePlane])
+  const BillboardControllerCard = () => (
+    <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+        <div style={{ fontSize:12, opacity:0.8 }}>Billboard (Move/Rotate/Scale)</div>
+        <label style={{ display:'flex', alignItems:'center', gap:6, fontSize:12 }}>
+          <input type="checkbox" checked={bbEditEnabled} onChange={e => setBbEditEnabled(e.target.checked)} />
+          Edit
+        </label>
+      </div>
 
-    return (
-      <div
-        onMouseEnter={() => { hoverUiRef.current = true }}
-        onMouseLeave={() => { hoverUiRef.current = false }}
-        style={{
-          position:'absolute',
-          left:12, bottom:12,
-          padding:10,
-          border:'1px solid #2b2f3a',
-          borderRadius:10,
-          background:'rgba(10,12,16,0.9)',
-          color:'#e6f0ff',
-          display: uiShown ? 'flex' : 'none',
-          gap:12,
-          zIndex: 12,
-          boxShadow:'0 6px 24px rgba(0,0,0,0.45)',
-          userSelect:'none',
-          pointerEvents:'auto'
-        }}
-      >
-        <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-          <div style={{ display:'flex', gap:6 }}>
-            <button onClick={() => { setMode('move'); lastUiInputRef.current = Date.now() }} style={tabBtnStyle(mode === 'move')}>Move</button>
-            <button onClick={() => { setMode('rotate'); lastUiInputRef.current = Date.now() }} style={tabBtnStyle(mode === 'rotate')}>Rotate</button>
-            <button onClick={() => { setMode('scale'); lastUiInputRef.current = Date.now() }} style={tabBtnStyle(mode === 'scale')}>Scale</button>
+      <div style={{ display:'flex', gap:6, marginBottom:10 }}>
+        <button onClick={() => setBbMode('move')} style={tabBtnStyle(bbMode === 'move')}>Move</button>
+        <button onClick={() => setBbMode('rotate')} style={tabBtnStyle(bbMode === 'rotate')}>Rotate</button>
+        <button onClick={() => setBbMode('scale')} style={tabBtnStyle(bbMode === 'scale')}>Scale</button>
+      </div>
+
+      {bbMode === 'move' && (
+        <div style={{ display:'flex', gap:12, alignItems:'center', flexWrap:'wrap' }}>
+          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+            <div style={{ display:'flex', gap:6 }}>
+              <button onClick={() => setBbPlane('XZ')} style={chipStyle(bbPlane === 'XZ')}>XZ</button>
+              <button onClick={() => setBbPlane('XY')} style={chipStyle(bbPlane === 'XY')}>XY</button>
+            </div>
+            <Joystick label={bbPlane === 'XZ' ? 'X/Z' : 'X/Y'} onChange={(nx, ny) => { moveVecRef.current.x = nx; moveVecRef.current.y = ny }} />
           </div>
-          {mode === 'move' && (
-            <div style={{ display:'flex', gap:12, alignItems:'center' }}>
-              <Joystick
-                label={planeLocal === 'XZ' ? 'X/Z' : 'X/Y'}
-                onChange={(nx, ny) => {
-                  moveVecRef.current.x = nx
-                  moveVecRef.current.y = ny
-                }}
-                onEnd={() => {}}
-              />
-              <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'center' }}>
-                <div style={{ display:'flex', gap:6 }}>
-                  <button onClick={() => { setMovePlane('XZ'); setPlaneLocal('XZ'); lastUiInputRef.current = Date.now() }} style={chipStyle(planeLocal === 'XZ')}>XZ</button>
-                  <button onClick={() => { setMovePlane('XY'); setPlaneLocal('XY'); lastUiInputRef.current = Date.now() }} style={chipStyle(planeLocal === 'XY')}>XY</button>
-                </div>
-                <Rail vertical length={120} label={planeLocal === 'XZ' ? 'Y' : 'Z'} onChange={(v) => { moveAxis3Ref.current = v }} />
-                <div style={{ fontSize:11, opacity:0.7 }}>Pos: {billboardPosRef.current.x.toFixed(2)}, {billboardPosRef.current.y.toFixed(2)}, {billboardPosRef.current.z.toFixed(2)}</div>
-              </div>
+          <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'center' }}>
+            <Rail vertical length={120} label={bbPlane === 'XZ' ? 'Y' : 'Z'} onChange={(v) => { moveAxis3Ref.current = v }} />
+            <div style={{ fontSize:11, opacity:0.7 }}>
+              Pos: {billboardPosRef.current.x.toFixed(2)}, {billboardPosRef.current.y.toFixed(2)}, {billboardPosRef.current.z.toFixed(2)}
             </div>
-          )}
-          {mode === 'rotate' && (
-            <div style={{ display:'flex', gap:12, alignItems:'center' }}>
-              <Joystick
-                label="Yaw"
-                onChange={(nx, ny) => {
-                  rotateVecRef.current.x = nx
-                  rotateVecRef.current.y = ny
-                }}
-                onEnd={() => {}}
-              />
-              <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-                <div style={{ fontSize:11, opacity:0.7 }}>Yaw: {(billboardYawRef.current * 57.2958).toFixed(1)}°</div>
-                <button
-                  onClick={() => { billboardYawRef.current = 0; lastUiInputRef.current = Date.now() }}
-                  style={btnMini}
-                >Reset</button>
-              </div>
-            </div>
-          )}
-          {mode === 'scale' && (
-            <div style={{ display:'flex', gap:12, alignItems:'center' }}>
-              <Rail length={160} onChange={(v) => { scaleDeltaRef.current = v }} label="Scale velocity" />
-              <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'center' }}>
-                <div style={{ fontSize:11, opacity:0.7 }}>Scale: {billboardScaleRef.current.toFixed(2)}×</div>
-                <div style={{ display:'flex', gap:6 }}>
-                  <button onClick={() => { billboardScaleRef.current = Math.max(0.35, billboardScaleRef.current - 0.1); lastUiInputRef.current = Date.now() }} style={btnMini}>-</button>
-                  <button onClick={() => { billboardScaleRef.current = Math.min(3.0, billboardScaleRef.current + 0.1); lastUiInputRef.current = Date.now() }} style={btnMini}>+</button>
-                </div>
-                <button onClick={() => { billboardScaleRef.current = 1; lastUiInputRef.current = Date.now() }} style={btnMini}>Reset</button>
-              </div>
-            </div>
-          )}
-          <div style={{ display:'flex', justifyContent:'space-between', gap:8 }}>
-            <button onClick={() => { // center in front
-              billboardPosRef.current.set(0, 2.95, 1.05)
-              billboardYawRef.current = 0
-              lastUiInputRef.current = Date.now()
-            }} style={btnMini}>Center</button>
-            <button onClick={() => {
-              setEditEnabled(false)
-              lastUiInputRef.current = 0
-            }} style={btnMini}>Done</button>
+            <button
+              onClick={() => { billboardPosRef.current.set(0, 2.95, 1.05) }}
+              style={btnMini}
+            >Center</button>
           </div>
         </div>
-      </div>
-    )
-  }
+      )}
+
+      {bbMode === 'rotate' && (
+        <div style={{ display:'flex', gap:12, alignItems:'center', flexWrap:'wrap' }}>
+          <Joystick label="Yaw" onChange={(nx, ny) => { rotateVecRef.current.x = nx; rotateVecRef.current.y = ny }} />
+          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+            <div style={{ fontSize:11, opacity:0.7 }}>Yaw: {(billboardYawRef.current * 57.2958).toFixed(1)}°</div>
+            <button onClick={() => { billboardYawRef.current = 0 }} style={btnMini}>Reset</button>
+          </div>
+        </div>
+      )}
+
+      {bbMode === 'scale' && (
+        <div style={{ display:'flex', gap:12, alignItems:'center', flexWrap:'wrap' }}>
+          <Rail length={160} label="Scale velocity" onChange={(v) => { scaleDeltaRef.current = v }} />
+          <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'center' }}>
+            <div style={{ fontSize:11, opacity:0.7 }}>Scale: {billboardScaleRef.current.toFixed(2)}×</div>
+            <div style={{ display:'flex', gap:6 }}>
+              <button onClick={() => { billboardScaleRef.current = Math.max(0.35, billboardScaleRef.current - 0.1) }} style={btnMini}>-</button>
+              <button onClick={() => { billboardScaleRef.current = Math.min(3.0, billboardScaleRef.current + 0.1) }} style={btnMini}>+</button>
+            </div>
+            <button onClick={() => { billboardScaleRef.current = 1 }} style={btnMini}>Reset</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 
   return (
     <div data-visual="wireframe3d" style={{ position: 'relative', width: '100%', height: '100%' }}>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} aria-label="Wireframe House 3D" />
-      {/* Floating toggle button for billboard edit mode */}
-      <div style={{ position:'absolute', left:12, bottom:12, zIndex:11, pointerEvents:'auto' }}>
-        {!uiShown && (
-          <button
-            onClick={() => { setEditEnabled(e => !e); lastUiInputRef.current = Date.now() }}
-            title="Edit billboard"
-            style={{
-              padding:'8px 10px', fontSize:12, borderRadius:20, border:'1px solid #2b2f3a',
-              background:'rgba(16,18,22,0.85)', color:'#cfe7ff', cursor:'pointer', opacity:0.9
-            }}
-          >
-            {editEnabled ? 'Hide Controls' : 'Edit Billboard'}
-          </button>
-        )}
-      </div>
-      {editEnabled && <Controller />}
-
-      <Wire3DPanel open={panelOpen} cfg={cfg} onToggle={() => setPanelOpen(o => !o)} onChange={setCfg} />
+      <Wire3DPanel
+        open={panelOpen}
+        cfg={cfg}
+        onToggle={() => setPanelOpen(o => !o)}
+        onChange={setCfg}
+        extra={<BillboardControllerCard />}
+      />
     </div>
   )
 }
@@ -1253,8 +1145,9 @@ function Wire3DPanel(props: {
   cfg: LocalCfg
   onToggle: () => void
   onChange: (updater: (prev: LocalCfg) => LocalCfg | LocalCfg) => void
+  extra?: React.ReactNode // billboard controls go here
 }) {
-  const { open, cfg, onToggle, onChange } = props
+  const { open, cfg, onToggle, onChange, extra } = props
   const Row = (p: { label: string, children: React.ReactNode }) => (
     <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, margin:'6px 0' }}>
       <label style={{ fontSize:12, opacity:0.9 }}>{p.label}</label>
@@ -1315,6 +1208,8 @@ function Wire3DPanel(props: {
             <Row label="Starfield"><input type="checkbox" checked={cfg.fx.starfield} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, starfield: e.target.checked } }))}/></Row>
             <Row label="Lyrics marquee"><input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, lyricsMarquee: e.target.checked } }))}/></Row>
           </Card>
+
+          {extra}
 
           <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
             <button onClick={() => onChange(defaults())} style={btnStyle}>Reset</button>

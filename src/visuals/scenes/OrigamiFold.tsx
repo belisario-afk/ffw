@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { createRenderer, createComposer } from '../../three/Renderer'
 import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
@@ -8,6 +8,8 @@ type Props = {
   quality: { renderScale: 1 | 1.25 | 1.5 | 1.75 | 2; bloom: boolean }
   accessibility: { epilepsySafe: boolean; reducedMotion: boolean; highContrast: boolean }
 }
+
+type PatternName = 'Quad Base' | 'Fox Head' | 'Crane Simple'
 
 type Cfg = {
   exposure: number
@@ -22,9 +24,10 @@ type Cfg = {
   foldPause: number
   tileIntensity: number
   backsideDarken: number
+  pattern: PatternName
 }
 
-const LS_KEY = 'ffw.origami.v1'
+const LS_KEY = 'ffw.origami.v2'
 const DEFAULT_CFG: Cfg = {
   exposure: 1.06,
   saturation: 1.08,
@@ -36,11 +39,12 @@ const DEFAULT_CFG: Cfg = {
   autoPlay: true,
   foldSpeed: 0.9,
   foldPause: 0.7,
-  tileIntensity: 0.35,
-  backsideDarken: 0.22
+  tileIntensity: 0.2,
+  backsideDarken: 0.22,
+  pattern: 'Fox Head'
 }
 
-// Live-uniform setters bound to the material; no caching.
+// Uniform safety helpers
 function makeUniformSetters(matRef: React.MutableRefObject<THREE.ShaderMaterial | null>) {
   const getTable = () => {
     const m = matRef.current
@@ -71,6 +75,130 @@ function makeUniformSetters(matRef: React.MutableRefObject<THREE.ShaderMaterial 
   return { setF, setV3, setColor, setTex }
 }
 
+// Crease system (CPU)
+type Crease = {
+  id: string
+  // crease line: point p (in plane), unit dir d (in plane)
+  p: THREE.Vector2
+  d: THREE.Vector2
+  // which side folds (1 means side where perp·(pos-p) > 0; -1 the other side)
+  side: 1 | -1
+  // target angle in radians (positive rotates following right-hand rule around axis (d.x, d.y, 0))
+  angle: number
+}
+type FoldStep = { creaseId: string; duration: number; pauseAfter: number }
+
+type Pattern = {
+  name: PatternName
+  // square extent (half-size)
+  half: number
+  creases: Crease[]
+  sequence: FoldStep[]
+}
+
+// Helpers
+const PI = Math.PI
+const DEG = (a: number) => (a * PI) / 180
+
+// Prebaked patterns (approximate silhouettes)
+function makePatterns(): Pattern[] {
+  const half = 0.7 // sheet half-size (plane is 1.4)
+  const p: Pattern[] = []
+
+  // Quad base (fold right -> top -> diag)
+  p.push({
+    name: 'Quad Base',
+    half,
+    creases: [
+      // vertical hinge x=0 (fold right half over)
+      { id: 'vert', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(0, 1), side: 1, angle: PI },
+      // horizontal hinge y=0 (fold top half down)
+      { id: 'horiz', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(1, 0), side: 1, angle: PI },
+      // diagonal hinge x+y=0 (fold upper-right)
+      {
+        id: 'diag',
+        p: new THREE.Vector2(0, 0),
+        d: new THREE.Vector2(1, 1).normalize(),
+        side: 1,
+        angle: PI
+      }
+    ],
+    sequence: [
+      { creaseId: 'vert', duration: 1.2, pauseAfter: 0.25 },
+      { creaseId: 'horiz', duration: 1.0, pauseAfter: 0.25 },
+      { creaseId: 'diag', duration: 1.0, pauseAfter: 0.6 }
+    ]
+  })
+
+  // Fox head (ears + snout). Few folds, strong silhouette.
+  p.push({
+    name: 'Fox Head',
+    half,
+    creases: [
+      // Fold to triangle: valley along y = x, move side x>y
+      { id: 'tri', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(1, 1).normalize(), side: 1, angle: PI },
+      // Ears: fold two small side triangles back/out (mountain-ish ~60°)
+      // left ear hinge: nearly vertical line near x=-half*0.35
+      { id: 'earL', p: new THREE.Vector2(-half * 0.35, 0), d: new THREE.Vector2(0, 1), side: -1, angle: DEG(130) },
+      // right ear hinge: near x=+half*0.35
+      { id: 'earR', p: new THREE.Vector2(half * 0.35, 0), d: new THREE.Vector2(0, 1), side: 1, angle: DEG(130) },
+      // Snout pinch: a small fold along y = -half*0.2, horizontal, fold top down 40°
+      { id: 'snout', p: new THREE.Vector2(0, -half * 0.2), d: new THREE.Vector2(1, 0), side: 1, angle: DEG(40) }
+    ],
+    sequence: [
+      { creaseId: 'tri', duration: 1.2, pauseAfter: 0.2 },
+      { creaseId: 'earL', duration: 0.9, pauseAfter: 0.1 },
+      { creaseId: 'earR', duration: 0.9, pauseAfter: 0.3 },
+      { creaseId: 'snout', duration: 0.8, pauseAfter: 0.7 }
+    ]
+  })
+
+  // Crane simple (approx bird base feel).
+  p.push({
+    name: 'Crane Simple',
+    half,
+    creases: [
+      // Pre-fold to square base:
+      { id: 'diag1', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(1, 1).normalize(), side: 1, angle: PI },
+      { id: 'diag2', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(1, -1).normalize(), side: 1, angle: PI },
+      // Open sink (approx): fold bottom triangle up 150°
+      { id: 'sink', p: new THREE.Vector2(0, -half * 0.15), d: new THREE.Vector2(1, 0), side: 1, angle: DEG(150) },
+      // Wings: fold left and right out (mountain) ~110°
+      { id: 'wingL', p: new THREE.Vector2(-half * 0.25, 0), d: new THREE.Vector2(0, 1), side: -1, angle: DEG(110) },
+      { id: 'wingR', p: new THREE.Vector2(half * 0.25, 0), d: new THREE.Vector2(0, 1), side: 1, angle: DEG(110) },
+      // Tail tip: small fold near top to sharpen
+      { id: 'tail', p: new THREE.Vector2(0, half * 0.35), d: new THREE.Vector2(1, 0), side: -1, angle: DEG(60) }
+    ],
+    sequence: [
+      { creaseId: 'diag1', duration: 0.9, pauseAfter: 0.1 },
+      { creaseId: 'diag2', duration: 0.9, pauseAfter: 0.25 },
+      { creaseId: 'sink', duration: 1.2, pauseAfter: 0.25 },
+      { creaseId: 'wingL', duration: 0.9, pauseAfter: 0.05 },
+      { creaseId: 'wingR', duration: 0.9, pauseAfter: 0.45 },
+      { creaseId: 'tail', duration: 0.7, pauseAfter: 0.8 }
+    ]
+  })
+
+  return p
+}
+
+// Math: rotate a point around a 3D line (point q on line, axis unit dir a)
+function rotateAroundLine(out: THREE.Vector3, p: THREE.Vector3, q: THREE.Vector3, a: THREE.Vector3, ang: number) {
+  // Rodrigues with translation to line frame
+  const d = out.subVectors(p, q)
+  const c = Math.cos(ang), s = Math.sin(ang)
+  const cross = new THREE.Vector3().crossVectors(a, d).multiplyScalar(s)
+  const dotp = a.dot(d)
+  const par = new THREE.Vector3().copy(a).multiplyScalar(dotp * (1 - c))
+  out.copy(d).multiplyScalar(c).add(cross).add(par).add(q)
+}
+
+// Classify side of a 2D line: sign(perp(d) · (x - p))
+function sideOfLine2D(pos: THREE.Vector2, p: THREE.Vector2, d: THREE.Vector2): number {
+  const perp = new THREE.Vector2(-d.y, d.x) // rotate 90°
+  return Math.sign(perp.dot(new THREE.Vector2().subVectors(pos, p))) || 0
+}
+
 export default function OrigamiFold({ quality, accessibility }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -96,6 +224,10 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
     catch { return { ...DEFAULT_CFG } }
   })
   useEffect(() => { try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)) } catch {} }, [cfg])
+
+  // Patterns memo
+  const patterns = useMemo(() => makePatterns(), [])
+  const pattern = useMemo(() => patterns.find(p => p.name === cfg.pattern) || patterns[0], [patterns, cfg.pattern])
 
   // HUD auto-hide near top-middle
   useEffect(() => {
@@ -220,100 +352,68 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
       albC3.current.copy(picks[2] || albC2.current)
     }
 
-    // Geometry: a square sheet of "paper" (plane) to fold
-    const segs = 80
-    const plane = new THREE.PlaneGeometry(1.4, 1.4, segs, segs) // centered at 0
+    // Geometry (plane) and CPU folding buffers
+    const segs = 90
+    const size = pattern.half * 2
+    const plane = new THREE.PlaneGeometry(size, size, segs, segs)
+    plane.rotateX(0) // keep in XY plane
+    plane.computeVertexNormals()
+
+    // CPU fold buffers
+    const posAttr = plane.getAttribute('position') as THREE.BufferAttribute
+    const nrmAttr = plane.getAttribute('normal') as THREE.BufferAttribute
+    const uvAttr = plane.getAttribute('uv') as THREE.BufferAttribute
+    const vertexCount = posAttr.count
+
+    // Original positions/normals (copy for reset each frame)
+    const pos0 = new Float32Array(posAttr.array as ArrayLike<number>)
+    const nrm0 = new Float32Array(nrmAttr.array as ArrayLike<number>)
+
+    // Precompute side-masks per crease for original 2D coords
+    const masks: Record<string, Uint8Array> = {}
+    for (const cDef of pattern.creases) {
+      const m = new Uint8Array(vertexCount)
+      for (let i = 0; i < vertexCount; i++) {
+        const x = pos0[i * 3 + 0], y = pos0[i * 3 + 1]
+        const side = sideOfLine2D(new THREE.Vector2(x, y), cDef.p, cDef.d)
+        const ok = cDef.side === 1 ? side > 0 : side < 0
+        m[i] = ok ? 1 : 0
+      }
+      masks[cDef.id] = m
+    }
+
+    // Shader (fragment does fresnel/palette; vertex just passes through)
     const uniforms: Record<string, { value: any }> = {
-      uTime: { value: 0 },
-      uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
-      uBeat: { value: 0 },
-      uLoud: { value: 0.1 },
-
       tAlbum: { value: null },
-
       uC0: { value: albAvg.current.clone() },
       uC1: { value: albC1.current.clone() },
       uC2: { value: albC2.current.clone() },
       uC3: { value: albC3.current.clone() },
-
       uExposure: { value: cfg.exposure },
       uSaturation: { value: cfg.saturation },
       uGamma: { value: cfg.gamma },
       uVignette: { value: cfg.vignette },
-
-      // fold progress [0..1]
-      uFold1: { value: 0 },
-      uFold2: { value: 0 },
-      uFold3: { value: 0 },
-      // tiling mix
-      uTileMix: { value: 0 },
-      uTileIntensity: { value: cfg.tileIntensity },
-
-      // shading
       uFresnel: { value: cfg.fresnelStrength },
       uEdgeTint: { value: cfg.edgeTintStrength },
       uGloss: { value: cfg.paperGloss },
       uBackDark: { value: cfg.backsideDarken },
-
-      uSafe: { value: (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0 },
-      uContrastBoost: { value: accessibility.highContrast ? 1.0 : 0.0 }
+      uTileMix: { value: 0.0 },
+      uTileIntensity: { value: cfg.tileIntensity },
+      uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
+      uSafe: { value: (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0 }
     }
 
     const mat = new THREE.ShaderMaterial({
       uniforms,
       side: THREE.DoubleSide,
-      transparent: false,
-      depthWrite: true,
       vertexShader: `
-        precision highp float;
         varying vec2 vUv;
         varying vec3 vNormal;
         varying vec3 vWorldPos;
-
-        uniform float uFold1;
-        uniform float uFold2;
-        uniform float uFold3;
-
-        vec3 rotateVec(vec3 v, vec3 axis, float ang){
-          float c = cos(ang), s = sin(ang);
-          return v*c + cross(axis, v)*s + axis*dot(axis, v)*(1.0 - c);
-        }
-        vec3 rotateAroundLine(vec3 p, vec3 axis, vec3 q, float ang){
-          vec3 d = p - q;
-          d = rotateVec(d, axis, ang);
-          return q + d;
-        }
-
-        void main(){
+        void main() {
           vUv = uv;
-          vec3 pos = position;
-          vec3 nrm = normal;
-
-          if (pos.x > 0.0){
-            float ang1 = 3.14159265 * uFold1;
-            vec3 axis1 = vec3(0.0, 1.0, 0.0);
-            vec3 q1 = vec3(0.0, pos.y, 0.0);
-            pos = rotateAroundLine(pos, axis1, q1, ang1);
-            nrm = rotateVec(nrm, axis1, ang1);
-          }
-          if (pos.y > 0.0){
-            float ang2 = 3.14159265 * uFold2;
-            vec3 axis2 = vec3(1.0, 0.0, 0.0);
-            vec3 q2 = vec3(pos.x, 0.0, 0.0);
-            pos = rotateAroundLine(pos, axis2, q2, ang2);
-            nrm = rotateVec(nrm, axis2, ang2);
-          }
-          if (pos.x + pos.y > 0.0){
-            float ang3 = 3.14159265 * uFold3;
-            vec3 axis3 = normalize(vec3(1.0, 1.0, 0.0));
-            float t = dot(pos, axis3);
-            vec3 q3 = axis3 * t;
-            pos = rotateAroundLine(pos, axis3, q3, ang3);
-            nrm = rotateVec(nrm, axis3, ang3);
-          }
-
-          vNormal = normalize(nrm);
-          vec4 wp = modelMatrix * vec4(pos, 1.0);
+          vNormal = normalize(normalMatrix * normal);
+          vec4 wp = modelMatrix * vec4(position,1.0);
           vWorldPos = wp.xyz;
           gl_Position = projectionMatrix * viewMatrix * wp;
         }
@@ -323,63 +423,48 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
         varying vec2 vUv;
         varying vec3 vNormal;
         varying vec3 vWorldPos;
-
         uniform sampler2D tAlbum;
-
         uniform vec3 uC0, uC1, uC2, uC3;
         uniform float uExposure, uSaturation, uGamma, uVignette;
-
         uniform float uFresnel, uEdgeTint, uGloss, uBackDark;
         uniform float uTileMix, uTileIntensity;
-
-        uniform vec3 uAudio; // low, mid, high
+        uniform vec3 uAudio;
         uniform float uSafe;
 
         vec3 sat(vec3 c, float s){ float l=dot(c, vec3(0.299,0.587,0.114)); return mix(vec3(l), c, s); }
 
         void main(){
-          // Base UV (album cover)
-          vec2 uv = vUv * 0.98 + 0.01; // slight inset to avoid border sampling
+          vec2 uv = vUv * 0.98 + 0.01;
           vec3 texCol = texture2D(tAlbum, uv).rgb;
-
-          // Optional tiling mix (unfold into mosaic)
           vec2 tuv = fract(vUv * (1.0 + uTileMix * 6.0));
           vec3 tileCol = texture2D(tAlbum, tuv).rgb;
           texCol = mix(texCol, tileCol, clamp(uTileMix * uTileIntensity, 0.0, 1.0));
 
-          // Backside darken/tint
           if (!gl_FrontFacing) {
             texCol = mix(texCol * (1.0 - uBackDark), texCol * uC0, 0.25);
           }
 
-          // Lighting proxies
           vec3 N = normalize(vNormal);
           vec3 V = normalize(cameraPosition - vWorldPos);
           float NdotV = clamp(dot(N, V), 0.0, 1.0);
 
-          // Fresnel shimmer (highs boost, safe caps)
           float fres = pow(1.0 - NdotV, 3.0);
           float highs = uAudio.z;
           float fresAmt = mix(uFresnel, min(uFresnel, 0.22), uSafe) + highs * 0.25;
           vec3 fresCol = mix(uC2, uC3, 0.5 + 0.4*sin(highs*6.0));
           vec3 shimmer = fresCol * fres * fresAmt;
 
-          // Edge tint (rim + slight paper-gloss)
           float rim = pow(1.0 - NdotV, 1.6);
           float gloss = pow(NdotV, 32.0) * uGloss;
           vec3 edgeCol = mix(uC1, uC2, 0.5 + 0.3*sin(highs*8.0));
           vec3 edge = edgeCol * (rim * uEdgeTint + gloss * 0.6);
 
-          vec3 col = texCol;
-          col += shimmer;
+          vec3 col = texCol + shimmer;
           col = mix(col, col + edge, 0.6);
-
-          // Color finishing
           col = sat(col, mix(uSaturation, 1.0, uSafe*0.3));
           col *= uExposure;
-          col = col / (1.0 + col); // simple tonemap
+          col = col / (1.0 + col);
           col = pow(clamp(col, 0.0, 1.0), vec3(uGamma));
-
           gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
         }
       `
@@ -392,38 +477,57 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
     // Resize
     const onResize = () => {
       if (disposedRef.current) return
-      const size = renderer.getSize(new THREE.Vector2())
-      camera.aspect = size.x / Math.max(1, size.y)
+      const sizeV = renderer.getSize(new THREE.Vector2())
+      camera.aspect = sizeV.x / Math.max(1, sizeV.y)
       camera.updateProjectionMatrix()
       comp.onResize()
     }
     window.addEventListener('resize', onResize)
     onResize()
 
-    // Initial album
+    // Album
     loadAlbum()
     const albumIv = window.setInterval(loadAlbum, 8000)
 
-    // Animation timeline
-    type Phase = 'fold1' | 'pause1' | 'fold2' | 'pause2' | 'fold3' | 'pause3' | 'unfold' | 'tile' | 'rest'
-    let phase: Phase = 'fold1'
-    let phaseT = 0 // seconds in current phase
+    // Fold timeline state
+    type PhaseState = { idx: number; tIn: number } // current step index and time into it
+    let ph: PhaseState = { idx: 0, tIn: 0 }
 
-    const nextPhase = () => {
-      phaseT = 0
-      switch (phase) {
-        case 'fold1': phase = 'pause1'; break
-        case 'pause1': phase = 'fold2'; break
-        case 'fold2': phase = 'pause2'; break
-        case 'pause2': phase = 'fold3'; break
-        case 'fold3': phase = 'pause3'; break
-        case 'pause3': phase = 'tile'; break
-        case 'tile': phase = 'unfold'; break
-        case 'unfold': phase = 'rest'; break
-        case 'rest': phase = 'fold1'; break
+    // Helpers for fold application
+    const vTmp = new THREE.Vector3()
+    const q = new THREE.Vector3()
+    const a3 = new THREE.Vector3()
+    const p3 = new THREE.Vector3()
+
+    function resetToFlat() {
+      // copy pos0/nrm0 back
+      ;(posAttr.array as Float32Array).set(pos0)
+      ;(nrmAttr.array as Float32Array).set(nrm0)
+    }
+
+    function applyFold(crease: Crease, angle: number) {
+      // rotate vertices on selected side by angle around line (p,d) in 3D
+      q.set(crease.p.x, crease.p.y, 0)
+      a3.set(crease.d.x, crease.d.y, 0).normalize()
+      const mask = masks[crease.id]
+      const arr = posAttr.array as Float32Array
+      const nrm = nrmAttr.array as Float32Array
+      for (let i = 0; i < vertexCount; i++) {
+        if (!mask[i]) continue
+        const ix = i * 3
+        // position
+        p3.set(arr[ix], arr[ix + 1], arr[ix + 2])
+        rotateAroundLine(vTmp, p3, q, a3, angle)
+        arr[ix] = vTmp.x; arr[ix + 1] = vTmp.y; arr[ix + 2] = vTmp.z
+        // normal: start from current (already transformed by earlier steps)
+        p3.set(nrm[ix], nrm[ix + 1], nrm[ix + 2])
+        // normals rotate the same way (around the same axis/anchor; anchor irrelevant for vectors, but using q yields correct Rodrigues)
+        rotateAroundLine(vTmp, p3, new THREE.Vector3(0,0,0), a3, angle)
+        nrm[ix] = vTmp.x; nrm[ix + 1] = vTmp.y; nrm[ix + 2] = vTmp.z
       }
     }
 
+    // Animate
     const clock = new THREE.Clock()
     let raf = 0
 
@@ -432,10 +536,6 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
       if (disposedRef.current || !matRef.current) return
 
       const dt = Math.min(0.05, clock.getDelta())
-      const t = clock.elapsedTime
-      phaseT += dt
-
-      // Use the latest frame captured via reactivityBus.on
       const low = latest?.bands?.low ?? 0.06
       const mid = latest?.bands?.mid ?? 0.06
       const high = latest?.bands?.high ?? 0.06
@@ -443,14 +543,8 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
       const beat = latest?.beat ? 1.0 : 0.0
 
       const safe = (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0
-      const setters = makeUniformSetters(matRef)
-      setters.setF('uTime', t)
       setters.setV3('uAudio', low, mid, high)
-      setters.setF('uBeat', beat)
-      setters.setF('uLoud', loud)
       setters.setF('uSafe', safe)
-
-      // Settings to uniforms
       setters.setF('uExposure', cfg.exposure)
       setters.setF('uSaturation', cfg.saturation)
       setters.setF('uGamma', cfg.gamma)
@@ -461,68 +555,68 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
       setters.setF('uBackDark', cfg.backsideDarken)
       setters.setF('uTileIntensity', cfg.tileIntensity)
 
-      // Auto timeline
-      let fold1 = (matRef.current.uniforms.uFold1.value as number) || 0
-      let fold2 = (matRef.current.uniforms.uFold2.value as number) || 0
-      let fold3 = (matRef.current.uniforms.uFold3.value as number) || 0
-      let tileMix = (matRef.current.uniforms.uTileMix.value as number) || 0
+      // drive tile mix subtly with mid after full fold cycle
+      const loopDone = ph.idx >= pattern.sequence.length
+      const desiredTile = loopDone ? 1.0 : 0.0
+      const uTile = (matRef.current.uniforms.uTileMix.value as number) || 0
+      const k = 1 - Math.pow(0.03, dt)
+      setters.setF('uTileMix', THREE.MathUtils.lerp(uTile, desiredTile * (0.2 + 0.4 * (mid + high)), k))
 
-      const speed = THREE.MathUtils.lerp(cfg.foldSpeed, Math.min(cfg.foldSpeed, 0.5), safe)
-      const pause = cfg.foldPause
-      const beatSnap = beat > 0.5 ? 0.12 : 0.0 // small snap on beat
+      // Fold simulation
+      resetToFlat()
 
       if (cfg.autoPlay) {
-        switch (phase) {
-          case 'fold1':
-            fold1 = Math.min(1, fold1 + dt * (speed * (1.0 + low*1.2) + beatSnap))
-            if (fold1 >= 1 && phaseT > 0.2) nextPhase()
+        // iterate through steps, applying full angles for completed ones and partial for current
+        const spd = THREE.MathUtils.lerp(cfg.foldSpeed, Math.min(cfg.foldSpeed, 0.6), safe)
+        ph.tIn += dt * (spd * (1.0 + low * 0.5) + (beat > 0.5 ? 0.15 : 0.0))
+
+        let accIdx = 0
+        for (; accIdx < pattern.sequence.length; accIdx++) {
+          const step = pattern.sequence[accIdx]
+          if (accIdx < ph.idx) {
+            // fully applied
+            const crease = pattern.creases.find(c => c.id === step.creaseId)!
+            applyFold(crease, crease.angle)
+            continue
+          }
+          if (accIdx === ph.idx) {
+            const crease = pattern.creases.find(c => c.id === step.creaseId)!
+            const t01 = Math.min(1, ph.tIn / Math.max(0.0001, step.duration))
+            const eased = t01 * t01 * (3 - 2 * t01) // smoothstep ease
+            applyFold(crease, crease.angle * eased)
+            // not done yet: break to avoid applying following steps
             break
-          case 'pause1':
-            if (phaseT > pause) nextPhase()
-            break
-          case 'fold2':
-            fold2 = Math.min(1, fold2 + dt * (speed * (1.0 + low) + beatSnap))
-            if (fold2 >= 1 && phaseT > 0.2) nextPhase()
-            break
-          case 'pause2':
-            if (phaseT > pause) nextPhase()
-            break
-          case 'fold3':
-            fold3 = Math.min(1, fold3 + dt * (speed * (1.0 + low) + beatSnap))
-            if (fold3 >= 1 && phaseT > 0.3) nextPhase()
-            break
-          case 'pause3':
-            if (phaseT > Math.max(0.3, pause*0.7)) nextPhase()
-            break
-          case 'tile':
-            tileMix = Math.min(1, tileMix + dt * 0.35)
-            if (tileMix >= 1 && phaseT > 1.2) nextPhase()
-            break
-          case 'unfold':
-            // reverse folds
-            fold3 = Math.max(0, fold3 - dt * speed)
-            if (fold3 <= 0) fold2 = Math.max(0, fold2 - dt * speed * 1.1)
-            if (fold2 <= 0 && fold3 <= 0) fold1 = Math.max(0, fold1 - dt * speed * 1.15)
-            tileMix = Math.max(0, tileMix - dt * 0.45)
-            if (fold1 <= 0 && fold2 <= 0 && fold3 <= 0 && tileMix <= 0 && phaseT > 0.5) nextPhase()
-            break
-          case 'rest':
-            if (phaseT > 0.8 + pause) nextPhase()
-            break
+          }
+        }
+
+        // step progression
+        const cur = pattern.sequence[ph.idx]
+        if (cur && ph.tIn >= cur.duration) {
+          // wait pause, then advance
+          const over = ph.tIn - cur.duration
+          if (over >= cur.pauseAfter) {
+            ph.idx++
+            ph.tIn = 0
+          }
+        }
+        // loop
+        if (ph.idx >= pattern.sequence.length && ph.tIn > 2.5) {
+          ph = { idx: 0, tIn: 0 }
         }
       } else {
-        // React-only: gentle fold pulsing with bass
-        const react = low * 0.65
-        fold1 = THREE.MathUtils.lerp(fold1, react, 1 - Math.pow(0.001, dt))
-        fold2 = THREE.MathUtils.lerp(fold2, react * 0.8, 1 - Math.pow(0.001, dt))
-        fold3 = THREE.MathUtils.lerp(fold3, react * 0.6, 1 - Math.pow(0.001, dt))
-        tileMix = THREE.MathUtils.lerp(tileMix, 0.0, 1 - Math.pow(0.01, dt))
+        // reactive breathing
+        const react = Math.min(1, low * 0.9 + mid * 0.3)
+        // apply partial of first 2 steps to keep a shape
+        for (let i = 0; i < Math.min(2, pattern.sequence.length); i++) {
+          const step = pattern.sequence[i]
+          const crease = pattern.creases.find(c => c.id === step.creaseId)!
+          const factor = i === 0 ? react : react * 0.7
+          applyFold(crease, crease.angle * factor)
+        }
       }
 
-      setters.setF('uFold1', fold1)
-      setters.setF('uFold2', fold2)
-      setters.setF('uFold3', fold3)
-      setters.setF('uTileMix', tileMix)
+      posAttr.needsUpdate = true
+      nrmAttr.needsUpdate = true
 
       comp.composer.render()
     }
@@ -548,7 +642,7 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
       renderer.dispose()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, accessibility.reducedMotion, accessibility.highContrast, cfg.vignette, cfg.exposure, cfg.saturation, cfg.gamma])
+  }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, accessibility.reducedMotion, accessibility.highContrast, cfg.vignette, cfg.exposure, cfg.saturation, cfg.gamma, cfg.pattern, cfg.tileIntensity])
 
   const requestPlayInBrowser = () => {
     window.dispatchEvent(new CustomEvent('ffw:play-in-browser'))
@@ -571,6 +665,15 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
         }}
         onMouseEnter={() => setHudVisible(true)}
       >
+        <select
+          value={cfg.pattern}
+          onChange={e => setCfg(c => ({ ...c, pattern: e.currentTarget.value as PatternName }))}
+          style={{ padding: '6px', borderRadius: 8, border: '1px solid #2b2f3a', background: '#0f1218', color: '#cfe7ff' }}
+        >
+          <option value="Fox Head">Fox Head</option>
+          <option value="Crane Simple">Crane (Simple)</option>
+          <option value="Quad Base">Quad Base</option>
+        </select>
         <button onClick={() => setPanelOpen(o => !o)} style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #2b2f3a', background: '#0f1218', color: '#cfe7ff', cursor: 'pointer' }}>
           {panelOpen ? 'Close Visual Settings' : 'Visual Settings'}
         </button>
@@ -582,7 +685,7 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} aria-label="Origami Fold Visual" />
 
       {panelOpen && (
-        <div style={{ position: 'absolute', top: 56, right: 12, zIndex: 11, width: 360, padding: 12, borderRadius: 8, border: '1px solid #2b2f3a', background: 'rgba(10,12,16,0.94)', color: '#e6f0ff', fontFamily: 'system-ui, sans-serif', fontSize: 12 }}>
+        <div style={{ position: 'absolute', top: 56, right: 12, zIndex: 11, width: 380, padding: 12, borderRadius: 8, border: '1px solid #2b2f3a', background: 'rgba(10,12,16,0.94)', color: '#e6f0ff', fontFamily: 'system-ui, sans-serif', fontSize: 12 }}>
           <Section title="Core">
             <Row label="Auto Play">
               <input type="checkbox" checked={cfg.autoPlay} onChange={e => setCfg({ ...cfg, autoPlay: e.currentTarget.checked })} />

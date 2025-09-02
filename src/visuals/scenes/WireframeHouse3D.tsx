@@ -62,7 +62,49 @@ type LocalCfg = {
 }
 
 const LS_KEY = 'ffw.wire3d.settings.v2'
-const BP_LS_KEY = 'ffw.aventador.blueprint.dataurl' // stores your uploaded blueprint as a data URL
+
+function defaults(initial?: any): LocalCfg {
+  return {
+    path: initial?.path ?? 'Circle',
+    orbitSpeed: initial?.orbitSpeed ?? 0.35,
+    orbitRadius: initial?.orbitRadius ?? 9.5,
+    orbitElev: initial?.orbitElev ?? 0.06,
+    camBob: initial?.camBob ?? 0.12,
+    lineWidthPx: initial?.lineWidthPx ?? 1.8,
+    camera: {
+      fov: clamp(initial?.camera?.fov ?? 50, 30, 85),
+      minDistance: clamp(initial?.camera?.minDistance ?? 5, 3, 30),
+      maxDistance: clamp(initial?.camera?.maxDistance ?? 16, 6, 100),
+      minPolarAngle: clamp(initial?.camera?.minPolarAngle ?? (Math.PI * 0.12), 0, Math.PI / 2),
+      maxPolarAngle: clamp(initial?.camera?.maxPolarAngle ?? (Math.PI * 0.85), Math.PI / 4, Math.PI),
+      enablePan: true,
+      enableZoom: true,
+      enableDamping: true,
+      dampingFactor: 0.1,
+      rotateSpeed: 0.6,
+      zoomSpeed: 0.7,
+      panSpeed: 0.6,
+      autoRotate: false,
+      autoRotateSpeed: 0.5,
+      autoPath: true,
+      target: { x: 0, y: 2.2, z: 0 }
+    },
+    cameraPresets: {
+      enabled: true,
+      strength: 0.7
+    },
+    fx: {
+      beams: false,
+      groundRings: false,
+      chimneySmoke: false,
+      starfield: false,
+      bloomBreath: false,
+      lyricsMarquee: true,
+      mosaicFloor: false,
+      wireCar: true
+    }
+  }
+}
 
 export default function WireframeHouse3D({ auth, quality, accessibility, settings }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -75,14 +117,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Blueprint UI state
-  const [bpStatus, setBpStatus] = useState<'none'|'loading'|'loaded'|'fallback'|'error'>(() => {
-    return localStorage.getItem(BP_LS_KEY) ? 'loaded' : 'none'
-  })
-  const [bpPreview, setBpPreview] = useState<string | null>(() => localStorage.getItem(BP_LS_KEY) || null)
-  const carApiRef = useRef<{ setImageSrc: (src: string) => Promise<void>, clear: () => void } | null>(null)
-
-  // Billboard controller UI state (in Settings panel)
+  // Billboard controller UI
   const [bbEditEnabled, setBbEditEnabled] = useState(false)
   const [bbMode, setBbMode] = useState<'move'|'rotate'|'scale'>('move')
   const [bbPlane, setBbPlane] = useState<'XZ'|'XY'>('XZ')
@@ -93,7 +128,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   useEffect(() => { bbModeRef.current = bbMode }, [bbMode])
   useEffect(() => { bbPlaneRef.current = bbPlane }, [bbPlane])
 
-  // Billboard transforms (controlled by UI)
+  // Billboard transforms
   const moveVecRef = useRef<{x:number,y:number}>({ x: 0, y: 0 })
   const moveAxis3Ref = useRef<number>(0)
   const rotateVecRef = useRef<{x:number,y:number}>({ x: 0, y: 0 })
@@ -178,7 +213,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       for (let i = 0; i < data.length; i += 4) { r += data[i]; gr += data[i+1]; b += data[i+2] }
       const n = data.length / 4
       const col = new THREE.Color(r/(255*n), gr/(255*n), b/(255*n))
-      // Boost if too dark
       const luminance = 0.2126*col.r + 0.7152*col.g + 0.0722*col.b
       if (luminance < 0.35) col.multiplyScalar(1.25).clampScalar(0,1)
       return col
@@ -230,7 +264,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       motionBlur: false
     })
 
-    // Controls (never add to scene)
+    // Controls
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
@@ -288,7 +322,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     const floorPlaceholder = createDarkPlaceholderTexture()
     floorMat.uniforms.tAlbum.value = floorPlaceholder
 
-    // Mosaic (safe)
+    // Mosaic
     const mosaicGroup = new THREE.Group()
     const tiles: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
     const tileN = 8
@@ -403,7 +437,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       return mat
     })()
 
-    // Lyrics marquee (fallback/secondary)
+    // Lyrics marquee (secondary)
     let marqueeMat: THREE.ShaderMaterial | null = null
     let marqueeTex: THREE.Texture | null = null
     let marqueeText = ''
@@ -505,7 +539,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
 
           mosaicGroup.visible = !!cfgRef.current.fx.mosaicFloor
-          if (!mosaicGroup.visible) { /* floor visible */ }
         } else {
           mosaicGroup.visible = false
         }
@@ -538,19 +571,15 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     const albumIv = window.setInterval(loadAlbumCoverAndLyrics, 5000)
     const pbIv = window.setInterval(syncPlaybackClock, 2000)
 
-    // Reactivity (for color breathing only)
+    // Reactivity
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Blueprint Aventador wireframe (no drift/underglow)
-    const car = createBlueprintAventador({ dims: { L: 4.6, W: 2.04, H: 1.14 }, linePx: 1.35 }, renderer, (st) => setBpStatus(st))
-    car.group.visible = !!cfgRef.current.fx.wireCar
-    car.group.position.y = 0.055
-    scene.add(car.group)
-    carApiRef.current = { setImageSrc: car.setImageSrc, clear: car.clear }
-
-    // If user already uploaded a blueprint, load it
-    if (bpPreview) { car.setImageSrc(bpPreview).catch(() => {}) }
+    // Procedural Aventador wireframe (code-only, no physics/underglow)
+    const aventador = createAventadorWireframeModel({ dims: { L: 4.6, W: 2.04, H: 1.14 }, linePx: 1.35 }, renderer)
+    aventador.group.visible = !!cfgRef.current.fx.wireCar
+    aventador.group.position.y = 0.055
+    scene.add(aventador.group)
 
     // Resize
     const updateSizes = () => {
@@ -561,7 +590,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       comp.onResize()
       fatMat.resolution.set(draw.x, draw.y)
       setLinePixels(cfgRef.current.lineWidthPx)
-      car.setResolution(draw.x, draw.y)
+      aventador.setResolution(draw.x, draw.y)
     }
     window.addEventListener('resize', updateSizes)
     updateSizes()
@@ -582,7 +611,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const cfgC = cfgRef.current
       const high = latest?.bands.high ?? 0.08
 
-      // Live-apply FOV from slider
+      // Live-apply FOV
       if (camera.fov !== cfgC.camera.fov) {
         camera.fov = cfgC.camera.fov
         camera.updateProjectionMatrix()
@@ -601,7 +630,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.minPolarAngle = cfgC.camera.minPolarAngle
       controls.maxPolarAngle = cfgC.camera.maxPolarAngle
 
-      // Apply billboard controller (reads refs, no scene re-init)
+      // Apply billboard controller
       if (bbEditRef.current) {
         if (bbModeRef.current === 'move') {
           const mv = moveVecRef.current
@@ -639,7 +668,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(high * 0.2, 0, 0.2))
       fatMat.color.set(accent); thinMat.color.set(accent)
 
-      // update billboard colors to match palette
       billboard.setColors(
         accent.clone().multiplyScalar(0.9),
         accent2.clone().multiplyScalar(1.0),
@@ -648,10 +676,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       billboard.setVisible(!!cfgC.fx.lyricsMarquee)
 
       // Update car (album-adaptive color; slow figure-8 showcase)
-      car.group.visible = !!cfgC.fx.wireCar
-      if (car.group.visible) {
-        car.setColor(carColorRef.current)
-        car.update(dt, {
+      aventador.group.visible = !!cfgC.fx.wireCar
+      if (aventador.group.visible) {
+        aventador.setColor(carColorRef.current)
+        aventador.update(dt, {
           t,
           floorHalf: floorSize * 0.5 - 0.6
         })
@@ -705,7 +733,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         }
       }
 
-      // Animate billboard transitions and pop decay
+      // Animate billboard transitions
       billboard.update(dt)
 
       // camera autopilot + bob
@@ -753,7 +781,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       floorTex?.dispose()
       marqueeTex?.dispose?.()
       billboard.dispose()
-      car.dispose()
+      aventador.dispose()
       scene.traverse(obj => {
         const any = obj as any
         if (any.geometry?.dispose) any.geometry.dispose()
@@ -865,72 +893,264 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
     }
 
-    // Blueprint -> 3D wireframe (projected from side/front/top views)
-    function createBlueprintAventador(
-      opts: { dims: { L:number; W:number; H:number }, linePx: number },
-      renderer: THREE.WebGLRenderer,
-      onStatus: (s: 'none'|'loading'|'loaded'|'fallback'|'error') => void
-    ) {
+    // Procedural Aventador wireframe builder (inspired by your reference image)
+    function createAventadorWireframeModel(opts: { dims: { L:number; W:number; H:number }, linePx: number }, renderer: THREE.WebGLRenderer) {
       const group = new THREE.Group()
       group.renderOrder = 3
 
-      const carMat = new LineMaterial({ color: carColorRef.current.getHex(), transparent: true, opacity: 0.95, depthTest: true })
-      ;(carMat as any).worldUnits = false
-      const carGeo = new LineSegmentsGeometry()
-      const carLines = new LineSegments2(carGeo, carMat)
-      group.add(carLines)
+      // Single line material/geometry for everything (crisp pixels)
+      const mat = new LineMaterial({ color: carColorRef.current.getHex(), transparent: true, opacity: 0.98, depthTest: true })
+      ;(mat as any).worldUnits = false
+      const geo = new LineSegmentsGeometry()
+      const lines = new LineSegments2(geo, mat)
+      group.add(lines)
 
       const setResolution = (w: number, h: number) => {
-        carMat.resolution.set(w, h)
+        mat.resolution.set(w, h)
         const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-        carMat.linewidth = Math.max(0.001, opts.linePx / Math.max(1, draw.y))
-        carMat.needsUpdate = true
+        mat.linewidth = Math.max(0.001, opts.linePx / Math.max(1, draw.y))
+        mat.needsUpdate = true
       }
       {
         const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
         setResolution(draw.x, draw.y)
       }
 
-      function setColor(c: THREE.Color) { carMat.color.set(c) }
+      const pos: number[] = []
+      const { L, W, H } = opts.dims
+      const halfL = L / 2, halfW = W / 2
+      const yBase = 0.12
+      const yWheel = 0.28
+      const rWheel = 0.42
 
-      async function setImageSrc(src: string) {
-        if (!src) { clear(); return }
-        try {
-          onStatus('loading')
-          const img = await loadImage(src)
-          const positions = await buildFromBlueprint(img, opts.dims)
-          if (positions && positions.length > 0) {
-            carGeo.setPositions(positions)
-            onStatus('loaded')
-          } else {
-            fallback()
-            onStatus('fallback')
-          }
-        } catch (e) {
-          console.warn('Blueprint load/build failed:', e)
-          fallback()
-          onStatus('fallback')
+      // Helpers
+      const V = (x:number,y:number,z:number) => new THREE.Vector3(x,y,z)
+      const seg = (a:THREE.Vector3,b:THREE.Vector3) => { pos.push(a.x,a.y,a.z,b.x,b.y,b.z) }
+      const poly = (pts:THREE.Vector3[], closed=false) => {
+        for (let i=0;i<pts.length-1;i++) seg(pts[i], pts[i+1])
+        if (closed && pts.length>2) seg(pts[pts.length-1], pts[0])
+      }
+      const arcXZ = (cx:number, y:number, cz:number, rx:number, rz:number, a0:number, a1:number, steps:number) => {
+        const pts: THREE.Vector3[] = []
+        for (let i=0;i<=steps;i++){
+          const t = THREE.MathUtils.lerp(a0, a1, i/steps)
+          pts.push(V(cx + Math.cos(t)*rx, y, cz + Math.sin(t)*rz))
+        }
+        poly(pts)
+      }
+      const circleYZ = (cx:number, cy:number, cz:number, r:number, steps:number) => {
+        const pts: THREE.Vector3[] = []
+        for (let i=0;i<=steps;i++){
+          const t = (i/steps)*Math.PI*2
+          pts.push(V(cx, cy + Math.cos(t)*r, cz + Math.sin(t)*r))
+        }
+        poly(pts, true)
+      }
+      const spokesYZ = (cx:number, cy:number, cz:number, r:number, count:number) => {
+        for (let i=0;i<count;i++){
+          const t = (i/count)*Math.PI*2
+          const p = V(cx, cy + Math.cos(t)*r, cz + Math.sin(t)*r)
+          seg(V(cx, cy, cz), p)
         }
       }
+      const mirrorZ = (fn:(s:number)=>void) => { fn(1); fn(-1) }
 
-      function fallback() {
-        const p: number[] = []
-        const { L, W } = opts.dims
-        const y = 0
-        const pts = [
-          [-L/2, y, -W/2], [ L/2, y, -W/2],
-          [ L/2, y,  W/2], [-L/2, y,  W/2],
-          [-L/2, y, -W/2]
+      // Top outline (tapered nose, wide hips)
+      {
+        const yTop = 0.62
+        const nose = halfL
+        const tail = -halfL
+        const hips = halfW * 0.98
+        const waist = halfW * 0.72
+        const deck = halfW * 0.90
+
+        const outlineTop: THREE.Vector3[] = [
+          V( tail, yTop,  hips * 0.96 ),
+          V( tail+0.35, yTop,  deck ),
+          V( -0.10, yTop,  waist ),
+          V( 0.65, yTop,  waist*0.88 ),
+          V( nose*0.55, yTop,  waist*0.55 ),
+          V( nose*0.9, yTop,  waist*0.22 ),
+          V( nose, yTop,  0.0 ),
+          V( nose*0.9, yTop, -waist*0.22 ),
+          V( nose*0.55, yTop,-waist*0.55 ),
+          V( 0.65, yTop, -waist*0.88 ),
+          V( -0.10, yTop, -waist ),
+          V( tail+0.35, yTop, -deck ),
+          V( tail, yTop, -hips * 0.96 ),
         ]
-        for (let i=0;i<pts.length-1;i++) p.push(...pts[i], ...pts[i+1])
-        carGeo.setPositions(new Float32Array(p))
+        poly(outlineTop, true)
       }
 
-      function clear() {
-        onStatus('none')
-        fallback()
+      // Roof and windshield/A-pillar lines
+      {
+        const zA = halfW*0.62
+        poly([
+          V( halfL*0.38, 0.60,  zA),
+          V( halfL*0.05,  0.80,  zA*0.94),
+          V(-halfL*0.15,  0.82,  zA*0.88),
+          V(-halfL*0.40,  0.74,  zA*0.86),
+        ])
+        poly([
+          V( halfL*0.38, 0.60, -zA),
+          V( halfL*0.05,  0.80, -zA*0.94),
+          V(-halfL*0.15,  0.82, -zA*0.88),
+          V(-halfL*0.40,  0.74, -zA*0.86),
+        ])
+        // center roof rib
+        poly([
+          V( halfL*0.05, 0.80, 0),
+          V(-halfL*0.15,0.82, 0),
+          V(-halfL*0.40,0.74, 0),
+        ])
       }
 
+      // Side profile: sill, beltline, shoulder
+      mirrorZ((s)=> {
+        // Sill
+        poly([
+          V( halfL*0.90, yBase+0.06,  s*halfW*0.82 ),
+          V( halfL*0.35, yBase+0.10,  s*halfW*0.95 ),
+          V( 0.20,       yBase+0.14,  s*halfW*0.96 ),
+          V(-halfL*0.15, yBase+0.16,  s*halfW*0.88 ),
+          V(-halfL*0.45, yBase+0.18,  s*halfW*0.85 ),
+          V(-halfL*0.95, yBase+0.16,  s*halfW*0.80 ),
+        ])
+
+        // Beltline (door cut)
+        poly([
+          V( halfL*0.65, 0.44, s*halfW*0.72 ),
+          V( 0.20,       0.48, s*halfW*0.86 ),
+          V(-0.05,       0.50, s*halfW*0.82 ),
+          V(-halfL*0.40, 0.52, s*halfW*0.74 ),
+          V(-halfL*0.70, 0.50, s*halfW*0.70 ),
+        ])
+
+        // Shoulder/side intake edges
+        poly([
+          V( 0.15, 0.44, s*halfW*0.86 ),
+          V(-0.05, 0.54, s*halfW*0.96 ),
+          V(-0.25, 0.58, s*halfW*0.90 ),
+          V(-0.45, 0.56, s*halfW*0.82 ),
+        ])
+      })
+
+      // Front V nose and lower bumper geometry hints
+      {
+        const xF = halfL
+        const zIn = halfW*0.72, zOut = halfW*0.95
+        // Upper V
+        poly([
+          V(xF, 0.45, 0),
+          V(xF*0.80, 0.50,  zIn),
+        ])
+        poly([
+          V(xF, 0.45, 0),
+          V(xF*0.80, 0.50, -zIn),
+        ])
+        // Lower corner sweep
+        poly([
+          V(xF*0.92, 0.22,  zOut),
+          V(xF*0.70, 0.24,  zIn),
+          V(xF*0.55, 0.25,  zIn*0.85),
+        ])
+        poly([
+          V(xF*0.92, 0.22, -zOut),
+          V(xF*0.70, 0.24, -zIn),
+          V(xF*0.55, 0.25, -zIn*0.85),
+        ])
+      }
+
+      // Rear deck engine "X" brace
+      {
+        const x0 = -halfL*0.20, x1 = -halfL*0.62
+        const z0 = halfW*0.36
+        const y = 0.64
+        seg(V(x0, y,  z0), V(x1, y, -z0))
+        seg(V(x0, y, -z0), V(x1, y,  z0))
+        // Rear outline lip
+        poly([
+          V(-halfL*0.65, 0.62,  halfW*0.60),
+          V(-halfL*0.85, 0.60,  halfW*0.70),
+          V(-halfL,      0.58,  halfW*0.62),
+        ])
+        poly([
+          V(-halfL*0.65, 0.62, -halfW*0.60),
+          V(-halfL*0.85, 0.60, -halfW*0.70),
+          V(-halfL,      0.58, -halfW*0.62),
+        ])
+      }
+
+      // Spoiler (wing)
+      {
+        const y = 0.72
+        const span = halfW*1.10
+        poly([
+          V(-halfL*0.80, y,  span*0.80),
+          V(-halfL*0.55, y,  span),
+          V(-halfL*0.30, y,  span*0.80),
+        ])
+        poly([
+          V(-halfL*0.80, y, -span*0.80),
+          V(-halfL*0.55, y, -span),
+          V(-halfL*0.30, y, -span*0.80),
+        ])
+        seg(V(-halfL*0.55, y,  span), V(-halfL*0.55, y-0.16,  halfW*0.80))
+        seg(V(-halfL*0.55, y, -span), V(-halfL*0.55, y-0.16, -halfW*0.80))
+      }
+
+      // Wheel arches (elliptical arcs)
+      mirrorZ((s) => {
+        const zc = s*halfW*0.82
+        // Front arch
+        arcXZ( halfL*0.35, yWheel, zc, 0.50, 0.52, Math.PI*0.15, Math.PI*0.85, 18)
+        // Rear arch
+        arcXZ(-halfL*0.28, yWheel, zc, 0.56, 0.58, Math.PI*0.15, Math.PI*0.85, 18)
+      })
+
+      // Wheels: rim circle + spokes (in YZ plane)
+      mirrorZ((s) => {
+        const zc = s*halfW*0.82
+        const fcx = halfL*0.35
+        const rcx = -halfL*0.28
+        circleYZ(fcx, yWheel, zc, rWheel, 28)
+        circleYZ(rcx, yWheel, zc, rWheel, 28)
+        spokesYZ(fcx, yWheel, zc, rWheel*0.92, 10)
+        spokesYZ(rcx, yWheel, zc, rWheel*0.92, 10)
+        // small hub
+        circleYZ(fcx, yWheel, zc, rWheel*0.30, 16)
+        circleYZ(rcx, yWheel, zc, rWheel*0.30, 16)
+      })
+
+      // Door cut polygon hints
+      mirrorZ((s)=>{
+        poly([
+          V( 0.10, 0.46, s*halfW*0.88 ),
+          V(-0.05, 0.58, s*halfW*0.96 ),
+          V(-0.28, 0.60, s*halfW*0.88 ),
+          V(-0.18, 0.46, s*halfW*0.80 ),
+          V( 0.10, 0.46, s*halfW*0.88 ),
+        ])
+      })
+
+      // Hood creases
+      poly([
+        V( halfL*0.82, 0.50,  halfW*0.18 ),
+        V( halfL*0.35, 0.60,  halfW*0.10 ),
+        V( 0.10,       0.70,  0.06 ),
+      ])
+      poly([
+        V( halfL*0.82, 0.50, -halfW*0.18 ),
+        V( halfL*0.35, 0.60, -halfW*0.10 ),
+        V( 0.10,       0.70, -0.06 ),
+      ])
+
+      // Commit geometry
+      geo.setPositions(new Float32Array(pos))
+
+      function setColor(c: THREE.Color) { mat.color.set(c) }
+
+      // Showcase motion (gentle figure-8)
       const state = { t: 0 }
       function update(dt: number, env: { t: number; floorHalf: number }) {
         state.t += dt * 0.8
@@ -947,121 +1167,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
       function dispose() {
         group.removeFromParent()
-        carGeo.dispose()
-        ;(carMat as any).dispose?.()
+        geo.dispose()
+        ;(mat as any).dispose?.()
       }
 
-      return { group, setResolution, update, dispose, setColor, setImageSrc, clear }
+      return { group, setResolution, update, dispose, setColor }
     }
 
-    async function buildFromBlueprint(img: HTMLImageElement, dims: { L:number; W:number; H:number }): Promise<Float32Array> {
-      const iw = img.naturalWidth, ih = img.naturalHeight
-      const rowH = ih / 3
-
-      const regions = {
-        side: { x: 0, y: 0, w: iw, h: rowH },
-        front: { x: iw * 0.15, y: rowH, w: iw * 0.7, h: rowH },
-        top: { x: 0, y: rowH * 2, w: iw, h: rowH }
-      }
-
-      const sideMask = await regionMask(img, regions.side, 160, 64)
-      const frontMask = await regionMask(img, regions.front, 128, 84)
-      const topMask = await regionMask(img, regions.top, 180, 96)
-
-      const out: number[] = []
-      const { L, W, H } = dims
-
-      // Top view on y=0
-      addGridSegments(topMask, (xIdx, yIdx, w, h) => {
-        const nx = xIdx / (w - 1) - 0.5
-        const nz = yIdx / (h - 1) - 0.5
-        return new THREE.Vector3(nx * L, 0, nz * W)
-      }, out)
-
-      // Side duplicated at z ± W/2
-      const mapSide = (xIdx: number, yIdx: number, w: number, h: number, side: number) => {
-        const nx = xIdx / (w - 1) - 0.5
-        const ny = 1.0 - yIdx / (h - 1)
-        const z = side * (W * 0.5)
-        return new THREE.Vector3(nx * L, ny * H * 0.95, z)
-      }
-      addGridSegments(sideMask, (x, y, w, h) => mapSide(x, y, w, h, +1), out)
-      addGridSegments(sideMask, (x, y, w, h) => mapSide(x, y, w, h, -1), out)
-
-      // Front duplicated at x ± L/2
-      const mapFront = (xIdx: number, yIdx: number, w: number, h: number, front: number) => {
-        const nz = xIdx / (w - 1) - 0.5
-        const ny = 1.0 - yIdx / (h - 1)
-        const x = front * (L * 0.5)
-        return new THREE.Vector3(x, ny * H * 0.95, nz * W)
-      }
-      addGridSegments(frontMask, (x, y, w, h) => mapFront(x, y, w, h, +1), out)
-      addGridSegments(frontMask, (x, y, w, h) => mapFront(x, y, w, h, -1), out)
-
-      return new Float32Array(out)
-    }
-
-    async function regionMask(img: HTMLImageElement, r: {x:number;y:number;w:number;h:number}, resX: number, resY: number): Promise<{ w:number; h:number; data: Uint8Array }> {
-      const c = document.createElement('canvas')
-      c.width = resX; c.height = resY
-      const g = c.getContext('2d', { willReadFrequently: true })!
-      g.imageSmoothingEnabled = true
-      g.drawImage(img, r.x, r.y, r.w, r.h, 0, 0, resX, resY)
-      const id = g.getImageData(0, 0, resX, resY)
-      const mask = new Uint8Array(resX * resY)
-      for (let y=0;y<resY;y++){
-        for (let x=0;x<resX;x++){
-          const i = (y * resX + x) * 4
-          const R = id.data[i], G = id.data[i+1], B = id.data[i+2]
-          const lum = (0.2126*R + 0.7152*G + 0.0722*B) / 255
-          mask[y*resX + x] = lum > 0.62 ? 1 : 0
-        }
-      }
-      // thinning: drop isolated pixels
-      const out = new Uint8Array(mask.length)
-      for (let y=1;y<resY-1;y++){
-        for (let x=1;x<resX-1;x++){
-          const idx = y*resX+x
-          if (!mask[idx]) { out[idx]=0; continue }
-          let n=0
-          n += mask[idx-1] + mask[idx+1] + mask[idx-resX] + mask[idx+resX]
-          n += mask[idx-resX-1] + mask[idx-resX+1] + mask[idx+resX-1] + mask[idx+resX+1]
-          out[idx] = n >= 2 ? 1 : 0
-        }
-      }
-      return { w: resX, h: resY, data: out }
-    }
-
-    function addGridSegments(mask: { w:number; h:number; data: Uint8Array }, map: (x:number,y:number,w:number,h:number)=>THREE.Vector3, out: number[]) {
-      const w = mask.w, h = mask.h, data = mask.data
-      for (let y=0;y<h;y++){
-        for (let x=0;x<w;x++){
-          const i = y*w + x
-          if (!data[i]) continue
-          if (x+1 < w && data[i+1]) {
-            const a = map(x, y, w, h), b = map(x+1, y, w, h)
-            out.push(a.x, a.y, a.z, b.x, b.y, b.z)
-          }
-          if (y+1 < h && data[i+w]) {
-            const a = map(x, y, w, h), b = map(x, y+1, w, h)
-            out.push(a.x, a.y, a.z, b.x, b.y, b.z)
-          }
-        }
-      }
-    }
-
-    function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
-    function loadImage(src: string): Promise<HTMLImageElement> {
-      return new Promise((resolve, reject) => {
-        const img = new Image()
-        img.crossOrigin = 'anonymous'
-        img.onload = () => resolve(img)
-        img.onerror = reject
-        img.src = src
-      })
-    }
-
-  // Only re-run when renderScale/bloom/accessibility/auth change
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
@@ -1204,51 +1316,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     )
   }
 
-  const BlueprintCard = () => {
-    const onPick = async (file?: File) => {
-      if (!file) return
-      const dataUrl = await fileToDataURL(file).catch(() => null)
-      if (!dataUrl) return
-      try {
-        localStorage.setItem(BP_LS_KEY, dataUrl)
-      } catch {}
-      setBpPreview(dataUrl)
-      setBpStatus('loading')
-      await carApiRef.current?.setImageSrc(dataUrl)
-    }
-    const onClear = () => {
-      try { localStorage.removeItem(BP_LS_KEY) } catch {}
-      setBpPreview(null)
-      setBpStatus('none')
-      carApiRef.current?.clear()
-    }
-    return (
-      <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
-        <div style={{ fontSize:12, opacity:0.8, marginBottom:8 }}>Blueprint (Aventador wireframe)</div>
-        <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
-          <label style={{ display:'inline-flex', alignItems:'center', gap:8, cursor:'pointer' }}>
-            <input
-              type="file"
-              accept="image/*"
-              style={{ display:'none' }}
-              onChange={e => onPick(e.target.files?.[0] || undefined)}
-            />
-            <span style={{ ...btnStyle }}>Upload image</span>
-          </label>
-          <button onClick={onClear} style={btnStyle}>Clear</button>
-          <span style={{ fontSize:12, opacity:0.8 }}>
-            Status: {bpStatus}
-          </span>
-        </div>
-        {bpPreview && (
-          <div style={{ marginTop:8 }}>
-            <img src={bpPreview} alt="Blueprint preview" style={{ width:'100%', height:'auto', borderRadius:6, border:'1px solid #2b2f3a' }} />
-          </div>
-        )}
-      </div>
-    )
-  }
-
   const BillboardControllerCard = () => (
     <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
@@ -1319,7 +1386,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         onToggle={() => setPanelOpen(o => !o)}
         onChange={setCfg}
         extra={<>
-          <BlueprintCard />
           <BillboardControllerCard />
           <EffectsCardToggles cfg={cfg} onChange={setCfg} />
         </>}
@@ -1456,56 +1522,13 @@ const chipStyle = (active: boolean): React.CSSProperties => ({
   cursor:'pointer'
 })
 
-function defaults(initial?: any): LocalCfg {
-  return {
-    path: initial?.path ?? 'Circle',
-    orbitSpeed: initial?.orbitSpeed ?? 0.35,
-    orbitRadius: initial?.orbitRadius ?? 9.5,
-    orbitElev: initial?.orbitElev ?? 0.06,
-    camBob: initial?.camBob ?? 0.12,
-    lineWidthPx: initial?.lineWidthPx ?? 1.8,
-    camera: {
-      fov: clamp(initial?.camera?.fov ?? 50, 30, 85),
-      minDistance: clamp(initial?.camera?.minDistance ?? 5, 3, 30),
-      maxDistance: clamp(initial?.camera?.maxDistance ?? 16, 6, 100),
-      minPolarAngle: clamp(initial?.camera?.minPolarAngle ?? (Math.PI * 0.12), 0, Math.PI / 2),
-      maxPolarAngle: clamp(initial?.camera?.maxPolarAngle ?? (Math.PI * 0.85), Math.PI / 4, Math.PI),
-      enablePan: true,
-      enableZoom: true,
-      enableDamping: true,
-      dampingFactor: 0.1,
-      rotateSpeed: 0.6,
-      zoomSpeed: 0.7,
-      panSpeed: 0.6,
-      autoRotate: false,
-      autoRotateSpeed: 0.5,
-      autoPath: true,
-      target: { x: 0, y: 2.2, z: 0 }
-    },
-    cameraPresets: {
-      enabled: true,
-      strength: 0.7
-    },
-    fx: {
-      beams: false,
-      groundRings: false,
-      chimneySmoke: false,
-      starfield: false,
-      bloomBreath: false,
-      lyricsMarquee: true,
-      mosaicFloor: false,
-      wireCar: true
-    }
-  }
-}
-
-function fileToDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
-    reader.onerror = reject
-    reader.readAsDataURL(file)
-  })
-}
-
 function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
+
+// Robust angle lerp (kept for reference)
+function lerpAngle(a: number, b: number, t: number) {
+  const TAU = Math.PI * 2
+  let d = (b - a) % TAU
+  if (d > Math.PI) d -= TAU
+  if (d < -Math.PI) d += TAU
+  return a + d * t
+}

@@ -16,6 +16,9 @@ Album-only visuals (no synthetic colors)
 - Uses only album textures + extracted swatches (avg + top3)
 - Interlacing current/previous cover (radial/stripes/checker)
 - Crash-hardened uniform writing (no direct .value reads; always resolve ShaderMaterial.uniforms live)
+R&D (optional):
+- Instanced shards (diamond/prism) flying in tunnel, album-swatch tinted
+- CRT/Glitch overlay (scanlines + light chroma offset + jitter), album-tinted
 **/
 
 type Cfg = {
@@ -45,29 +48,45 @@ type Cfg = {
   fuseBias: number
 
   edgeEmphasis: number
+
+  // R&D
+  shardsEnabled: boolean
+  shardCount: number
+  shardSize: number
+  shardSpeed: number
+  shardJitter: number
+
+  crtEnabled: boolean
+  crtStrength: number
+  crtScanlines: number
+  glitchJitter: number
 }
 
 type Preset = { name: string } & Cfg
 
-const LS_KEY = 'ffw.kaleido.albumonly.safe.v6'
+const LS_KEY = 'ffw.kaleido.albumonly.safe.v7'
+
+const BASE_CFG: Cfg = {
+  intensity: 1.1, speed: 1.0, exposure: 1.02, saturation: 1.18, gamma: 0.95, vignette: 0.63,
+  shapeMode: 0, slices: 28, tileScale: 2.8, tileRound: 0.35,
+  prismDispersion: 0.95, prismWarp: 0.85,
+  texScaleU: 3.0, texScaleV: 5.0, texRotate: -0.28, albumTexWarp: 0.5,
+  interlaceMode: 0, interlaceScale: 140.0, interlaceStrength: 0.7, fuseBias: 0.4,
+  edgeEmphasis: 0.65,
+  // R&D defaults
+  shardsEnabled: false, shardCount: 800, shardSize: 0.08, shardSpeed: 1.0, shardJitter: 0.4,
+  crtEnabled: false, crtStrength: 0.25, crtScanlines: 900.0, glitchJitter: 0.002
+}
 
 const PRESETS: Record<string, Preset> = {
-  vortexPrism: {
-    name: 'Vortex Prism',
-    intensity: 1.1, speed: 1.0, exposure: 1.02, saturation: 1.18, gamma: 0.95, vignette: 0.63,
-    shapeMode: 0, slices: 28, tileScale: 2.8, tileRound: 0.35,
-    prismDispersion: 0.95, prismWarp: 0.85,
-    texScaleU: 3.0, texScaleV: 5.0, texRotate: -0.28, albumTexWarp: 0.5,
-    interlaceMode: 0, interlaceScale: 140.0, interlaceStrength: 0.7, fuseBias: 0.4,
-    edgeEmphasis: 0.65
-  },
+  vortexPrism: { name: 'Vortex Prism', ...BASE_CFG },
   liquidMosaic: {
     name: 'Liquid Mosaic',
-    intensity: 0.95, speed: 0.8, exposure: 0.98, saturation: 1.1, gamma: 0.96, vignette: 0.62,
+    ...BASE_CFG,
     shapeMode: 1, slices: 16, tileScale: 2.6, tileRound: 0.45,
     prismDispersion: 0.5, prismWarp: 0.55,
     texScaleU: 2.2, texScaleV: 3.6, texRotate: -0.2, albumTexWarp: 0.36,
-    interlaceMode: 2, interlaceScale: 160.0, interlaceStrength: 0.6, fuseBias: 0.5,
+    interlaceMode: 2, interlaceScale: 160, interlaceStrength: 0.6, fuseBias: 0.5,
     edgeEmphasis: 0.55
   }
 }
@@ -111,6 +130,7 @@ function makeUniformSetters(matRef: React.MutableRefObject<THREE.ShaderMaterial 
 }
 
 export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   // Album textures (current & previous)
@@ -131,6 +151,18 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   const scrollRef = useRef(0)
   const disposedRef = useRef(false)
 
+  // Instanced shards (R&D)
+  const shardsRef = useRef<THREE.InstancedMesh | null>(null)
+  const shardsActiveRef = useRef(false)
+  const shardDataRef = useRef<{
+    pos: Float32Array, vel: Float32Array, rot: Float32Array, rotVel: Float32Array, colors: Float32Array
+  } | null>(null)
+
+  // Top-center HUD visibility
+  const [hudVisible, setHudVisible] = useState(true)
+  const hudHideTimer = useRef<number | null>(null)
+  const [hoverTop, setHoverTop] = useState(false)
+
   // UI state
   const [panelOpen, setPanelOpen] = useState(false)
   const [selectedPreset, setSelectedPreset] = useState<keyof typeof PRESETS>('vortexPrism')
@@ -140,6 +172,46 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   })
   const cfgRef = useRef(cfg)
   useEffect(() => { cfgRef.current = cfg; try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)) } catch {} }, [cfg])
+
+  // HUD mouse tracking for auto-show/hide (show near top center)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const onMove = (e: MouseEvent) => {
+      const rect = el.getBoundingClientRect()
+      const y = e.clientY - rect.top
+      const x = e.clientX - rect.left
+      const nearTop = y < 90 // px
+      const nearCenterX = Math.abs(x - rect.width / 2) < rect.width * 0.35
+      if (nearTop && nearCenterX) {
+        setHudVisible(true)
+        setHoverTop(true)
+        if (hudHideTimer.current) {
+          window.clearTimeout(hudHideTimer.current)
+          hudHideTimer.current = null
+        }
+      } else {
+        setHoverTop(false)
+        if (!panelOpen && hudHideTimer.current == null) {
+          hudHideTimer.current = window.setTimeout(() => {
+            setHudVisible(false)
+            hudHideTimer.current = null
+          }, 1400)
+        }
+      }
+    }
+    const onLeave = () => {
+      setHoverTop(false)
+      if (!panelOpen) setHudVisible(false)
+    }
+    el.addEventListener('mousemove', onMove)
+    el.addEventListener('mouseleave', onLeave)
+    return () => {
+      el.removeEventListener('mousemove', onMove)
+      el.removeEventListener('mouseleave', onLeave)
+      if (hudHideTimer.current) { window.clearTimeout(hudHideTimer.current); hudHideTimer.current = null }
+    }
+  }, [panelOpen])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -270,10 +342,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         tex.minFilter = THREE.LinearMipmapLinearFilter
         tex.magFilter = THREE.LinearFilter
         tex.generateMipmaps = true
-        // anisotropy for sharper look
-        try {
-          tex.anisotropy = (renderer.capabilities as any).getMaxAnisotropy?.() ?? tex.anisotropy
-        } catch {}
+        try { tex.anisotropy = (renderer.capabilities as any).getMaxAnisotropy?.() ?? tex.anisotropy } catch {}
 
         tAlbum1Ref.current = tex
         has1Ref.current = 1
@@ -291,10 +360,12 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     const albumIv = window.setInterval(loadAlbum, 6000)
 
     // Geometry
-    const tunnel = new THREE.CylinderGeometry(14, 14, 220, 360, 1, true)
+    const radius = 14
+    const tunnelLen = 220
+    const tunnel = new THREE.CylinderGeometry(radius, radius, tunnelLen, 360, 1, true)
     tunnel.rotateZ(Math.PI * 0.5)
 
-    // Initial uniforms (values will be kept in ShaderMaterial; setters always resolve live)
+    // Initial uniforms
     const uniforms: Record<string, { value: any }> = {
       uTime: { value: 0.0 },
       uAudio: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
@@ -340,6 +411,12 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       uFuseBias: { value: cfgRef.current.fuseBias },
 
       uEdgeEmphasis: { value: cfgRef.current.edgeEmphasis },
+
+      // CRT/Glitch
+      uCRTEnabled: { value: cfgRef.current.crtEnabled ? 1.0 : 0.0 },
+      uCRTStrength: { value: cfgRef.current.crtStrength },
+      uCRTScanlines: { value: cfgRef.current.crtScanlines },
+      uGlitchJitter: { value: cfgRef.current.glitchJitter },
 
       uSafe: { value: (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0 },
       uContrastBoost: { value: accessibility.highContrast ? 1.0 : 0.0 }
@@ -407,6 +484,11 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
         uniform float uEdgeEmphasis;
 
+        uniform float uCRTEnabled;
+        uniform float uCRTStrength;
+        uniform float uCRTScanlines;
+        uniform float uGlitchJitter;
+
         uniform float uSafe;
         uniform float uContrastBoost;
 
@@ -468,6 +550,21 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           float xf = smoothstep(0.0, 1.0, cross);
           float xfBias = clamp(mix(xf, 1.0-xf, clamp(fuseBias,0.0,1.0)), 0.0, 1.0);
           return mix(B, inter, xfBias);
+        }
+
+        vec3 applyCRT(vec2 uv, vec3 col, float time, float strength, float scanlines, float jitter){
+          // scanlines
+          float line = 0.5 + 0.5*sin(uv.y*scanlines*6.28318 + time*2.0);
+          col *= mix(1.0, line, clamp(strength*0.3, 0.0, 0.6));
+          // subtle chroma offset
+          float offs = strength * 0.003;
+          float j = (hash(vec2(time, uv.y)) - 0.5) * jitter * 200.0;
+          vec2 jv = vec2(j*0.002, 0.0);
+          float r = texture2D(tAlbum1, uv + vec2(offs,0.0) + jv).r;
+          float g = texture2D(tAlbum1, uv + vec2(0.0,0.0) - jv).g;
+          float b = texture2D(tAlbum1, uv + vec2(-offs,0.0) + jv*0.5).b;
+          vec3 chrom = vec3(r,g,b);
+          return mix(col, chrom, clamp(strength*0.25, 0.0, 0.4));
         }
 
         void main(){
@@ -533,6 +630,11 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
           float vig = 1.0 - clamp(dot(q,q)*1.4, 0.0, 1.0);
           col *= mix(1.0, pow(vig, 1.8), clamp(uVignette, 0.0, 1.0));
 
+          // CRT/Glitch overlay (album-tex based for chroma)
+          if (uCRTEnabled > 0.5) {
+            col = applyCRT(uv, col, time, uCRTStrength, uCRTScanlines, uGlitchJitter);
+          }
+
           gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
         }
       `
@@ -552,6 +654,64 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
     }
     window.addEventListener('resize', onResize)
     onResize()
+
+    // SHARDS: create/destroy helpers
+    const createShards = (count: number, size: number) => {
+      const geo = new THREE.OctahedronGeometry(size, 0)
+      const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95 })
+      const mesh = new THREE.InstancedMesh(geo, mat, count)
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+      mesh.instanceMatrix.needsUpdate = true
+      // colors
+      // @ts-ignore
+      mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3)
+      const pos = new Float32Array(count * 3)
+      const vel = new Float32Array(count)
+      const rot = new Float32Array(count * 3)
+      const rotVel = new Float32Array(count * 3)
+      const colors = new Float32Array(count * 3)
+
+      for (let i = 0; i < count; i++) {
+        const theta = Math.random() * Math.PI * 2
+        const r = radius * (0.9 + Math.random() * 0.25)
+        pos[i * 3 + 0] = Math.cos(theta) * r
+        pos[i * 3 + 1] = Math.sin(theta) * r
+        pos[i * 3 + 2] = -Math.random() * tunnelLen
+        vel[i] = 3 + Math.random() * 9
+
+        rot[i * 3 + 0] = Math.random() * Math.PI
+        rot[i * 3 + 1] = Math.random() * Math.PI
+        rot[i * 3 + 2] = Math.random() * Math.PI
+        rotVel[i * 3 + 0] = (Math.random() - 0.5) * 2
+        rotVel[i * 3 + 1] = (Math.random() - 0.5) * 2
+        rotVel[i * 3 + 2] = (Math.random() - 0.5) * 2
+
+        // initial color (updated each frame from swatches)
+        colors[i * 3 + 0] = albC1.current.r
+        colors[i * 3 + 1] = albC1.current.g
+        colors[i * 3 + 2] = albC1.current.b
+      }
+      // @ts-ignore
+      mesh.instanceColor!.array.set(colors)
+      // @ts-ignore
+      mesh.instanceColor!.needsUpdate = true
+
+      shardDataRef.current = { pos, vel, rot, rot: rot, rotVel, colors }
+      shardsRef.current = mesh
+      scene.add(mesh)
+    }
+
+    const destroyShards = () => {
+      if (shardsRef.current) {
+        scene.remove(shardsRef.current)
+        shardsRef.current.geometry.dispose()
+        ;(shardsRef.current.material as THREE.Material).dispose()
+        // @ts-ignore
+        shardsRef.current.instanceColor = null
+        shardsRef.current = null
+      }
+      shardDataRef.current = null
+    }
 
     // Animate
     const clock = new THREE.Clock()
@@ -600,15 +760,29 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         interlaceStrength: clamp01(T.interlaceStrength),
         fuseBias: clamp01(T.fuseBias),
 
-        edgeEmphasis: THREE.MathUtils.clamp(T.edgeEmphasis, 0, 1)
+        edgeEmphasis: THREE.MathUtils.clamp(T.edgeEmphasis, 0, 1),
+
+        // R&D
+        shardsEnabled: !!T.shardsEnabled,
+        shardCount: Math.max(0, Math.min(5000, Math.round(T.shardCount))),
+        shardSize: THREE.MathUtils.clamp(T.shardSize, 0.02, 0.3),
+        shardSpeed: THREE.MathUtils.clamp(T.shardSpeed, 0.2, 3.0),
+        shardJitter: THREE.MathUtils.clamp(T.shardJitter, 0.0, 1.5),
+
+        crtEnabled: !!T.crtEnabled,
+        crtStrength: THREE.MathUtils.clamp(T.crtStrength, 0.0, 1.0),
+        crtScanlines: THREE.MathUtils.clamp(T.crtScanlines, 100.0, 2000.0),
+        glitchJitter: THREE.MathUtils.clamp(T.glitchJitter, 0.0, 0.02)
       }
 
+      // Smooth
       const k = 1 - Math.pow(0.0001, dt)
       ;(Object.keys(target) as (keyof typeof target)[]).forEach(key => {
         // @ts-ignore
         s[key] += (target[key] - s[key]) * k
       })
 
+      // Safety caps
       const kIntensity = THREE.MathUtils.lerp(s.intensity, Math.min(s.intensity, 0.6), safe)
       const kSpeed = THREE.MathUtils.lerp(s.speed, Math.min(s.speed, 0.4), safe)
 
@@ -618,7 +792,7 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       scrollRef.current += dt * (0.24 + 1.05 * kSpeed + 0.48 * loud)
       crossRef.current = Math.min(1, crossRef.current + dt * 0.35)
 
-      // Push uniforms via live setters
+      // Uniforms
       setF('uTime', t)
       setV3('uAudio', low, mid, high)
       setF('uLoud', loud)
@@ -656,9 +830,76 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
       setF('uEdgeEmphasis', s.edgeEmphasis)
 
+      setF('uCRTEnabled', s.crtEnabled ? 1.0 : 0.0)
+      setF('uCRTStrength', s.crtStrength)
+      setF('uCRTScanlines', s.crtScanlines)
+      setF('uGlitchJitter', s.glitchJitter)
+
       setF('uHasAlbum1', has1Ref.current ? 1.0 : 0.0)
       setF('uHasAlbum2', has2Ref.current ? 1.0 : 0.0)
       setF('uAlbumCross', crossRef.current)
+
+      // R&D: instanced shards
+      if (s.shardsEnabled && !shardsActiveRef.current) {
+        createShards(s.shardCount, s.shardSize)
+        shardsActiveRef.current = true
+      } else if (!s.shardsEnabled && shardsActiveRef.current) {
+        destroyShards()
+        shardsActiveRef.current = false
+      } else if (s.shardsEnabled && shardsRef.current && shardDataRef.current) {
+        // update existing
+        const mesh = shardsRef.current
+        const { pos, vel, rot, rotVel } = shardDataRef.current
+        const m = new THREE.Matrix4()
+        const q = new THREE.Quaternion()
+        const scl = new THREE.Vector3(1, 1, 1)
+        const count = mesh.count
+        const base = (0.66 + 1.2 * kSpeed) + (loud * 0.9)
+        for (let i = 0; i < count; i++) {
+          // advance
+          const speed = vel[i] * s.shardSpeed * (0.8 + 0.5 * high)
+          pos[i * 3 + 2] += dt * (base + speed)
+          // jitter ring
+          const j = s.shardJitter
+          pos[i * 3 + 0] += (Math.random() - 0.5) * dt * j
+          pos[i * 3 + 1] += (Math.random() - 0.5) * dt * j
+
+          if (pos[i * 3 + 2] > 2.0) {
+            const theta = Math.random() * Math.PI * 2
+            const r = radius * (0.9 + Math.random() * 0.25)
+            pos[i * 3 + 0] = Math.cos(theta) * r
+            pos[i * 3 + 1] = Math.sin(theta) * r
+            pos[i * 3 + 2] = -tunnelLen
+          }
+
+          // rotation
+          rot[i * 3 + 0] += rotVel[i * 3 + 0] * dt
+          rot[i * 3 + 1] += rotVel[i * 3 + 1] * dt
+          rot[i * 3 + 2] += rotVel[i * 3 + 2] * dt
+
+          const px = pos[i * 3 + 0], py = pos[i * 3 + 1], pz = pos[i * 3 + 2]
+          q.setFromEuler(new THREE.Euler(rot[i * 3 + 0], rot[i * 3 + 1], rot[i * 3 + 2]))
+          m.compose(new THREE.Vector3(px, py, pz), q, scl)
+          mesh.setMatrixAt(i, m)
+        }
+        mesh.instanceMatrix.needsUpdate = true
+        // swatch colors drift
+        const c1 = albC1.current, c2 = albC2.current, c3 = albC3.current
+        // @ts-ignore
+        const colorAttr: THREE.InstancedBufferAttribute = mesh.instanceColor!
+        if (colorAttr) {
+          const arr = colorAttr.array as Float32Array
+          for (let i = 0; i < count; i++) {
+            const sel = i % 3
+            const cc = sel === 0 ? c1 : sel === 1 ? c2 : c3
+            arr[i * 3 + 0] = cc.r
+            arr[i * 3 + 1] = cc.g
+            arr[i * 3 + 2] = cc.b
+          }
+          colorAttr.needsUpdate = true
+          ;(mesh.material as THREE.MeshBasicMaterial).vertexColors = true as any
+        }
+      }
 
       comp.composer.render()
     }
@@ -673,7 +914,9 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       window.clearInterval(albumIv)
       offFrame?.()
 
-      // Dispose textures safely (do not dispose the same object twice)
+      // Shards
+      destroyShards()
+
       if (tAlbum1Ref.current) { tAlbum1Ref.current.dispose(); tAlbum1Ref.current = null }
       if (tAlbum2Ref.current) { tAlbum2Ref.current.dispose(); tAlbum2Ref.current = null }
 
@@ -694,9 +937,68 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, accessibility.reducedMotion, accessibility.highContrast])
 
+  // Dispatch a custom event for "Play in browser" (host app should listen and handle activating the Web Playback device)
+  const requestPlayInBrowser = () => {
+    window.dispatchEvent(new CustomEvent('ffw:play-in-browser'))
+    // optional fallback open (host should override):
+    // window.open('https://open.spotify.com', '_blank', 'noopener,noreferrer')
+  }
+
   return (
-    <div data-visual="psy-kaleido" style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div
+      ref={containerRef}
+      data-visual="psy-kaleido"
+      style={{ position: 'relative', width: '100%', height: '100%' }}
+    >
+      {/* Top-center HUD (auto hides, shows when cursor near top middle) */}
+      <div
+        style={{
+          position: 'absolute',
+          top: 8,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 15,
+          display: 'flex',
+          gap: 8,
+          alignItems: 'center',
+          padding: '6px 10px',
+          borderRadius: 10,
+          border: '1px solid rgba(43,47,58,0.9)',
+          background: 'rgba(10,12,16,0.82)',
+          color: '#e6f0ff',
+          fontFamily: 'system-ui, sans-serif',
+          fontSize: 12,
+          lineHeight: 1.2,
+          transition: 'opacity 200ms ease, transform 200ms ease',
+          opacity: (hudVisible || panelOpen) ? 1 : 0,
+          pointerEvents: (hudVisible || panelOpen) ? 'auto' as const : 'none' as const,
+          boxShadow: hoverTop ? '0 2px 16px rgba(0,0,0,0.35)' : '0 2px 10px rgba(0,0,0,0.25)'
+        }}
+        onMouseEnter={() => setHudVisible(true)}
+      >
+        <button
+          onClick={() => setPanelOpen(o => !o)}
+          style={{
+            padding: '6px 10px', borderRadius: 8,
+            border: '1px solid #2b2f3a', background: '#0f1218', color: '#cfe7ff', cursor: 'pointer'
+          }}
+        >
+          {panelOpen ? 'Close Visual Settings' : 'Visual Settings'}
+        </button>
+        <button
+          onClick={requestPlayInBrowser}
+          title="Activate Spotify Web Playback (host app should handle)"
+          style={{
+            padding: '6px 10px', borderRadius: 8,
+            border: '1px solid #2b2f3a', background: '#0f1218', color: '#b7ffbf', cursor: 'pointer'
+          }}
+        >
+          Play in browser
+        </button>
+      </div>
+
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} aria-label="Album Kaleidoscope Tunnel" />
+
       <Panel
         open={panelOpen}
         cfg={cfg}
@@ -722,7 +1024,7 @@ function Panel(props: {
   const { open, cfg, onToggle, onChange, selectedPreset, onSelectPreset, onApplyPreset } = props
   const Row = (p: { label: string; children: React.ReactNode }) => (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, margin: '6px 0' }}>
-      <label style={{ fontSize: 12, opacity: 0.9, minWidth: 140 }}>{p.label}</label>
+      <label style={{ fontSize: 12, opacity: 0.9, minWidth: 160 }}>{p.label}</label>
       <div style={{ flex: 1 }}>{p.children}</div>
     </div>
   )
@@ -742,13 +1044,10 @@ function Panel(props: {
   }
 
   return (
-    <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 10, userSelect: 'none', pointerEvents: 'auto' }}>
-      <button onClick={(e) => { e.stopPropagation(); onToggle() }} style={btnStyle}>
-        {open ? 'Close Visual Settings' : 'Visual Settings'}
-      </button>
+    <div style={{ position: 'absolute', top: 56, right: 12, zIndex: 10, userSelect: 'none', pointerEvents: 'auto' }}>
       {open && (
         <div style={{
-          width: 380, marginTop: 8, padding: 12, border: '1px solid #2b2f3a', borderRadius: 8,
+          width: 420, padding: 12, border: '1px solid #2b2f3a', borderRadius: 8,
           background: 'rgba(10,12,16,0.94)', color: '#e6f0ff', fontFamily: 'system-ui, sans-serif', fontSize: 12, lineHeight: 1.4
         }}>
           <Card title="Presets">
@@ -763,6 +1062,7 @@ function Panel(props: {
                 ))}
               </select>
               <button onClick={onApplyPreset} style={btnStyle}>Apply</button>
+              <button onClick={onToggle} style={btnStyle}>Close</button>
             </div>
           </Card>
 
@@ -862,10 +1162,47 @@ function Panel(props: {
             </Row>
           </Card>
 
-          <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'space-between' }}>
-            <button onClick={onApplyPreset} style={btnStyle}>Apply Preset</button>
-            <button onClick={onToggle} style={btnStyle}>Close</button>
-          </div>
+          <Card title="R&D (Experimental)">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="checkbox" checked={cfg.shardsEnabled} onChange={e => onChange(prev => ({ ...prev, shardsEnabled: e.currentTarget.checked }))} />
+                Shards (instanced)
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="checkbox" checked={cfg.crtEnabled} onChange={e => onChange(prev => ({ ...prev, crtEnabled: e.currentTarget.checked }))} />
+                CRT / Glitch
+              </label>
+            </div>
+            {cfg.shardsEnabled && (
+              <>
+                <Row label={`Shard Count ${cfg.shardCount}`}>
+                  <input type="range" min={0} max={3000} step={10} value={cfg.shardCount} onChange={onRange(v => onChange(prev => ({ ...prev, shardCount: Math.max(0, Math.min(5000, v)) })))} />
+                </Row>
+                <Row label={`Shard Size ${cfg.shardSize.toFixed(3)}`}>
+                  <input type="range" min={0.02} max={0.2} step={0.001} value={cfg.shardSize} onChange={onRange(v => onChange(prev => ({ ...prev, shardSize: Math.max(0.02, Math.min(0.3, v)) })))} />
+                </Row>
+                <Row label={`Shard Speed ${cfg.shardSpeed.toFixed(2)}`}>
+                  <input type="range" min={0.2} max={3} step={0.01} value={cfg.shardSpeed} onChange={onRange(v => onChange(prev => ({ ...prev, shardSpeed: Math.max(0.2, Math.min(3, v)) })))} />
+                </Row>
+                <Row label={`Shard Jitter ${cfg.shardJitter.toFixed(2)}`}>
+                  <input type="range" min={0} max={1.5} step={0.01} value={cfg.shardJitter} onChange={onRange(v => onChange(prev => ({ ...prev, shardJitter: Math.max(0, Math.min(1.5, v)) })))} />
+                </Row>
+              </>
+            )}
+            {cfg.crtEnabled && (
+              <>
+                <Row label={`CRT Strength ${cfg.crtStrength.toFixed(2)}`}>
+                  <input type="range" min={0} max={1} step={0.01} value={cfg.crtStrength} onChange={onRange(v => onChange(prev => ({ ...prev, crtStrength: Math.max(0, Math.min(1, v)) })))} />
+                </Row>
+                <Row label={`Scanlines ${cfg.crtScanlines.toFixed(0)}`}>
+                  <input type="range" min={100} max={2000} step={1} value={cfg.crtScanlines} onChange={onRange(v => onChange(prev => ({ ...prev, crtScanlines: Math.max(100, Math.min(2000, v)) })))} />
+                </Row>
+                <Row label={`Glitch Jitter ${cfg.glitchJitter.toFixed(3)}`}>
+                  <input type="range" min={0} max={0.02} step={0.0005} value={cfg.glitchJitter} onChange={onRange(v => onChange(prev => ({ ...prev, glitchJitter: Math.max(0, Math.min(0.02, v)) })))} />
+                </Row>
+              </>
+            )}
+          </Card>
         </div>
       )}
     </div>

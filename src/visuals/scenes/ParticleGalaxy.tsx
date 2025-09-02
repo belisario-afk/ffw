@@ -82,6 +82,8 @@ function buildParticleMaterial({ primary, accent }: { primary: THREE.Color; acce
   }
 
   const vert = `
+    uniform float uSizeScale;
+
     attribute float aSize;
     attribute float aSeed;
     attribute float aType; // 0=core, 1=arm, 2=dust
@@ -146,7 +148,7 @@ function buildParticleMaterial({ primary, accent }: { primary: THREE.Color; acce
 
   const mat = new THREE.ShaderMaterial({
     uniforms: uniforms as any,
-    vertexShader: `#define USE_SIZE_SCALE\n${vert}`,
+    vertexShader: vert,
     fragmentShader: frag,
     transparent: true,
     depthWrite: false,
@@ -458,7 +460,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       core.geo.dispose()
       arms.geo.dispose()
       dust.geo.dispose()
-      starMat.dispose()
+      ;(starMat as any).dispose?.()
       disposeRenderer()
     }
   // re-create when preset changes or quality toggles bloom parameters

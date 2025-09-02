@@ -1,32 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { loginWithSpotify, type AuthState } from '../auth/token'
-import { ensurePlayerConnected } from '../spotify/player'
+import { usePlayback } from '../playback/PlaybackProvider'
 
 type Props = {
-  auth: AuthState | null
   onOpenDevices: () => void
 }
 
 /**
 Full transport bar with album art and safe guards:
-- If no token: show disabled controls and a “Sign in to Spotify” action.
-- If token: use Spotify Web API via fetch for play/pause/prev/next, seek, shuffle, repeat, volume.
+- Uses global playback context for sign-in and SDK actions (global across the app).
+- If no token: show disabled controls and a “Sign in to Spotify” action from the global context.
+- Uses Spotify Web API via fetch for play/pause/prev/next, seek, shuffle, repeat, volume.
 - Throttle clicks to reduce double-requests and delayed feel.
 - Periodic refresh of playback state and in-between tick to advance the progress bar when playing.
 */
 
 type RepeatMode = 'off' | 'context' | 'track'
-
-const SCOPES = [
-  // Web API control
-  'user-read-playback-state',
-  'user-modify-playback-state',
-  'user-read-currently-playing',
-  // Web Playback SDK
-  'streaming',
-  'user-read-email',
-  'user-read-private'
-]
 
 function mmss(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000))
@@ -35,9 +23,11 @@ function mmss(ms: number) {
   return `${m}:${ss.toString().padStart(2, '0')}`
 }
 
-export default function PlayerController({ auth, onOpenDevices }: Props) {
-  const hasToken = !!auth?.accessToken
-  const token = auth?.accessToken || ''
+export default function PlayerController({ onOpenDevices }: Props) {
+  const { token, isSignedIn, signIn, playInBrowser } = usePlayback()
+
+  const hasToken = !!token
+  const bearer = token || ''
 
   // Playback state
   const [state, setState] = useState<any | null>(null)
@@ -62,11 +52,11 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
   }
 
   async function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: any) {
-    if (!token) throw new Error('No access token')
+    if (!bearer) throw new Error('No access token')
     const url = `https://api.spotify.com/v1${path}`
     const res = await fetch(url, {
       method,
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined
     })
     if (res.status === 204) return null
@@ -111,21 +101,6 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
     }, 1000)
     return () => clearInterval(id)
   }, [state?.is_playing, scrubbing, duration])
-
-  // Scene “Play in browser” requests
-  useEffect(() => {
-    const onPlayInBrowser = async () => {
-      if (!hasToken) { setError('Sign in with Spotify to enable Web Playback'); return }
-      try {
-        await ensurePlayerConnected({ deviceName: 'FFW Visualizer', setInitialVolume: true })
-      } catch (e: any) {
-        console.warn('ensurePlayerConnected failed:', e)
-        setError('Could not start Web Playback in browser')
-      }
-    }
-    window.addEventListener('ffw:play-in-browser', onPlayInBrowser as EventListener)
-    return () => window.removeEventListener('ffw:play-in-browser', onPlayInBrowser as EventListener)
-  }, [hasToken])
 
   // Actions
   const doTogglePlay = async () => {
@@ -176,15 +151,6 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
     setVolume(vol)
     try { await call('PUT', `/me/player/volume?volume_percent=${Math.max(0, Math.min(100, Math.round(vol)))}`) }
     catch (e: any) { setError(humanizeError(e)) }
-  }
-
-  const onSignIn = () => {
-    try {
-      // Ensure required scopes are provided
-      loginWithSpotify({ scopes: SCOPES })
-    } catch (e: any) {
-      setError(humanizeError(e))
-    }
   }
 
   const cover = state?.item?.album?.images?.[0]?.url as string | undefined
@@ -252,8 +218,8 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
 
       {/* Controls */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '0 0 auto' }}>
-        {!hasToken ? (
-          <button onClick={onSignIn} style={btnStyle('#b7ffbf')}>Sign in to Spotify</button>
+        {!isSignedIn ? (
+          <button onClick={signIn} style={btnStyle('#b7ffbf')}>Sign in to Spotify</button>
         ) : (
           <>
             <button onClick={doPrev} disabled={busy} style={btnStyle('#cfe7ff')} title="Previous">⏮</button>
@@ -266,6 +232,8 @@ export default function PlayerController({ auth, onOpenDevices }: Props) {
             <button onClick={doRepeat} disabled={busy} style={btnToggle(repeat !== 'off')} title={`Repeat: ${repeat}`}>🔁</button>
 
             <button onClick={onOpenDevices} style={btnStyle('#cfe7ff')} title="Devices">🖧</button>
+
+            <button onClick={playInBrowser} style={btnStyle('#cfe7ff')} title="Play in browser">▶</button>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 180 }}>
               <span title="Volume">🔊</span>

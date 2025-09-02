@@ -1,6 +1,6 @@
 import React, { Suspense, useEffect, useState } from 'react'
 import { Route, Routes, useNavigate } from 'react-router-dom'
-import { loginWithSpotify, restoreFromStorage, type AuthState, signOut } from './auth/token'
+import { restoreFromStorage, type AuthState } from './auth/token'
 import Callback from './auth/Callback'
 import PlayerController from './controllers/PlayerController'
 const WireframeHouse3D = React.lazy(() => import('./visuals/scenes/WireframeHouse3D'))
@@ -18,21 +18,11 @@ import { startReactivityOrchestrator } from './audio/ReactivityOrchestrator'
 import { startFallbackTicker } from './audio/FallbackTicker'
 import { PlaybackProvider } from './playback/PlaybackProvider'
 import GlobalTopBar from './ui/GlobalTopBar'
-import { setSpotifyTokenProvider } from './spotify/player'
 
 type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
 
-const SCOPES = [
-  'user-read-playback-state',
-  'user-modify-playback-state',
-  'user-read-currently-playing',
-  'streaming',
-  'user-read-email',
-  'user-read-private'
-]
-
 export default function App() {
-  const [auth, setAuth] = useState<AuthState | null>(restoreFromStorage())
+  const [auth] = useState<AuthState | null>(restoreFromStorage())
   const [panel, setPanel] = useState<Panel>(null)
   const [gpu, setGpu] = useState<string>('Detecting GPU...')
   const [fps, setFps] = useState<number>(0)
@@ -74,11 +64,6 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    // Provide access token to any scene/SDK helpers
-    setSpotifyTokenProvider(() => auth?.accessToken || '')
-  }, [auth])
-
-  useEffect(() => {
     const stop = startReactivityOrchestrator()
     const stopFallback = startFallbackTicker()
     return () => { stop?.(); stopFallback?.() }
@@ -99,13 +84,10 @@ export default function App() {
   }
 
   return (
-    <PlaybackProvider auth={auth}>
-      <GlobalTopBar
-        auth={auth}
-        onLogin={() => loginWithSpotify({ scopes: SCOPES })}
-        onLogout={() => { signOut(); setAuth(null) }}
-      />
-      <PlayerController auth={auth} onOpenDevices={() => setPanel('devices')} />
+    <PlaybackProvider>
+      <GlobalTopBar />
+      <PlayerController onOpenDevices={() => setPanel('devices')} />
+
       <div className="app-root">
         <div className="status-bar">
           <span className="badge">{gpu}</span>
@@ -114,7 +96,7 @@ export default function App() {
         <ThemeManager />
         <AlbumSkinWatcher />
         <Routes>
-          <Route path="/callback" element={<Callback onAuth={a => setAuth(a)} />} />
+          <Route path="/callback" element={<Callback onAuth={() => { /* handled by provider/spotify auth */ }} />} />
           <Route path="/*" element={
             <Suspense fallback={<div className="badge" style={{ position: 'absolute', left: 16, top: 72 }}>Loading scene…</div>}>
               {scene === 'Wireframe House 3D' ? (

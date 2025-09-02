@@ -115,10 +115,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Billboard controller state (panel UI)
+  // Billboard controller state (in-panel UI)
   const [bbEditEnabled, setBbEditEnabled] = useState(false)
   const [bbMode, setBbMode] = useState<'move'|'rotate'|'scale'>('move')
   const [bbPlane, setBbPlane] = useState<'XZ'|'XY'>('XZ')
+
+  // Mirror UI state into refs so the animation loop always sees latest values (no scene re-init needed)
+  const bbEditRef = useRef(bbEditEnabled)
+  const bbModeRef = useRef<'move'|'rotate'|'scale'>(bbMode)
+  const bbPlaneRef = useRef<'XZ'|'XY'>(bbPlane)
+  useEffect(() => { bbEditRef.current = bbEditEnabled }, [bbEditEnabled])
+  useEffect(() => { bbModeRef.current = bbMode }, [bbMode])
+  useEffect(() => { bbPlaneRef.current = bbPlane }, [bbPlane])
 
   // stable refs
   const angleRef = useRef(0)
@@ -239,7 +247,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       motionBlur: false
     })
 
-    // Controls (do NOT add to scene)
+    // Controls (never add controls to scene)
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
@@ -621,13 +629,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.minPolarAngle = cfgC.camera.minPolarAngle
       controls.maxPolarAngle = cfgC.camera.maxPolarAngle
 
-      // Apply panel controller transforms to billboard
-      if (bbEditEnabled) {
+      // Apply panel controller transforms to billboard (reads refs, not state)
+      if (bbEditRef.current) {
         // MOVE
-        if (bbMode === 'move') {
+        if (bbModeRef.current === 'move') {
           const mv = moveVecRef.current
           const speed = 3.0
-          if (bbPlane === 'XZ') {
+          if (bbPlaneRef.current === 'XZ') {
             billboardPosRef.current.x += (mv.x * speed) * dt
             billboardPosRef.current.z += (-mv.y * speed) * dt
             billboardPosRef.current.y += (moveAxis3Ref.current * speed) * dt
@@ -639,13 +647,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           billboardPosRef.current.y = THREE.MathUtils.clamp(billboardPosRef.current.y, 1.2, 5.2)
         }
         // ROTATE
-        if (bbMode === 'rotate') {
+        if (bbModeRef.current === 'rotate') {
           const rvx = rotateVecRef.current.x
           const yawSpeed = 2.8
           billboardYawRef.current += (rvx * yawSpeed) * dt
         }
         // SCALE
-        if (bbMode === 'scale') {
+        if (bbModeRef.current === 'scale') {
           const sDelta = scaleDeltaRef.current
           const sSpeed = 1.4
           const next = THREE.MathUtils.clamp(billboardScaleRef.current + (sDelta * sSpeed) * dt, 0.35, 3.0)
@@ -926,7 +934,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       dragRef.current.active = true
       dragRef.current.cx = rect.left + rect.width/2
       dragRef.current.cy = rect.top + rect.height/2
-      ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+      ;(e.target as HTMLElement).setPointerCapture?.((e as any).pointerId)
       onPointerMove(e)
     }
     const onPointerMove = (e: React.PointerEvent) => {
@@ -1004,7 +1012,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       dragRef.current.active = true
       dragRef.current.min = vertical ? rect.top : rect.left
       dragRef.current.max = vertical ? rect.bottom : rect.right
-      ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+      ;(e.target as HTMLElement).setPointerCapture?.((e as any).pointerId)
       move(e)
     }
     const move = (e: React.PointerEvent) => {
@@ -1209,7 +1217,7 @@ function Wire3DPanel(props: {
             <Row label="Lyrics marquee"><input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, lyricsMarquee: e.target.checked } }))}/></Row>
           </Card>
 
-          {extra}
+          {props.extra}
 
           <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
             <button onClick={() => onChange(defaults())} style={btnStyle}>Reset</button>

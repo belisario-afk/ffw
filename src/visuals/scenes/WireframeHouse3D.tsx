@@ -123,6 +123,31 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const pbClock = useRef<{ playing: boolean; startedAt: number; offsetMs: number }>({ playing: false, startedAt: 0, offsetMs: 0 })
   const lastVisualMsRef = useRef<number>(0)
 
+  // Billboard editing UI/joystick state
+  const [editEnabled, setEditEnabled] = useState(false)
+  const [mode, setMode] = useState<'move'|'rotate'|'scale'>('move')
+  const [movePlane, setMovePlane] = useState<'XZ'|'XY'>('XZ')
+  const [uiShown, setUiShown] = useState(false)
+  const lastUiInputRef = useRef<number>(0)
+  const hoverUiRef = useRef(false)
+  // Live control refs (read in animate)
+  const moveVecRef = useRef<{x:number, y:number}>({ x: 0, y: 0 }) // normalized [-1,1]
+  const moveAxis3Ref = useRef<number>(0) // slider [-1,1] for the remaining axis
+  const rotateVecRef = useRef<{x:number, y:number}>({ x: 0, y: 0 }) // yaw from x
+  const scaleDeltaRef = useRef<number>(0) // -1..1
+  const billboardScaleRef = useRef<number>(1) // persistent user scale
+  const billboardYawRef = useRef<number>(0) // persistent yaw
+  const billboardPosRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 2.95, 1.05))
+
+  // Auto-hide the joystick UI after inactivity
+  useEffect(() => {
+    const iv = window.setInterval(() => {
+      const active = editEnabled && (hoverUiRef.current || Date.now() - (lastUiInputRef.current || 0) < 2600)
+      setUiShown(active)
+    }, 300)
+    return () => clearInterval(iv)
+  }, [editEnabled])
+
   useEffect(() => {
     const token = (auth as any)?.accessToken
     if (token) { try { setSpotifyTokenProvider(async () => token) } catch {} }
@@ -352,10 +377,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       fontSize: 0.36
     })
     const billboardDefaultY = 2.95
-    billboard.group.position.set(0, billboardDefaultY, 1.05)
+    billboard.group.position.set(billboardPosRef.current.x, billboardPosRef.current.y, billboardPosRef.current.z)
+    billboard.group.rotation.y = billboardYawRef.current
+    billboard.group.scale.setScalar(billboardScaleRef.current)
     scene.add(billboard.group)
 
-    // Transform controls (translate/rotate/scale the billboard)
+    // Transform controls (kept for optional precise editing; off by default)
     const tctrl = new TransformControls(camera, renderer.domElement)
     tctrl.enabled = false
     tctrl.visible = false
@@ -363,27 +390,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     tctrl.setSize(0.9)
     tctrl.attach(billboard.group)
     scene.add(tctrl)
-    // Disable orbit while dragging
     tctrl.addEventListener('dragging-changed', (e: any) => { controls.enabled = !e.value })
-    // Constrain transforms
     tctrl.addEventListener('objectChange', () => {
-      const mode = (tctrl as any).mode as 'translate'|'rotate'|'scale'
-      if (mode === 'translate') {
-        // keep billboard at fixed Y so it slides on XZ "floor"
-        billboard.group.position.y = billboardDefaultY
-      } else if (mode === 'rotate') {
-        // only yaw (around Y)
-        billboard.group.rotation.x = 0
-        billboard.group.rotation.z = 0
-      } else if (mode === 'scale') {
-        // uniform scale clamp
-        const s = (billboard.group.scale.x + billboard.group.scale.y + billboard.group.scale.z) / 3
-        const clamped = THREE.MathUtils.clamp(s, 0.35, 3.0)
-        billboard.setUserScale(clamped)
-        billboard.group.scale.setScalar(clamped)
-      }
+      billboardPosRef.current.copy(billboard.group.position)
+      billboardYawRef.current = billboard.group.rotation.y
+      billboardScaleRef.current = billboard.group.scale.x
     })
-    // Keyboard shortcuts to toggle/edit billboard
+
+    // Key to toggle gizmo (optional)
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'b' || e.key === 'B') {
         const enable = !tctrl.enabled
@@ -656,6 +670,45 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.minPolarAngle = cfgC.camera.minPolarAngle
       controls.maxPolarAngle = cfgC.camera.maxPolarAngle
 
+      // Apply on-screen joystick transforms to billboard
+      if (editEnabled) {
+        // MOVE
+        if (mode === 'move') {
+          const mv = moveVecRef.current
+          const speed = 3.0 // world units/sec at full deflection
+          if (movePlane === 'XZ') {
+            billboardPosRef.current.x += (mv.x * speed) * dt
+            billboardPosRef.current.z += (-mv.y * speed) * dt
+            billboardPosRef.current.y += (moveAxis3Ref.current * speed) * dt
+          } else { // XY
+            billboardPosRef.current.x += (mv.x * speed) * dt
+            billboardPosRef.current.y += (mv.y * speed) * dt
+            billboardPosRef.current.z += (moveAxis3Ref.current * speed) * dt
+          }
+          // Clamp Y softly around default height
+          billboardPosRef.current.y = THREE.MathUtils.clamp(billboardPosRef.current.y, 1.2, 5.2)
+        }
+        // ROTATE (yaw by horizontal)
+        if (mode === 'rotate') {
+          const rvx = rotateVecRef.current.x
+          const yawSpeed = 2.8 // rad/sec
+          billboardYawRef.current += (rvx * yawSpeed) * dt
+        }
+        // SCALE (vertical delta)
+        if (mode === 'scale') {
+          const sDelta = scaleDeltaRef.current
+          const sSpeed = 1.4 // scale units/sec
+          const next = THREE.MathUtils.clamp(billboardScaleRef.current + (sDelta * sSpeed) * dt, 0.35, 3.0)
+          billboardScaleRef.current = next
+        }
+
+        // Push to actual object each frame
+        billboard.group.position.copy(billboardPosRef.current)
+        billboard.group.rotation.y = billboardYawRef.current
+        billboard.setUserScale(billboardScaleRef.current)
+        billboard.group.scale.setScalar(billboardScaleRef.current)
+      }
+
       // colors
       accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.25, 0, 0.25))
       accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.2, 0, 0.2))
@@ -674,10 +727,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       setLinePixels(px)
 
       // fog
-      if (fogMat?.uniforms?.uTime) {
-        fogMat.uniforms.uTime.value = t
-        fogMat.uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
-        ;(fogMat.uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ((fogMat as any)?.uniforms?.uTime) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(fogMat as any).uniforms.uTime.value = t
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(fogMat as any).uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
       }
 
       // starfield visibility follows toggle
@@ -752,8 +809,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const elev = cfgC.orbitElev
         const pos = pathPoint(cfgC.path, angleRef.current, radius)
         camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
-        camera.lookAt(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
-        controls.target.set(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
+        camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
+        controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
       } else {
         camera.position.y += (bob - (camera as any).__lastBobY || 0)
         ;(camera as any).__lastBobY = bob
@@ -903,11 +960,289 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     }
   // keep renderScale/bloom/accessibility/auth as triggers; avoid re-running on cfg changes
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
+  }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth, editEnabled, mode, movePlane])
+
+  // UI components: on-screen auto-hide joystick/controller
+  const Joystick = (props: {
+    size?: number
+    onChange: (nx: number, ny: number) => void
+    onEnd?: () => void
+    label?: string
+  }) => {
+    const size = props.size ?? 120
+    const radius = size / 2
+    const knobRef = useRef<HTMLDivElement | null>(null)
+    const baseRef = useRef<HTMLDivElement | null>(null)
+    const dragRef = useRef<{active:boolean; cx:number; cy:number}>({ active:false, cx:0, cy:0 })
+
+    const setKnob = (nx: number, ny: number) => {
+      const k = knobRef.current
+      if (!k) return
+      const x = nx * (radius - 14)
+      const y = ny * (radius - 14)
+      k.style.transform = `translate(${x}px, ${y}px)`
+    }
+
+    const onPointerDown = (e: React.PointerEvent) => {
+      const rect = baseRef.current!.getBoundingClientRect()
+      dragRef.current.active = true
+      dragRef.current.cx = rect.left + rect.width/2
+      dragRef.current.cy = rect.top + rect.height/2
+      ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+      onPointerMove(e)
+    }
+    const onPointerMove = (e: React.PointerEvent) => {
+      if (!dragRef.current.active) return
+      lastUiInputRef.current = Date.now()
+      const dx = e.clientX - dragRef.current.cx
+      const dy = e.clientY - dragRef.current.cy
+      const dist = Math.min(1, Math.hypot(dx, dy) / (radius - 14))
+      const ang = Math.atan2(dy, dx)
+      const nx = Math.cos(ang) * dist
+      const ny = Math.sin(ang) * dist
+      setKnob(nx, ny)
+      props.onChange(nx, ny)
+    }
+    const end = () => {
+      dragRef.current.active = false
+      setKnob(0, 0)
+      props.onChange(0, 0)
+      props.onEnd?.()
+    }
+
+    return (
+      <div
+        ref={baseRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={end}
+        onPointerCancel={end}
+        onPointerLeave={() => { if (!dragRef.current.active) return }}
+        style={{
+          position:'relative',
+          width:size, height:size, borderRadius:'50%',
+          background:'radial-gradient(ellipse at center, rgba(40,48,60,0.65), rgba(15,18,24,0.85))',
+          border:'1px solid #2b2f3a',
+          boxShadow:'inset 0 2px 14px rgba(0,0,0,0.4)',
+          touchAction:'none',
+          userSelect:'none'
+        }}
+      >
+        <div style={{
+          position:'absolute', left: '50%', top:'50%', width:2, height:2, transform:'translate(-1px,-1px)',
+          background:'#789', borderRadius:1, opacity:0.6
+        }}/>
+        <div ref={knobRef} style={{
+          position:'absolute', left:'50%', top:'50%',
+          width:28, height:28, marginLeft:-14, marginTop:-14, borderRadius:'50%',
+          background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)', boxShadow:'0 2px 8px rgba(0,0,0,0.35)',
+          border:'1px solid #5a6b84', transform:'translate(0px,0px)'
+        }}/>
+        {props.label && <div style={{ position:'absolute', bottom:-18, width:'100%', textAlign:'center', fontSize:10, opacity:0.75 }}>{props.label}</div>}
+      </div>
+    )
+  }
+
+  const Rail = (props: {
+    length?: number
+    vertical?: boolean
+    onChange: (n: number) => void // -1..1
+    value?: number
+    label?: string
+  }) => {
+    const length = props.length ?? 120
+    const vertical = !!props.vertical
+    const railRef = useRef<HTMLDivElement | null>(null)
+    const knobRef = useRef<HTMLDivElement | null>(null)
+    const dragRef = useRef<{active:boolean; min:number; max:number}>({ active:false, min:0, max:0 })
+
+    useEffect(() => {
+      const k = knobRef.current
+      if (!k) return
+      const v = THREE.MathUtils.clamp(props.value ?? 0, -1, 1)
+      if (vertical) k.style.transform = `translate(0px, ${((1 - v) * 0.5 * length) - (length/2)}px)`
+      else k.style.transform = `translate(${((v + 1) * 0.5 * length) - (length/2)}px, 0px)`
+    }, [props.value, vertical, length])
+
+    const start = (e: React.PointerEvent) => {
+      const rect = railRef.current!.getBoundingClientRect()
+      dragRef.current.active = true
+      dragRef.current.min = vertical ? rect.top : rect.left
+      dragRef.current.max = vertical ? rect.bottom : rect.right
+      ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+      move(e)
+    }
+    const move = (e: React.PointerEvent) => {
+      if (!dragRef.current.active) return
+      lastUiInputRef.current = Date.now()
+      const pos = vertical ? e.clientY : e.clientX
+      const t = THREE.MathUtils.clamp((pos - dragRef.current.min) / Math.max(1, (dragRef.current.max - dragRef.current.min)), 0, 1)
+      const v = vertical ? (1 - t) * 2 - 1 : t * 2 - 1
+      if (knobRef.current) {
+        if (vertical) knobRef.current.style.transform = `translate(0px, ${((1 - v) * 0.5 * length) - (length/2)}px)`
+        else knobRef.current.style.transform = `translate(${((v + 1) * 0.5 * length) - (length/2)}px, 0px)`
+      }
+      props.onChange(v)
+    }
+    const end = () => { dragRef.current.active = false }
+
+    return (
+      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6 }}>
+        <div
+          ref={railRef}
+          onPointerDown={start}
+          onPointerMove={move}
+          onPointerUp={end}
+          onPointerCancel={end}
+          style={{
+            width: vertical ? 18 : length,
+            height: vertical ? length : 18,
+            borderRadius: 9,
+            background:'linear-gradient(180deg, rgba(28,34,44,0.9), rgba(18,22,28,0.9))',
+            border:'1px solid #2b2f3a',
+            position:'relative',
+            touchAction:'none',
+            userSelect:'none'
+          }}
+        >
+          <div ref={knobRef} style={{
+            position:'absolute',
+            left: vertical ? 3 : '50%',
+            top: vertical ? '50%' : 3,
+            width: vertical ? 12 : 12,
+            height: vertical ? 12 : 12,
+            marginLeft: vertical ? 0 : -6,
+            marginTop: vertical ? -6 : 0,
+            borderRadius: 6,
+            background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)',
+            border:'1px solid #5a6b84',
+            boxShadow:'0 2px 6px rgba(0,0,0,0.35)',
+            transform: vertical ? 'translate(0px,0px)' : 'translate(0px,0px)'
+          }}/>
+        </div>
+        {props.label && <div style={{ fontSize:10, opacity:0.75 }}>{props.label}</div>}
+      </div>
+    )
+  }
+
+  const Controller = () => {
+    const [planeLocal, setPlaneLocal] = useState(movePlane)
+    useEffect(() => { setPlaneLocal(movePlane) }, [movePlane])
+
+    return (
+      <div
+        onMouseEnter={() => { hoverUiRef.current = true }}
+        onMouseLeave={() => { hoverUiRef.current = false }}
+        style={{
+          position:'absolute',
+          left:12, bottom:12,
+          padding:10,
+          border:'1px solid #2b2f3a',
+          borderRadius:10,
+          background:'rgba(10,12,16,0.9)',
+          color:'#e6f0ff',
+          display: uiShown ? 'flex' : 'none',
+          gap:12,
+          zIndex: 12,
+          boxShadow:'0 6px 24px rgba(0,0,0,0.45)',
+          userSelect:'none',
+          pointerEvents:'auto'
+        }}
+      >
+        <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+          <div style={{ display:'flex', gap:6 }}>
+            <button onClick={() => { setMode('move'); lastUiInputRef.current = Date.now() }} style={tabBtnStyle(mode === 'move')}>Move</button>
+            <button onClick={() => { setMode('rotate'); lastUiInputRef.current = Date.now() }} style={tabBtnStyle(mode === 'rotate')}>Rotate</button>
+            <button onClick={() => { setMode('scale'); lastUiInputRef.current = Date.now() }} style={tabBtnStyle(mode === 'scale')}>Scale</button>
+          </div>
+          {mode === 'move' && (
+            <div style={{ display:'flex', gap:12, alignItems:'center' }}>
+              <Joystick
+                label={planeLocal === 'XZ' ? 'X/Z' : 'X/Y'}
+                onChange={(nx, ny) => {
+                  moveVecRef.current.x = nx
+                  moveVecRef.current.y = ny
+                }}
+                onEnd={() => {}}
+              />
+              <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'center' }}>
+                <div style={{ display:'flex', gap:6 }}>
+                  <button onClick={() => { setMovePlane('XZ'); setPlaneLocal('XZ'); lastUiInputRef.current = Date.now() }} style={chipStyle(planeLocal === 'XZ')}>XZ</button>
+                  <button onClick={() => { setMovePlane('XY'); setPlaneLocal('XY'); lastUiInputRef.current = Date.now() }} style={chipStyle(planeLocal === 'XY')}>XY</button>
+                </div>
+                <Rail vertical length={120} label={planeLocal === 'XZ' ? 'Y' : 'Z'} onChange={(v) => { moveAxis3Ref.current = v }} />
+                <div style={{ fontSize:11, opacity:0.7 }}>Pos: {billboardPosRef.current.x.toFixed(2)}, {billboardPosRef.current.y.toFixed(2)}, {billboardPosRef.current.z.toFixed(2)}</div>
+              </div>
+            </div>
+          )}
+          {mode === 'rotate' && (
+            <div style={{ display:'flex', gap:12, alignItems:'center' }}>
+              <Joystick
+                label="Yaw"
+                onChange={(nx, ny) => {
+                  rotateVecRef.current.x = nx
+                  rotateVecRef.current.y = ny
+                }}
+                onEnd={() => {}}
+              />
+              <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                <div style={{ fontSize:11, opacity:0.7 }}>Yaw: {(billboardYawRef.current * 57.2958).toFixed(1)}°</div>
+                <button
+                  onClick={() => { billboardYawRef.current = 0; lastUiInputRef.current = Date.now() }}
+                  style={btnMini}
+                >Reset</button>
+              </div>
+            </div>
+          )}
+          {mode === 'scale' && (
+            <div style={{ display:'flex', gap:12, alignItems:'center' }}>
+              <Rail length={160} onChange={(v) => { scaleDeltaRef.current = v }} label="Scale velocity" />
+              <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'center' }}>
+                <div style={{ fontSize:11, opacity:0.7 }}>Scale: {billboardScaleRef.current.toFixed(2)}×</div>
+                <div style={{ display:'flex', gap:6 }}>
+                  <button onClick={() => { billboardScaleRef.current = Math.max(0.35, billboardScaleRef.current - 0.1); lastUiInputRef.current = Date.now() }} style={btnMini}>-</button>
+                  <button onClick={() => { billboardScaleRef.current = Math.min(3.0, billboardScaleRef.current + 0.1); lastUiInputRef.current = Date.now() }} style={btnMini}>+</button>
+                </div>
+                <button onClick={() => { billboardScaleRef.current = 1; lastUiInputRef.current = Date.now() }} style={btnMini}>Reset</button>
+              </div>
+            </div>
+          )}
+          <div style={{ display:'flex', justifyContent:'space-between', gap:8 }}>
+            <button onClick={() => { // center in front
+              billboardPosRef.current.set(0, 2.95, 1.05)
+              billboardYawRef.current = 0
+              lastUiInputRef.current = Date.now()
+            }} style={btnMini}>Center</button>
+            <button onClick={() => {
+              setEditEnabled(false)
+              lastUiInputRef.current = 0
+            }} style={btnMini}>Done</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div data-visual="wireframe3d" style={{ position: 'relative', width: '100%', height: '100%' }}>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} aria-label="Wireframe House 3D" />
+      {/* Floating toggle button for billboard edit mode */}
+      <div style={{ position:'absolute', left:12, bottom:12, zIndex:11, pointerEvents:'auto' }}>
+        {!uiShown && (
+          <button
+            onClick={() => { setEditEnabled(e => !e); lastUiInputRef.current = Date.now() }}
+            title="Edit billboard"
+            style={{
+              padding:'8px 10px', fontSize:12, borderRadius:20, border:'1px solid #2b2f3a',
+              background:'rgba(16,18,22,0.85)', color:'#cfe7ff', cursor:'pointer', opacity:0.9
+            }}
+          >
+            {editEnabled ? 'Hide Controls' : 'Edit Billboard'}
+          </button>
+        )}
+      </div>
+      {editEnabled && <Controller />}
+
       <Wire3DPanel open={panelOpen} cfg={cfg} onToggle={() => setPanelOpen(o => !o)} onChange={setCfg} />
     </div>
   )
@@ -995,5 +1330,30 @@ const btnStyle: React.CSSProperties = {
   padding:'6px 10px', fontSize:12, borderRadius:6, border:'1px solid #2b2f3a',
   background:'rgba(16,18,22,0.8)', color:'#cfe7ff', cursor:'pointer'
 }
+
+const btnMini: React.CSSProperties = {
+  padding:'6px 8px', fontSize:12, borderRadius:6, border:'1px solid #2b2f3a',
+  background:'rgba(16,18,22,0.8)', color:'#cfe7ff', cursor:'pointer'
+}
+
+const tabBtnStyle = (active: boolean): React.CSSProperties => ({
+  padding:'6px 10px',
+  fontSize:12,
+  borderRadius:6,
+  border:'1px solid #2b2f3a',
+  background: active ? 'linear-gradient(180deg,#1e2632,#141a23)' : 'rgba(16,18,22,0.8)',
+  color: active ? '#e6f0ff' : '#cfe7ff',
+  cursor:'pointer'
+})
+
+const chipStyle = (active: boolean): React.CSSProperties => ({
+  padding:'4px 8px',
+  fontSize:11,
+  borderRadius:12,
+  border:'1px solid #2b2f3a',
+  background: active ? 'rgba(32,38,48,0.9)' : 'rgba(16,18,22,0.7)',
+  color: active ? '#e6f0ff' : '#cfe7ff',
+  cursor:'pointer'
+})
 
 function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }

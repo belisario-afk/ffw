@@ -77,7 +77,6 @@ type LocalCfg = {
 const LS_KEY = 'ffw.wire3d.settings.v2'
 
 // Default GLB source (raw GitHub URL for your committed file)
-// You can override at runtime: window.FFW_CAR_GLB_URL = 'https://.../car.glb'
 const DEFAULT_GLB_URL = (window as any)?.FFW_CAR_GLB_URL
   || 'https://raw.githubusercontent.com/belisario-afk/try240/bf00e4ea26597cb5ba63c88e819a9fb696ada7d6/lamborghini_aventador_svj_sdc__free.glb'
 // Optional local fallback (place in public/assets/car.glb)
@@ -124,12 +123,12 @@ function defaults(initial?: any): LocalCfg {
       wireCar: true
     },
     car: {
-      scale: 0.75,         // smaller by default for readability
+      scale: 0.75,
       yOffset: 0.0,
-      pathRadius: 10.5,    // keep it further away by default
+      pathRadius: 10.5,
       turntable: false,
-      outline: false,      // off by default
-      flipForward: false   // user can flip if heuristic is wrong
+      outline: false,
+      flipForward: false
     }
   }
 }
@@ -245,7 +244,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const n = data.length / 4
       const col = new THREE.Color(r/(255*n), gr/(255*n), b/(255*n))
       const luminance = 0.2126*col.r + 0.7152*col.g + 0.0722*col.b
-      if (luminance < 0.35) col.multiplyScalar(1.25).clampScalar(0,1)
+      if (luminance < 0.35) { col.multiplyScalar(1.25); clampColor01(col) }
       return col
     }
     function addMansionWindows(add: (p: THREE.Vector3, out: THREE.Vector3) => void) {
@@ -310,6 +309,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     controls.maxPolarAngle = Math.PI * 0.85
     controls.target.set(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
 
+    // Expose for "Frame car" action
+    ;(window as any).__FFW_camera = camera
+    ;(window as any).__FFW_controls = controls
+
     let userInteracting = false
     controls.addEventListener('start', () => { userInteracting = true })
     controls.addEventListener('end', () => { userInteracting = false })
@@ -353,7 +356,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     const floorPlaceholder = createDarkPlaceholderTexture()
     floorMat.uniforms.tAlbum.value = floorPlaceholder
 
-    // Mosaic (fixed: always render when toggled; uses placeholder until album art is ready)
+    // Mosaic
     const mosaicGroup = new THREE.Group()
     const tiles: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
     const tileN = 8
@@ -380,7 +383,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         t.material.needsUpdate = true
       }
     }
-    // Init with placeholder so mosaic shows even before album loads
     applyTilesMap(placeholderTex)
     mosaicGroup.visible = false
     scene.add(mosaicGroup)
@@ -393,7 +395,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     ;(fatMat as any).worldUnits = false
     const setLinePixels = (px: number) => {
       const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-      fatMat.linewidth = Math.max(0.003, px / Math.max(1, draw.y)) // safer minimum
+      fatMat.linewidth = Math.max(0.003, px / Math.max(1, draw.y))
       fatMat.needsUpdate = true
     }
     {
@@ -581,7 +583,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           floorTex?.dispose(); floorTex = tex
           floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
 
-          // If mosaic is enabled, switch tiles to album art map
           if (cfgRef.current.fx.mosaicFloor) {
             applyTilesMap(tex)
           }
@@ -619,13 +620,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // GLB car model (replaces wireframe car) + outline option + auto forward detection
+    // GLB car model (with outline + forward detection)
     const car = createGlbCarModel({
       url: DEFAULT_GLB_URL,
       fallbackUrl: LOCAL_FALLBACK_GLB_URL,
-      targetLengthMeters: 4.6,                      // scale to realistic length
-      baseY: 0.055,                                  // base above floor
-      getAlbumColor: () => carColorRef.current,      // for color + outline
+      targetLengthMeters: 4.6,
+      baseY: 0.055,
+      getAlbumColor: () => carColorRef.current,
       getControls: () => ({
         scale: cfgRef.current.car.scale,
         yOffset: cfgRef.current.car.yOffset,
@@ -664,19 +665,16 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const stale = !latest || (now - (latest.t || 0)) > 240
 
       const cfgC = cfgRef.current
-
       const low = latest?.bands.low ?? 0.08
       const mid = latest?.bands.mid ?? 0.08
       const high = latest?.bands.high ?? 0.08
       const loud = latest?.loudness ?? 0.15
 
-      // Live-apply FOV from slider
       if (camera.fov !== cfgC.camera.fov) {
         camera.fov = cfgC.camera.fov
         camera.updateProjectionMatrix()
       }
 
-      // Controls live updates
       controls.enableDamping = cfgC.camera.enableDamping
       controls.dampingFactor = cfgC.camera.dampingFactor
       controls.enablePan = cfgC.camera.enablePan
@@ -689,7 +687,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.minPolarAngle = cfgC.camera.minPolarAngle
       controls.maxPolarAngle = cfgC.camera.maxPolarAngle
 
-      // Apply billboard controller (reads refs, no scene re-init)
+      // Billboard controller
       if (bbEditRef.current) {
         if (bbModeRef.current === 'move') {
           const mv = moveVecRef.current
@@ -727,7 +725,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.2, 0, 0.2))
       fatMat.color.set(accent); thinMat.color.set(accent)
 
-      // update billboard colors to match palette
       billboard.setColors(
         accent.clone().multiplyScalar(0.9),
         accent2.clone().multiplyScalar(1.0),
@@ -735,7 +732,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       )
       billboard.setVisible(!!cfgC.fx.lyricsMarquee)
 
-      // Update GLB car (album-adaptive tint; showcase path or turntable)
+      // Car
       car.group.visible = !!cfgC.fx.wireCar
       if (car.group.visible) {
         car.setColor?.(carColorRef.current)
@@ -755,15 +752,15 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const px = cfgC.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
       setLinePixels(px)
 
-      // fog
+      // fog (fix lerp typo)
       ;(fogMat as any).uniforms.uTime.value = t
       ;(fogMat as any).uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
-      ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerr(accent, 0.5))
+      ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
 
-      // starfield visibility
+      // starfield
       if (starfield) starfield.visible = !!cfgC.fx.starfield
 
-      // Mosaic/floor visibility (fixed)
+      // mosaic
       mosaicGroup.visible = !!cfgC.fx.mosaicFloor
       floorMesh.visible = !mosaicGroup.visible
       if (mosaicGroup.visible) {
@@ -807,7 +804,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         }
       }
 
-      // Animate billboard transitions and pop decay
       billboard.update(dt)
 
       // camera autopilot + bob
@@ -820,8 +816,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const elev = cfgC.orbitElev
         const pos = pathPoint(cfgC.path, angleRef.current, radius)
         camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
-        camera.lookAt(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
-        controls.target.set(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
+        camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
+        controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
       } else {
         camera.position.y += (bob - (camera as any).__lastBobY || 0)
         ;(camera as any).__lastBobY = bob
@@ -869,6 +865,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       disposeRenderer()
       renderer.dispose()
       floorPlaceholder?.dispose()
+      delete (window as any).__FFW_camera
+      delete (window as any).__FFW_controls
     }
 
     // build edges helpers
@@ -981,19 +979,16 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       group.renderOrder = 3
       group.position.y = opts.baseY
 
-      const holder = new THREE.Group() // transforms on model
+      const holder = new THREE.Group()
       group.add(holder)
 
-      // Keep a map of original material colors/emissive to apply tint idempotently
       const originals = new WeakMap<THREE.Material, { color?: THREE.Color; emissive?: THREE.Color }>()
       const candidatePaintMats = new Set<THREE.Material>()
       const edgeLines: THREE.LineSegments[] = []
 
-      // track facing direction relative to +X: +1 means +X is forward, -1 means -X
       let forwardSign: 1 | -1 = 1
       let baseScale = 1
 
-      // Previous world position to orient with motion vector
       const prevWorldPos = new THREE.Vector3()
       group.getWorldPosition(prevWorldPos)
 
@@ -1023,37 +1018,29 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       })()
 
       function prepareModel(scene: THREE.Object3D) {
-        // Align the longest axis to +X (car length). Most glTF models are +Y up.
         const bbox0 = new THREE.Box3().setFromObject(scene)
         const size0 = new THREE.Vector3(); bbox0.getSize(size0)
 
-        // Decide yaw rotation to map longest axis to X
+        // Map longest horizontal axis to X
         let yaw = 0
-        if (size0.z > size0.x && size0.z >= size0.y) yaw = -Math.PI / 2 // map Z->X
-        // If Y is longest, ignore (assume it's vertical)
+        if (size0.z > size0.x && size0.z >= size0.y) yaw = -Math.PI / 2
         scene.rotation.y = yaw
 
-        // Recompute bounds after yaw
         const bbox1 = new THREE.Box3().setFromObject(scene)
         const size1 = new THREE.Vector3(); bbox1.getSize(size1)
 
-        // Auto-scale by X-size to target length
         const lengthX = Math.max(0.001, size1.x)
         baseScale = opts.targetLengthMeters / lengthX
         scene.scale.setScalar(baseScale)
 
-        // Recompute bounds after scale for centering/grounding
         const bbox2 = new THREE.Box3().setFromObject(scene)
         const size2 = new THREE.Vector3(); const center2 = new THREE.Vector3()
         bbox2.getSize(size2); bbox2.getCenter(center2)
 
-        // Center XZ at origin
         scene.position.x = -center2.x
         scene.position.z = -center2.z
-        // Ground at y=0 (holder's local)
         scene.position.y = -bbox2.min.y
 
-        // Candidate material detection + outline edges creation
         scene.traverse((obj) => {
           const mesh = obj as THREE.Mesh
           if (!mesh.isMesh) return
@@ -1080,26 +1067,22 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             if ((m as any).transparent && (m as any).opacity < 0.04) (m as any).opacity = 0.04
           }
 
-          // Outline edges child (hidden by default; toggled globally)
           try {
-            const eg = new THREE.EdgesGeometry(mesh.geometry, 30)
+            const eg = new THREE.EdgesGeometry((obj as any).geometry, 30)
             const emat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthWrite: false, depthTest: true, toneMapped: true })
             const edges = new THREE.LineSegments(eg, emat)
-            edges.name = `edges_of_${mesh.name || 'mesh'}`
-            // Attach to the mesh so it inherits transforms
+            edges.name = `edges_of_${obj.name || 'mesh'}`
             mesh.add(edges)
             edgeLines.push(edges)
           } catch {}
         })
 
-        // Heuristic front/back detection
         forwardSign = detectForwardSign(scene)
 
         holder.add(scene)
       }
 
       function detectForwardSign(root: THREE.Object3D): 1 | -1 {
-        // Try semantic names to find front vs rear parts
         const fronts: number[] = []
         const rears: number[] = []
         const wheels: number[] = []
@@ -1117,11 +1100,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           return f > r ? 1 : -1
         }
         if (wheels.length >= 2) {
-          // Split wheels into two groups by x (front/rear axles). Assume larger x is front.
           const min = Math.min(...wheels), max = Math.max(...wheels)
-          return (max - min) > 0 ? 1 : 1 // assume +X is forward if unknown
+          return (max - min) > 0 ? 1 : 1
         }
-        // Fallback: assume +X is forward
         return 1
       }
 
@@ -1147,7 +1128,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             if (candidatePaintMats.has(m) && std.color) {
               temp.copy(albumColor)
               const l = 0.2126*temp.r + 0.7152*temp.g + 0.0722*temp.b
-              if (l < 0.3) temp.multiplyScalar(1.18).clampScalar(0,1)
+              if (l < 0.3) { temp.multiplyScalar(1.18); clampColor01(temp) }
               std.color.lerp(temp, 0.6)
               std.needsUpdate = true
             } else if (std.emissive) {
@@ -1157,8 +1138,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             }
           }
         })
-        // Outline color (slightly brighter)
-        const outlineCol = albumColor.clone().multiplyScalar(1.2).clampScalar(0, 1)
+        const outlineCol = clampColor01(albumColor.clone().multiplyScalar(1.2))
         for (const e of edgeLines) {
           const mat = e.material as THREE.LineBasicMaterial
           mat.color.copy(outlineCol)
@@ -1170,10 +1150,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         for (const e of edgeLines) e.visible = v
       }
 
-      // Motion driver: figure-8 (if !turntable) with proper facing, or turntable at center
       const state = { t: 0 }
       function update(dt: number, env: { t: number; radius: number; turntable: boolean; flipForward: boolean; scale: number; yOffset: number }) {
-        // Live scale and height
         applyUserScale(env.scale)
         group.position.y = opts.baseY + env.yOffset
 
@@ -1183,7 +1161,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const denom = 1 + s*s
 
         if (env.turntable) {
-          // Centered, rotate in place
           group.position.x = 0
           group.position.z = 0
           holder.rotation.y = (a * 0.6 + (env.flipForward ? Math.PI : 0))
@@ -1194,7 +1171,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           const prev = prevWorldPos.clone()
           group.position.x = x
           group.position.z = z
-          // Face motion direction (tangent)
           const vel = new THREE.Vector3().subVectors(group.position, prev)
           prevWorldPos.copy(group.position)
           let yaw = holder.rotation.y
@@ -1202,23 +1178,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             yaw = Math.atan2(vel.z, vel.x) + (forwardSign === 1 ? 0 : Math.PI)
             if (env.flipForward) yaw += Math.PI
           }
-          // Smooth a bit
           holder.rotation.y = THREE.MathUtils.lerp(holder.rotation.y, yaw, 0.25)
         }
       }
 
       function frameToView(camera: THREE.PerspectiveCamera, controls: OrbitControls) {
-        // Compute world bounding sphere of the holder
         const box = new THREE.Box3().setFromObject(holder)
         const center = new THREE.Vector3(); const size = new THREE.Vector3()
         box.getCenter(center); box.getSize(size)
         const radius = size.length() * 0.5
-        // Target the center
         controls.target.copy(center)
-        // Compute optimal distance from FOV
         const fov = camera.fov * Math.PI / 180
-        const dist = radius / Math.tan(fov / 2) * 1.3 // padding
-        // Move camera along current view direction but at new distance
+        const dist = radius / Math.tan(fov / 2) * 1.3
         const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize()
         camera.position.copy(controls.target).addScaledVector(dir, dist)
         camera.updateProjectionMatrix()
@@ -1241,17 +1212,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         }
       }
 
-      return {
-        group,
-        update,
-        dispose,
-        setColor,
-        setOutlineVisible,
-        frameToView
-      }
+      return { group, update, dispose, setColor, setOutlineVisible, frameToView }
     }
 
-  // Only re-run when renderScale/bloom/accessibility/auth change
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
@@ -1457,25 +1420,16 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   const CarControlsCard = () => {
     const onFrame = () => {
-      const api = carApiRef.current
-      const canvas = canvasRef.current
-      if (!api || !canvas) return
-      // Access OrbitControls by querying the renderer domElement's event listener chain is brittle; we have closure access
-      // So we dispatch a custom event handled inside scene? Simpler: expose a window handler; but here we'll use a ref via closure
-      // Since we don't have direct controls ref here, we re-open the settings with an event that main scope listens to.
       const ev = new CustomEvent('ffw:frame-car-request')
       window.dispatchEvent(ev as any)
     }
 
-    // We'll wire the frame event to actual action inside the effect scope where controls/camera exist
     useEffect(() => {
       const handler = () => {
         const api = carApiRef.current
-        if (!api) return
-        // We don't have direct camera/controls here; we'll stash them on window when created:
         const cam = (window as any).__FFW_camera as THREE.PerspectiveCamera | undefined
         const ctr = (window as any).__FFW_controls as OrbitControls | undefined
-        if (cam && ctr) api.frameToView(cam, ctr)
+        if (api && cam && ctr) api.frameToView(cam, ctr)
       }
       window.addEventListener('ffw:frame-car-request', handler as EventListener)
       return () => window.removeEventListener('ffw:frame-car-request', handler as EventListener)
@@ -1668,3 +1622,11 @@ const chipStyle = (active: boolean): React.CSSProperties => ({
 })
 
 function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
+
+// Clamp a THREE.Color's components to [0,1]
+function clampColor01(col: THREE.Color) {
+  col.r = Math.max(0, Math.min(1, col.r))
+  col.g = Math.max(0, Math.min(1, col.g))
+  col.b = Math.max(0, Math.min(1, col.b))
+  return col
+}

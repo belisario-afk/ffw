@@ -3,10 +3,10 @@ import { Route, Routes, useNavigate } from 'react-router-dom'
 import { loginWithSpotify, restoreFromStorage, type AuthState, signOut } from './auth/token'
 import Callback from './auth/Callback'
 import PlayerController from './controllers/PlayerController'
-import BlankScene from './visuals/scenes/BlankScene'
 const WireframeHouse = React.lazy(() => import('./visuals/scenes/WireframeHouse'))
 const WireframeHouse3D = React.lazy(() => import('./visuals/scenes/WireframeHouse3D'))
 const PsyKaleidoTunnel = React.lazy(() => import('./visuals/scenes/PsyKaleidoTunnel'))
+const OrigamiFold = React.lazy(() => import('./visuals/scenes/OrigamiFold'))
 import Popup from './ui/Popup'
 import QualityPanel from './ui/QualityPanel'
 import VJPanel from './ui/VJPanel'
@@ -18,12 +18,8 @@ import { detectGPUInfo } from './utils/gpu'
 import { HousePanel, defaultHouseSettings, type HouseSettings } from './ui/HousePanel'
 import { startReactivityOrchestrator } from './audio/ReactivityOrchestrator'
 import { startFallbackTicker } from './audio/FallbackTicker'
-
-// App-wide playback provider + global top bar (Sign in / Play in Browser)
 import { PlaybackProvider } from './playback/PlaybackProvider'
 import GlobalTopBar from './ui/GlobalTopBar'
-
-// Bridge: when we already have a token (your existing auth flow), expose it to the player
 import { setSpotifyTokenProvider } from './spotify/player'
 
 type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
@@ -46,7 +42,10 @@ export default function App() {
     albumSkin: isAlbumSkinEnabled()
   })
   const [theme, setThemeState] = useState<ThemeName>(getTheme())
-  const [scene, setScene] = useState<string>(() => localStorage.getItem('ffw_scene') || 'Blank')
+  const [scene, setScene] = useState<string>(() => {
+    const saved = localStorage.getItem('ffw_scene') || 'Origami Fold'
+    return saved === 'Blank' ? 'Origami Fold' : saved
+  })
   const [houseSettings, setHouseSettings] = useState<HouseSettings>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('ffw_house_settings') || '{}')
@@ -67,190 +66,146 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    document.documentElement.style.setProperty('--contrast', accessibility.highContrast ? '1.2' : '1')
-    document.documentElement.classList.toggle('album-skin', accessibility.albumSkin)
-    setAlbumSkinEnabled(accessibility.albumSkin)
-  }, [accessibility.highContrast, accessibility.albumSkin])
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'q') setPanel(p => p === 'quality' ? null : 'quality')
-      if (e.key === 'v') setPanel(p => p === 'vj' ? null : 'vj')
-      if (e.key === 'd') setPanel(p => p === 'devices' ? null : 'devices')
-      if (e.key === 's') setPanel(p => p === 'scene' ? null : 'scene')
-      if (e.key === 'Escape') setPanel(null)
-      if (e.key === 'l' && !auth) handleLogin()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    setSpotifyTokenProvider(() => auth?.access_token || '')
   }, [auth])
 
   useEffect(() => {
-    localStorage.setItem('ffw_house_settings', JSON.stringify(houseSettings))
-  }, [houseSettings])
-
-  // Start reactivity engines
-  useEffect(() => {
-    const stopOrch = startReactivityOrchestrator()
-    const stopFallback = startFallbackTicker({ maxStaleMs: 250, fps: 60 })
-    return () => { stopOrch(); stopFallback() }
+    const stop = startReactivityOrchestrator()
+    const stopFallback = startFallbackTicker()
+    return () => { stop?.(); stopFallback?.() }
   }, [])
 
-  // Bridge your existing auth token to the global playback system so all scenes can use it
   useEffect(() => {
-    const t = (auth as any)?.accessToken as string | undefined
-    if (t) {
-      try {
-        setSpotifyTokenProvider(async () => t)
-        ;(window as any).__ffw__getSpotifyToken = async () => t
-        localStorage.setItem('ffw.spotify.token', t)
-        const approxExpiry = Date.now() + 55 * 60 * 1000 // ~55 min from now
-        localStorage.setItem('ffw.spotify.expires_at', String(approxExpiry))
-      } catch {}
-    }
-  }, [auth])
-
-  function handleLogin() { loginWithSpotify({ scopes: defaultScopes() }) }
-  function handleSignOut() {
-    signOut()
-    setAuth(null)
-    try {
-      localStorage.removeItem('ffw.spotify.token')
-      localStorage.removeItem('ffw.spotify.expires_at')
-    } catch {}
-    navigate('/')
-    location.reload()
-  }
+    setTheme(theme)
+  }, [theme])
 
   function onThemeChange(t: ThemeName) {
     setThemeState(t)
     setTheme(t)
-    if (t === 'album' && !accessibility.albumSkin) {
-      setAccessibility(a => ({ ...a, albumSkin: true }))
-    }
   }
 
-  function onSceneChange(v: string) {
-    setScene(v)
-    localStorage.setItem('ffw_scene', v)
+  function onSceneChange(s: string) {
+    setScene(s)
+    try { localStorage.setItem('ffw_scene', s) } catch {}
   }
 
   return (
-    <PlaybackProvider key={(auth as any)?.accessToken ? 'authed' : 'noauth'}>
-      <div className="app-shell" role="application" aria-label="FFW Visualizer">
-        <GlobalTopBar />
-
-        <div className="canvas-wrap">
-          <div className="hud">
-            <div className="badge" aria-live="polite">FPS: {Math.round(fps)}</div>
-            <div className="badge" title="GPU info">{gpu}</div>
-          </div>
-          <ThemeManager />
-          <AlbumSkinWatcher />
-          <Routes>
-            <Route path="/callback" element={<Callback onAuth={a => setAuth(a)} />} />
-            <Route path="/*" element={
-              <Suspense fallback={<div className="badge" style={{ position: 'absolute', left: 16, top: 72 }}>Loading scene…</div>}>
-                {scene === 'Wireframe House' ? (
-                  <WireframeHouse
-                    auth={auth}
-                    quality={quality}
-                    accessibility={{
-                      epilepsySafe: accessibility.epilepsySafe,
-                      reducedMotion: accessibility.reducedMotion,
-                      highContrast: accessibility.highContrast
-                    }}
-                    settings={houseSettings}
-                  />
-                ) : scene === 'Wireframe House 3D' ? (
-                  <WireframeHouse3D
-                    auth={auth}
-                    quality={quality}
-                    accessibility={{
-                      epilepsySafe: accessibility.epilepsySafe,
-                      reducedMotion: accessibility.reducedMotion,
-                      highContrast: accessibility.highContrast
-                    }}
-                    settings={houseSettings}
-                  />
-                ) : scene === 'Psychedelic Tunnel' ? (
-                  <PsyKaleidoTunnel
-                    auth={auth}
-                    quality={quality}
-                    accessibility={accessibility}
-                  />
-                ) : (
-                  <BlankScene auth={auth} quality={quality} accessibility={accessibility} />
-                )}
-              </Suspense>
-            } />
-          </Routes>
-          <div className="cyber-panel" aria-hidden={false}>
-            <strong>FFW</strong> — <span style={{ color: 'var(--accent)' }}>Cyber</span> Visualizer
-            <span style={{ marginLeft: 8, color: 'var(--muted)' }}>(Q Quality • V VJ • D Devices • S Scene)</span>
-            <div style={{ display: 'inline-flex', gap: 8, marginLeft: 10, alignItems: 'center' }}>
-              <label htmlFor="scene" style={{ fontSize: 11, color: 'var(--muted)' }}>Scene</label>
-              <select id="scene" value={scene} onChange={(e) => onSceneChange(e.currentTarget.value)} title="Scene selector" aria-label="Scene selector">
-                <option value="Blank">Blank</option>
-                <option value="Wireframe House">Wireframe House (2D)</option>
-                <option value="Wireframe House 3D">Wireframe House 3D (Three)</option>
-                <option value="Psychedelic Tunnel">Psychedelic Kaleido Tunnel</option>
-              </select>
-
-              {(scene === 'Wireframe House' || scene === 'Wireframe House 3D') && (
-                <button className="btn" onClick={() => setPanel('scene')} title="Scene settings" aria-label="Scene settings">⚙️</button>
-              )}
-
-              <label htmlFor="theme" style={{ fontSize: 11, color: 'var(--muted)' }}>Theme</label>
-              <select id="theme" value={theme} onChange={(e) => onThemeChange(e.currentTarget.value as ThemeName)} title="Theme" aria-label="Theme">
-                <option value="album">Album (auto)</option>
-                <option value="neon">Neon Aqua</option>
-                <option value="magenta">Magenta</option>
-                <option value="matrix">Matrix</option>
-                <option value="sunset">Sunset</option>
-                <option value="slate">Slate (readable dark)</option>
-                <option value="light">Light (high legibility)</option>
-                <option value="hcpro">High Contrast Pro</option>
-              </select>
-
-              {!auth ? (
-                <button className="btn primary" onClick={handleLogin} aria-label="Login with Spotify">Login</button>
+    <PlaybackProvider auth={auth}>
+      <GlobalTopBar
+        auth={auth}
+        onLogin={() => loginWithSpotify().then(a => setAuth(a))}
+        onLogout={() => { signOut(); setAuth(null) }}
+      />
+      <PlayerController auth={auth} />
+      <div className="app-root">
+        <div className="status-bar">
+          <span className="badge">{gpu}</span>
+          <span className="badge">{Math.round(fps)} FPS</span>
+        </div>
+        <ThemeManager />
+        <AlbumSkinWatcher />
+        <Routes>
+          <Route path="/callback" element={<Callback onAuth={a => setAuth(a)} />} />
+          <Route path="/*" element={
+            <Suspense fallback={<div className="badge" style={{ position: 'absolute', left: 16, top: 72 }}>Loading scene…</div>}>
+              {scene === 'Wireframe House' ? (
+                <WireframeHouse
+                  auth={auth}
+                  quality={quality}
+                  accessibility={{
+                    epilepsySafe: accessibility.epilepsySafe,
+                    reducedMotion: accessibility.reducedMotion,
+                    highContrast: accessibility.highContrast
+                  }}
+                  settings={houseSettings}
+                />
+              ) : scene === 'Wireframe House 3D' ? (
+                <WireframeHouse3D
+                  auth={auth}
+                  quality={quality}
+                  accessibility={{
+                    epilepsySafe: accessibility.epilepsySafe,
+                    reducedMotion: accessibility.reducedMotion,
+                    highContrast: accessibility.highContrast
+                  }}
+                  settings={houseSettings}
+                />
+              ) : scene === 'Psychedelic Tunnel' ? (
+                <PsyKaleidoTunnel
+                  auth={auth}
+                  quality={quality}
+                  accessibility={accessibility}
+                />
               ) : (
-                <button className="btn" onClick={handleSignOut} aria-label="Sign out">Sign out</button>
+                <OrigamiFold
+                  quality={{ renderScale: quality.renderScale, bloom: quality.bloom }}
+                  accessibility={{ epilepsySafe: accessibility.epilepsySafe, reducedMotion: accessibility.reducedMotion, highContrast: accessibility.highContrast }}
+                />
               )}
-            </div>
+            </Suspense>
+          } />
+        </Routes>
+
+        <div className="cyber-panel" aria-hidden={false}>
+          <strong>FFW</strong> — <span style={{ color: 'var(--accent)' }}>Cyber</span> Visualizer
+          <span style={{ marginLeft: 8, color: 'var(--muted)' }}>(Q Quality • V VJ • D Devices • S Scene)</span>
+          <div style={{ display: 'inline-flex', gap: 8, marginLeft: 10, alignItems: 'center' }}>
+            <label htmlFor="scene" style={{ fontSize: 11, color: 'var(--muted)' }}>Scene</label>
+            <select id="scene" value={scene} onChange={(e) => onSceneChange(e.currentTarget.value)} title="Scene selector" aria-label="Scene selector">
+              <option value="Origami Fold">Origami Fold</option>
+              <option value="Wireframe House">Wireframe House (2D)</option>
+              <option value="Wireframe House 3D">Wireframe House 3D (Three)</option>
+              <option value="Psychedelic Tunnel">Psychedelic Kaleido Tunnel</option>
+            </select>
+
+            {(scene === 'Wireframe House' || scene === 'Wireframe House 3D') && (
+              <button className="btn" onClick={() => setPanel('scene')} title="Scene settings" aria-label="Scene settings">⚙️</button>
+            )}
+
+            <label htmlFor="theme" style={{ fontSize: 11, color: 'var(--muted)' }}>Theme</label>
+            <select id="theme" value={theme} onChange={(e) => onThemeChange(e.currentTarget.value as ThemeName)} title="Theme" aria-label="Theme">
+              <option value="album">Album (auto)</option>
+              <option value="neon">Neon Aqua</option>
+              <option value="magenta">Magenta</option>
+              <option value="matrix">Matrix</option>
+              <option value="sunset">Sunset</option>
+              <option value="slate">Slate (readable dark)</option>
+              <option value="light">Light (high legibility)</option>
+            </select>
+
+            <button className="btn" onClick={() => setPanel('quality')} title="Quality" aria-label="Quality">Q</button>
+            <button className="btn" onClick={() => setPanel('vj')} title="VJ / Accessibility" aria-label="VJ / Accessibility">V</button>
+            <button className="btn" onClick={() => setPanel('devices')} title="Devices" aria-label="Devices">D</button>
           </div>
         </div>
 
-        <PlayerController auth={auth} onOpenDevices={() => setPanel('devices')} />
-
-        <Popup open={panel === 'quality'} title="Quality" onClose={() => setPanel(null)}>
-          <QualityPanel value={quality} onChange={setQuality} />
+        <Popup open={panel === 'quality'} onClose={() => setPanel(null)} title="Quality">
+          <QualityPanel value={quality} onChange={setQuality as any} />
         </Popup>
-
-        <Popup open={panel === 'vj'} title="VJ / Accessibility" onClose={() => setPanel(null)}>
-          <VJPanel value={accessibility} onChange={setAccessibility} />
+        <Popup open={panel === 'vj'} onClose={() => setPanel(null)} title="VJ / Accessibility">
+          <VJPanel
+            value={{
+              epilepsySafe: accessibility.epilepsySafe,
+              reducedMotion: accessibility.reducedMotion,
+              highContrast: accessibility.highContrast,
+              albumSkin: accessibility.albumSkin
+            }}
+            onChange={(v) => {
+              setAccessibility(v)
+              setAlbumSkinEnabled(v.albumSkin)
+            }}
+          />
         </Popup>
-
-        <Popup open={panel === 'scene'} title="Wireframe House" onClose={() => setPanel(null)}>
-          <HousePanel value={houseSettings} onChange={setHouseSettings} />
+        <Popup open={panel === 'devices'} onClose={() => setPanel(null)} title="Spotify Devices">
+          <DevicePicker />
         </Popup>
-
-        <Popup open={panel === 'devices'} title="Devices" onClose={() => setPanel(null)}>
-          <DevicePicker auth={auth} onDone={() => setPanel(null)} />
+        <Popup open={panel === 'scene'} onClose={() => setPanel(null)} title="House Settings">
+          <HousePanel value={houseSettings} onChange={(v) => {
+            setHouseSettings(v)
+            try { localStorage.setItem('ffw_house_settings', JSON.stringify(v)) } catch {}
+          }} />
         </Popup>
       </div>
     </PlaybackProvider>
   )
-}
-
-function defaultScopes(): string[] {
-  return [
-    'streaming',
-    'user-read-email',
-    'user-read-private',
-    'user-read-playback-state',
-    'user-modify-playback-state',
-    'user-read-currently-playing'
-  ]
 }

@@ -9,18 +9,16 @@
     <link rel="manifest" href="%BASE_URL%manifest.json" />
     <link rel="stylesheet" href="%BASE_URL%styles.css" />
     <title>FFW — Spotify Visualizer</title>
-    <meta name="description" content="FFW — Minimal Cyber-Punk Spotify Visualizer with Web Playback SDK and audio-reactive Blank Scene." />
+    <meta name="description" content="FFW — Cyber-Punk Spotify Visualizer with Web Playback SDK and album-reactive scenes (Origami Fold, Wireframe House, Kaleido Tunnel)." />
     <link rel="preconnect" href="https://api.spotify.com" />
     <link rel="preconnect" href="https://accounts.spotify.com" />
     <script>
-      // Ensure /callback path works with HashRouter while preserving query BEFORE the hash.
       (function () {
         var path = location.pathname;
         var isPages = path.indexOf('/ffw/') !== -1;
         var base = isPages ? '/ffw/' : '/';
         var alreadyHashCallback = location.hash.indexOf('#/callback') === 0 || location.hash.indexOf('#/callback?') === 0;
         if (!alreadyHashCallback && path.endsWith('/callback')) {
-          // Move ?code&state into search (before hash), then send to #/callback
           var search = location.search || '';
           location.replace(base + search + '#/callback');
         }

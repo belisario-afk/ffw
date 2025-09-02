@@ -34,7 +34,7 @@ export default function QualityPanel({ value, onChange }: {
         <input id="mblur" type="checkbox" checked={value.motionBlur} onChange={e => onChange({ ...value, motionBlur: e.currentTarget.checked })} />
       </div>
       <div style={{ gridColumn: '1 / -1', color: 'var(--muted)' }}>
-        Changes affect the Blank scene rendering. Use <kbd>Q</kbd> to toggle this panel.
+        Changes affect rendering. Use <kbd>Q</kbd> to toggle this panel.
       </div>
     </div>
   )

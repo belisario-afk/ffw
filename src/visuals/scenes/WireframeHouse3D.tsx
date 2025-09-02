@@ -65,7 +65,8 @@ const LS_KEY = 'ffw.wire3d.settings.v2'
 
 // Place your blueprint image at: public/assets/aventador_blueprint.png
 // Or set a custom URL at runtime: window.FFW_WIRE_BLUEPRINT_URL = '...';
-const DEFAULT_BLUEPRINT_URL = '/assets/aventador_blueprint.png'
+const DEFAULT_BLUEPRINT_URL: string = `${import.meta.env.BASE_URL}assets/aventador_blueprint.png`
+
 
 function defaults(initial?: any): LocalCfg {
   return {

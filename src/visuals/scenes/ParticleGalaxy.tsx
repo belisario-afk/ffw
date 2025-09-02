@@ -20,112 +20,183 @@ type Preset = {
 }
 
 const PRESETS: Preset[] = [
-  { name: 'Chill Nebula',   arms: { count: 2, width: 1.8, curvature: 0.22, twist: 1.2, speed: 0.08 }, core: { count: 8000, radius: 1.4 },  dust: { count: 4000, radius: 16 }, colors: {}, bloom: { strength: 0.55, radius: 0.35, threshold: 0.52 } },
-  { name: 'Bass Supernova', arms: { count: 3, width: 2.2, curvature: 0.18, twist: 1.6, speed: 0.14 }, core: { count: 12000, radius: 1.1 }, dust: { count: 6000, radius: 18 }, colors: {}, bloom: { strength: 0.9,  radius: 0.45, threshold: 0.48 } },
-  { name: 'Hi‑Hat Sparkle', arms: { count: 4, width: 1.4, curvature: 0.26, twist: 0.9, speed: 0.12 }, core: { count: 9000,  radius: 1.2 }, dust: { count: 9000, radius: 22 }, colors: {}, bloom: { strength: 0.7,  radius: 0.5,  threshold: 0.5  } },
-  { name: 'Cinematic Core', arms: { count: 2, width: 1.1, curvature: 0.2,  twist: 0.7, speed: 0.06 }, core: { count: 16000, radius: 0.95 }, dust: { count: 4000, radius: 14 }, colors: {}, bloom: { strength: 0.85, radius: 0.6,  threshold: 0.46 } },
-  { name: 'Dusty Arms',     arms: { count: 5, width: 2.6, curvature: 0.24, twist: 1.1, speed: 0.1  }, core: { count: 7000,  radius: 1.5 },  dust: { count: 16000, radius: 28 }, colors: {}, bloom: { strength: 0.6,  radius: 0.55, threshold: 0.52 } }
+  { name: 'Chill Nebula',   arms: { count: 2, width: 1.8, curvature: 0.22, twist: 1.2, speed: 0.08 }, core: { count: 8000, radius: 1.4 },  dust: { count: 4000, radius: 16 }, bloom: { strength: 0.55, radius: 0.35, threshold: 0.52 } },
+  { name: 'Bass Supernova', arms: { count: 3, width: 2.2, curvature: 0.18, twist: 1.6, speed: 0.14 }, core: { count: 12000, radius: 1.1 }, dust: { count: 6000, radius: 18 }, bloom: { strength: 0.9,  radius: 0.45, threshold: 0.48 } },
+  { name: 'Hi‑Hat Sparkle', arms: { count: 4, width: 1.4, curvature: 0.26, twist: 0.9, speed: 0.12 }, core: { count: 9000,  radius: 1.2 }, dust: { count: 9000, radius: 22 }, bloom: { strength: 0.7,  radius: 0.5,  threshold: 0.5  } },
+  { name: 'Cinematic Core', arms: { count: 2, width: 1.1, curvature: 0.2,  twist: 0.7, speed: 0.06 }, core: { count: 16000, radius: 0.95 }, dust: { count: 4000, radius: 14 }, bloom: { strength: 0.85, radius: 0.6,  threshold: 0.46 } },
+  { name: 'Dusty Arms',     arms: { count: 5, width: 2.6, curvature: 0.24, twist: 1.1, speed: 0.1  }, core: { count: 7000,  radius: 1.5 },  dust: { count: 16000, radius: 28 }, bloom: { strength: 0.6,  radius: 0.55, threshold: 0.52 } }
 ]
 
-type GalaxyUniforms = {
+// UI/config
+type UIConfig = {
+  sizeScale: number
+  twinkleSensitivity: number
+  glowBoost: number
+  spinMultiplier: number
+  exposure: number
+  bloomEnabled: boolean
+  bloomStrength: number
+  cursorFadeRadius: number
+}
+type TabKey = 'presets' | 'particles' | 'motion' | 'postfx'
+
+// Galaxy math helpers
+function spiralPoint(armIndex: number, arms: number, t: number, curvature: number, width: number, rand: number, twist: number) {
+  // logarithmic spiral r = a * e^(b * theta); approximate with linear-increase radius factor for speed
+  const armAngle = (armIndex / arms) * Math.PI * 2.0
+  const theta = t + armAngle + twist * 0.15 * t
+  const r = 0.25 * t * (1.0 + curvature * t)
+  const lateral = width * (rand - 0.5) * 0.35 * (0.2 + 0.8 * Math.min(1, r))
+  const x = Math.cos(theta) * r + Math.cos(theta + Math.PI * 0.5) * lateral
+  const z = Math.sin(theta) * r + Math.sin(theta + Math.PI * 0.5) * lateral
+  const y = (rand - 0.5) * width * 0.28 * (0.2 + 0.8 * r)
+  return new THREE.Vector3(x, y, z)
+}
+
+// Instanced starfield (camera-facing quads)
+// Attributes: instancePosition(vec3), instanceSize(float), instanceSeed(float), instanceType(float) 0=core,1=arm,2=dust
+function makeStarGeometry(count: number) {
+  // Base quad [-1,1] x [-1,1]
+  const quad = new THREE.BufferGeometry()
+  const corner = new Float32Array([
+    -1, -1,   1, -1,   1,  1,
+    -1, -1,   1,  1,  -1,  1
+  ])
+  quad.setAttribute('corner', new THREE.BufferAttribute(corner, 2))
+  // Instanced attrs
+  const instancePosition = new Float32Array(count * 3)
+  const instanceSize = new Float32Array(count)
+  const instanceSeed = new Float32Array(count)
+  const instanceType = new Float32Array(count)
+  ;(quad as any).instanceCount = count
+  quad.setAttribute('instancePosition', new THREE.InstancedBufferAttribute(instancePosition, 3))
+  quad.setAttribute('instanceSize', new THREE.InstancedBufferAttribute(instanceSize, 1))
+  quad.setAttribute('instanceSeed', new THREE.InstancedBufferAttribute(instanceSeed, 1))
+  quad.setAttribute('instanceType', new THREE.InstancedBufferAttribute(instanceType, 1))
+  return { quad, instancePosition, instanceSize, instanceSeed, instanceType }
+}
+
+type StarUniforms = {
   uTime: { value: number }
-  uPrimary: { value: THREE.Color }
-  uAccent: { value: THREE.Color }
+  uSizeScale: { value: number }
   uTwinkle: { value: number }
   uGlow: { value: number }
-  uSizeScale: { value: number }
+  uPrimary: { value: THREE.Color }
+  uAccent: { value: THREE.Color }
   uMouseWorld: { value: THREE.Vector3 }
   uMouseFade: { value: number }
 }
 
-function buildParticleMaterial({ primary, accent }: { primary: THREE.Color; accent: THREE.Color }) {
-  const uniforms: GalaxyUniforms = {
+function buildStarMaterial(primary: THREE.Color, accent: THREE.Color) {
+  const uniforms: StarUniforms = {
     uTime: { value: 0 },
+    uSizeScale: { value: 1 },
+    uTwinkle: { value: 0 },
+    uGlow: { value: 0.7 },
     uPrimary: { value: primary },
     uAccent: { value: accent },
-    uTwinkle: { value: 0 },
-    uGlow: { value: 0.6 },
-    uSizeScale: { value: 1 },
     uMouseWorld: { value: new THREE.Vector3(1e6, 1e6, 1e6) },
     uMouseFade: { value: 0 }
   }
 
   const vert = `
+    precision highp float;
     uniform float uSizeScale;
-    uniform float uTime;
+    uniform mat4 modelViewMatrix;
+    uniform mat4 projectionMatrix;
 
-    attribute float aSize;
-    attribute float aSeed;
-    attribute float aType; // 0=core, 1=arm, 2=dust
-    varying float vType;
+    attribute vec2 corner;
+    attribute vec3 instancePosition;
+    attribute float instanceSize;
+    attribute float instanceSeed;
+    attribute float instanceType;
+
+    varying vec2 vCorner;
     varying float vSeed;
+    varying float vType;
     varying float vDepth;
-    varying vec3 vWorld;
 
     void main() {
-      vSeed = aSeed;
-      vType = aType;
-      vWorld = position;
+      vCorner = corner;
+      vSeed = instanceSeed;
+      vType = instanceType;
 
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      // View-space center
+      vec4 mv = modelViewMatrix * vec4(instancePosition, 1.0);
       vDepth = -mv.z;
 
-      // perspective scaling + subtle flicker to reduce aliasing
-      float flicker = 0.03 * sin(uTime * (2.0 + vSeed * 5.0) + vSeed * 13.0);
-      float size = aSize * (300.0 / max(1.0, vDepth)) * uSizeScale * (1.0 + flicker);
-      gl_PointSize = clamp(size, 0.5, 150.0);
-      gl_Position = projectionMatrix * mv;
+      // Camera-facing billboard using view-space right/up from modelView cols
+      vec3 right = vec3(modelViewMatrix[0][0], modelViewMatrix[1][0], modelViewMatrix[2][0]);
+      vec3 up    = vec3(modelViewMatrix[0][1], modelViewMatrix[1][1], modelViewMatrix[2][1]);
+
+      float sizePx = instanceSize * (300.0 / max(1.0, vDepth)) * uSizeScale;
+      vec3 offsetVS = (right * corner.x + up * corner.y) * sizePx;
+
+      gl_Position = projectionMatrix * vec4(mv.xyz + offsetVS, 1.0);
     }
   `
 
   const frag = `
     precision highp float;
-    varying float vType;
+
+    varying vec2 vCorner;
     varying float vSeed;
+    varying float vType;  // 0,1,2
     varying float vDepth;
-    varying vec3 vWorld;
 
     uniform float uTime;
-    uniform vec3 uPrimary;
-    uniform vec3 uAccent;
     uniform float uTwinkle;
     uniform float uGlow;
+    uniform vec3 uPrimary;
+    uniform vec3 uAccent;
     uniform vec3 uMouseWorld;
     uniform float uMouseFade;
 
-    vec3 over(vec3 c, float p) { return c * (1.0 + p); }
-    float hash(float n) { return fract(sin(n) * 43758.5453); }
+    // Star core + diffraction spikes
+    float starCore(vec2 uv) {
+      float r = length(uv);
+      float core = exp(-r * r * 6.0);
+      return core;
+    }
+    float spikes(vec2 uv) {
+      float a = atan(uv.y, uv.x);
+      float r = length(uv) + 1e-5;
+      float spike = pow(abs(cos(6.0 * a)), 48.0) * pow(1.0 - clamp(r, 0.0, 1.0), 6.0);
+      return spike;
+    }
+    float hash(float n) { return fract(sin(n) * 43758.5453123); }
 
     void main() {
-      vec2 uv = gl_PointCoord * 2.0 - 1.0;
+      vec2 uv = vCorner; // -1..1
       float r = length(uv);
 
-      float alpha = smoothstep(1.0, 0.0, r);
-      alpha *= alpha;
-
+      // Base color blend: core=dust weighted to primary/accent
       float tCore = step(0.5, 0.5 - abs(vType - 0.0));
       float tArm  = step(0.5, 0.5 - abs(vType - 1.0));
       float tDust = step(0.5, 0.5 - abs(vType - 2.0));
-      vec3 col = normalize(uPrimary * (tCore * 1.05 + tDust * 0.45) + uAccent * (tArm * 1.15 + tDust * 0.55) + 0.00001);
+      vec3 baseCol = normalize(uPrimary * (tCore * 1.15 + tDust * 0.45) + uAccent * (tArm * 1.25 + tDust * 0.55) + 1e-4);
 
+      // Slight temperature shift
       float hueJitter = 0.06 * (hash(vSeed * 97.0) - 0.5);
-      col = normalize(col + vec3(hueJitter, -hueJitter, 0.0));
+      baseCol = normalize(baseCol + vec3(hueJitter, -hueJitter, 0.0));
 
+      // Twinkle on highs
       float tw = 0.5 + 0.5 * sin(uTime * (3.0 + 2.0 * vSeed) + vSeed * 11.0);
       float twinkle = mix(1.0, 1.0 + 0.9 * tw, uTwinkle);
 
-      float glow = mix(0.65, 1.0, smoothstep(0.0, 120.0, vDepth));
-      vec3 c = over(col, uGlow) * twinkle * glow;
+      float c = starCore(uv) + 0.85 * spikes(uv);
+      vec3 col = baseCol * (1.0 + uGlow) * c * twinkle;
 
-      float cursorFade = 1.0;
-      if (uMouseFade > 0.0) {
-        float d = distance(vWorld, uMouseWorld);
-        cursorFade = smoothstep(uMouseFade, uMouseFade * 0.25, d);
-      }
+      // Soft alpha
+      float alpha = smoothstep(1.0, 0.0, r);
+      alpha *= alpha;
 
-      float a = alpha * cursorFade;
-      if (a < 0.02) discard;
-      gl_FragColor = vec4(c, a);
+      // Depth bias glow (closer = brighter)
+      float glowBias = mix(0.65, 1.0, smoothstep(0.0, 120.0, vDepth));
+      col *= glowBias;
+
+      if (alpha < 0.02) discard;
+      gl_FragColor = vec4(col, alpha);
     }
   `
 
@@ -140,82 +211,39 @@ function buildParticleMaterial({ primary, accent }: { primary: THREE.Color; acce
   return { mat, uniforms }
 }
 
-function spiralPoint(armIndex: number, arms: number, angle: number, curvature: number, radiusScale: number, width: number, rand: number) {
-  const armAngle = (armIndex / arms) * Math.PI * 2.0
-  const theta = angle + armAngle
-  const r = radiusScale * (1.0 + curvature * angle)
-  const spread = width * (rand - 0.5) * 0.5 * (0.2 + 0.8 * radiusScale)
-  const x = Math.cos(theta) * r + Math.cos(theta + Math.PI * 0.5) * spread
-  const z = Math.sin(theta) * r + Math.sin(theta + Math.PI * 0.5) * spread
-  const y = (rand - 0.5) * width * 0.35
-  return new THREE.Vector3(x, y, z)
-}
-
-function makeLayer(count: number) {
-  const geo = new THREE.BufferGeometry()
-  const pos = new Float32Array(count * 3)
-  const aSize = new Float32Array(count)
-  const aSeed = new Float32Array(count)
-  const aType = new Float32Array(count)
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
-  geo.setAttribute('aSize', new THREE.BufferAttribute(aSize, 1))
-  geo.setAttribute('aSeed', new THREE.BufferAttribute(aSeed, 1))
-  geo.setAttribute('aType', new THREE.BufferAttribute(aType, 1))
-  return { geo, pos, aSize, aSeed, aType }
-}
-
-function updateAttr(buf: THREE.BufferAttribute) { buf.needsUpdate = true }
-
-type UIConfig = {
-  sizeScale: number
-  twinkleSensitivity: number
-  glowBoost: number
-  spinMultiplier: number
-  exposure: number
-  cursorFadeRadius: number
-  bloomEnabled: boolean
-  bloomStrength: number
-}
-
-type TabKey = 'presets' | 'particles' | 'motion' | 'postfx'
-
 export default function ParticleGalaxy({ quality, accessibility }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const disposedRef = useRef(false)
 
+  // Preset + palette from album art
   const [presetIdx, setPresetIdx] = useState(0)
   const preset = PRESETS[presetIdx]
-
-  // Palette fed by album art (fallback to cool neon)
   const primaryRef = useRef(new THREE.Color('#4ad3ff'))
   const accentRef = useRef(new THREE.Color('#ff6bd6'))
   const bgRef = useRef(new THREE.Color('#04070c'))
 
-  // UI / settings with sensible defaults
+  // UI modal
   const [ui, setUi] = useState<UIConfig>({
     sizeScale: 1.0,
     twinkleSensitivity: 1.0,
     glowBoost: 1.0,
     spinMultiplier: 1.0,
     exposure: 1.0,
-    cursorFadeRadius: 0.0,
     bloomEnabled: true,
-    bloomStrength: preset.bloom.strength
+    bloomStrength: preset.bloom.strength,
+    cursorFadeRadius: 0.0
   })
   const uiRef = useRef(ui)
   useEffect(() => { uiRef.current = ui }, [ui])
 
-  // Center popup controls
   const [showModal, setShowModal] = useState(false)
   const [activeTab, setActiveTab] = useState<TabKey>('presets')
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key >= '1' && e.key <= '5') {
-        setPresetIdx(Math.min(4, Math.max(0, parseInt(e.key, 10) - 1)))
-      }
+      if (e.key >= '1' && e.key <= '5') setPresetIdx(Math.min(4, Math.max(0, parseInt(e.key, 10) - 1)))
       if (e.key === 'Escape') setShowModal(false)
-      if (e.key.toLowerCase() === 'c') setShowModal(v => !v) // 'c' to toggle config
+      if (e.key.toLowerCase() === 'c') setShowModal(v => !v)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -226,13 +254,13 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     if (!canvas) return
     disposedRef.current = false
 
-    // Scene setup
+    // Scene
     const scene = new THREE.Scene()
     scene.background = bgRef.current.clone()
-
     const camera = new THREE.PerspectiveCamera(60, 1, 0.05, 500)
-    camera.position.set(0, 2.4, 8.5)
+    camera.position.set(0, 2.2, 9.5)
 
+    // Renderer + composer
     const { renderer, dispose: disposeRenderer } = createRenderer(canvas, quality.renderScale)
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.toneMapping = THREE.ACESFilmicToneMapping
@@ -245,13 +273,11 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       bloomThreshold: preset.bloom.threshold,
       fxaa: true,
       vignette: true,
-      vignetteStrength: 0.24,
+      vignetteStrength: 0.22,
       filmGrain: false,
       filmGrainStrength: 0.0,
       motionBlur: false
     })
-
-    // Normalize composer API (object with render/onResize OR plain function)
     const compAny: any = comp as any
     const renderScene: () => void =
       typeof compAny === 'function'
@@ -262,19 +288,97 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
         ? () => {}
         : (compAny?.onResize?.bind(compAny) ?? (() => {}))
 
-    // Groups
+    // Root
     const root = new THREE.Group()
     scene.add(root)
 
-    // Materials
-    const { mat: starMat } = buildParticleMaterial({
-      primary: primaryRef.current.clone(),
-      accent: accentRef.current.clone()
-    })
+    // Material
+    const { mat: starMat, uniforms } = buildStarMaterial(primaryRef.current.clone(), accentRef.current.clone())
+    const starMatRef = { current: starMat }
 
-    // Mouse world handling for cursor fade
+    // Geometry budgets
+    const pixelScale = Math.min(2, Math.max(0.75, quality.renderScale))
+    const budgetScale = pixelScale * (accessibility.reducedMotion ? 0.75 : 1.0)
+    const CORE = Math.floor(preset.core.count * budgetScale)
+    const ARM_TOTAL = Math.floor(preset.arms.count * 0.5 * preset.core.count * budgetScale)
+    const DUST = Math.floor(preset.dust.count * budgetScale)
+    const TOTAL = CORE + ARM_TOTAL + DUST
+
+    // Build instanced geometry
+    const { quad, instancePosition, instanceSize, instanceSeed, instanceType } = makeStarGeometry(TOTAL)
+
+    // Populate distributions
+    let k = 0
+    // Core: dense, spherical-ish with falloff
+    {
+      const R = preset.core.radius
+      for (let i = 0; i < CORE; i++) {
+        const r = Math.pow(Math.random(), 0.8) * R
+        const th = Math.random() * Math.PI * 2
+        const ph = Math.acos(2 * Math.random() - 1)
+        const x = r * Math.sin(ph) * Math.cos(th)
+        const y = r * Math.cos(ph) * 0.85
+        const z = r * Math.sin(ph) * Math.sin(th)
+        instancePosition[k * 3 + 0] = x
+        instancePosition[k * 3 + 1] = y
+        instancePosition[k * 3 + 2] = z
+        instanceSize[k] = THREE.MathUtils.lerp(1.8, 3.8, Math.random())
+        instanceSeed[k] = Math.random()
+        instanceType[k] = 0
+        k++
+      }
+    }
+    // Arms: spiral with curvature, twist and spread
+    {
+      const perArm = Math.floor(ARM_TOTAL / preset.arms.count)
+      for (let a = 0; a < preset.arms.count; a++) {
+        for (let i = 0; i < perArm; i++) {
+          const t = Math.random() * 16.0
+          const rand = Math.random()
+          const p = spiralPoint(a, preset.arms.count, t, preset.arms.curvature, preset.arms.width, rand, preset.arms.twist)
+          instancePosition[k * 3 + 0] = p.x
+          instancePosition[k * 3 + 1] = p.y * 0.55
+          instancePosition[k * 3 + 2] = p.z
+          instanceSize[k] = THREE.MathUtils.lerp(1.2, 3.0, Math.random())
+          instanceSeed[k] = Math.random()
+          instanceType[k] = 1
+          k++
+          if (k >= TOTAL) break
+        }
+      }
+    }
+    // Dust: wide, ring-like, some vertical variance
+    {
+      const R = preset.dust.radius
+      for (; k < TOTAL; k++) {
+        const r = THREE.MathUtils.lerp(5, R, Math.pow(Math.random(), 0.7))
+        const th = Math.random() * Math.PI * 2
+        const x = Math.cos(th) * r
+        const z = Math.sin(th) * r
+        const y = (Math.random() - 0.5) * (0.25 + 0.35 * r)
+        instancePosition[k * 3 + 0] = x
+        instancePosition[k * 3 + 1] = y
+        instancePosition[k * 3 + 2] = z
+        instanceSize[k] = THREE.MathUtils.lerp(0.9, 2.4, Math.random())
+        instanceSeed[k] = Math.random()
+        instanceType[k] = 2
+      }
+    }
+
+    // Flag updates
+    ;(quad.getAttribute('instancePosition') as THREE.InstancedBufferAttribute).needsUpdate = true
+    ;(quad.getAttribute('instanceSize') as THREE.InstancedBufferAttribute).needsUpdate = true
+    ;(quad.getAttribute('instanceSeed') as THREE.InstancedBufferAttribute).needsUpdate = true
+    ;(quad.getAttribute('instanceType') as THREE.InstancedBufferAttribute).needsUpdate = true
+
+    // Mesh
+    const stars = new THREE.Mesh(quad, starMat)
+    ;(stars as any).frustumCulled = false
+    root.add(stars)
+
+    // Mouse world fade (optional aesthetic)
     const raycaster = new THREE.Raycaster()
-    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0) // y=0 plane
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
     const mouseNDC = new THREE.Vector2()
     function updateMouse(ev: MouseEvent) {
       const rect = canvas.getBoundingClientRect()
@@ -283,107 +387,17 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       raycaster.setFromCamera(mouseNDC, camera)
       const p = new THREE.Vector3()
       raycaster.ray.intersectPlane(plane, p)
-      ;(starMat.uniforms.uMouseWorld as any).value.copy(p || new THREE.Vector3(1e6, 1e6, 1e6))
+      if ((starMatRef.current.uniforms as any)?.uMouseWorld) {
+        ;(starMatRef.current.uniforms.uMouseWorld as any).value.copy(p || new THREE.Vector3(1e6,1e6,1e6))
+      }
     }
     window.addEventListener('mousemove', updateMouse)
-
-    // Initial UI uniforms
-    ;(starMat.uniforms.uSizeScale as any).value = uiRef.current.sizeScale
-    ;(starMat.uniforms.uMouseFade as any).value = uiRef.current.cursorFadeRadius
-
-    // Particle budgets (adaptive baseline)
-    const pixelScale = Math.min(2, Math.max(0.75, quality.renderScale))
-    const budgetScale = pixelScale * (accessibility.reducedMotion ? 0.7 : 1.0)
-    let coreCount = Math.floor(preset.core.count * budgetScale)
-    let armCountTotal = Math.floor(preset.arms.count * 0.5 * preset.core.count * budgetScale)
-    let dustCount = Math.floor(preset.dust.count * budgetScale)
-
-    // Layers
-    const core = makeLayer(coreCount)
-    const arms = makeLayer(armCountTotal)
-    const dust = makeLayer(dustCount)
-
-    const corePoints = new THREE.Points(core.geo, starMat)
-    const armPoints = new THREE.Points(arms.geo, starMat)
-    const dustPoints = new THREE.Points(dust.geo, starMat)
-    root.add(corePoints, armPoints, dustPoints)
-
-    // Initialize core
-    {
-      const R = preset.core.radius
-      for (let i = 0; i < coreCount; i++) {
-        const r = Math.pow(Math.random(), 0.9) * R
-        const th = Math.random() * Math.PI * 2
-        const ph = Math.acos(2 * Math.random() - 1)
-        const x = r * Math.sin(ph) * Math.cos(th)
-        const y = r * Math.cos(ph) * 0.8
-        const z = r * Math.sin(ph) * Math.sin(th)
-        core.pos[i * 3 + 0] = x
-        core.pos[i * 3 + 1] = y
-        core.pos[i * 3 + 2] = z
-        core.aSize[i] = THREE.MathUtils.lerp(1.2, 3.6, Math.random())
-        core.aSeed[i] = Math.random()
-        core.aType[i] = 0
-      }
-      updateAttr(core.geo.getAttribute('position') as THREE.BufferAttribute)
-      updateAttr(core.geo.getAttribute('aSize') as THREE.BufferAttribute)
-      updateAttr(core.geo.getAttribute('aSeed') as THREE.BufferAttribute)
-      updateAttr(core.geo.getAttribute('aType') as THREE.BufferAttribute)
-    }
-
-    // Initialize arms
-    {
-      const armsCfg = preset.arms
-      let idx = 0
-      const perArm = Math.floor(armCountTotal / armsCfg.count)
-      for (let a = 0; a < armsCfg.count; a++) {
-        for (let i = 0; i < perArm; i++) {
-          const t = Math.random() * 12.0
-          const rand = Math.random()
-          const p = spiralPoint(a, armsCfg.count, t, armsCfg.curvature, THREE.MathUtils.lerp(1.2, 1.0, Math.random()) * t, armsCfg.width, rand)
-          arms.pos[idx * 3 + 0] = p.x
-          arms.pos[idx * 3 + 1] = p.y * 0.5
-          arms.pos[idx * 3 + 2] = p.z
-          arms.aSize[idx] = THREE.MathUtils.lerp(1.4, 3.2, Math.random())
-          arms.aSeed[idx] = Math.random()
-          arms.aType[idx] = 1
-          idx++
-          if (idx >= arms.aSize.length) break
-        }
-      }
-      updateAttr(arms.geo.getAttribute('position') as THREE.BufferAttribute)
-      updateAttr(arms.geo.getAttribute('aSize') as THREE.BufferAttribute)
-      updateAttr(arms.geo.getAttribute('aSeed') as THREE.BufferAttribute)
-      updateAttr(arms.geo.getAttribute('aType') as THREE.BufferAttribute)
-    }
-
-    // Initialize dust
-    {
-      const R = preset.dust.radius
-      for (let i = 0; i < dustCount; i++) {
-        const r = THREE.MathUtils.lerp(4, R, Math.pow(Math.random(), 0.7))
-        const th = Math.random() * Math.PI * 2
-        const x = Math.cos(th) * r
-        const z = Math.sin(th) * r
-        const y = (Math.random() - 0.5) * (0.5 + 0.5 * r)
-        dust.pos[i * 3 + 0] = x
-        dust.pos[i * 3 + 1] = y
-        dust.pos[i * 3 + 2] = z
-        dust.aSize[i] = THREE.MathUtils.lerp(1.0, 2.6, Math.random())
-        dust.aSeed[i] = Math.random()
-        dust.aType[i] = 2
-      }
-      updateAttr(dust.geo.getAttribute('position') as THREE.BufferAttribute)
-      updateAttr(dust.geo.getAttribute('aSize') as THREE.BufferAttribute)
-      updateAttr(dust.geo.getAttribute('aSeed') as THREE.BufferAttribute)
-      updateAttr(dust.geo.getAttribute('aType') as THREE.BufferAttribute)
-    }
 
     // Audio frames
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Album-art palette polling
+    // Album-art palette polling (updates colors safely)
     let lastAlbumUrl: string | null = null
     async function refreshPalette() {
       try {
@@ -400,16 +414,18 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
             accentRef.current.copy(acc)
             bgRef.current.copy(bg)
             scene.background = bg.clone()
-            ;(starMat.uniforms.uPrimary as any).value = pri
-            ;(starMat.uniforms.uAccent as any).value = acc
+            if ((starMatRef.current.uniforms as any)?.uPrimary) {
+              ;(starMatRef.current.uniforms.uPrimary as any).value = pri
+              ;(starMatRef.current.uniforms.uAccent as any).value = acc
+            }
           }
         }
-      } catch {}
+      } catch { /* ignore */ }
     }
-    const palIv = window.setInterval(refreshPalette, 5000)
+    const palIv = window.setInterval(refreshPalette, 6000)
     refreshPalette()
 
-    // Resize handling
+    // Resize
     function onResize() {
       const view = renderer.getSize(new THREE.Vector2())
       camera.aspect = Math.max(1e-3, view.x / Math.max(1, view.y))
@@ -419,7 +435,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     window.addEventListener('resize', onResize)
     onResize()
 
-    // Adaptive quality (simple FPS sampling)
+    // FPS sample for adaptive size
     let fpsAvg = 60
     let lastT = performance.now()
     function sampleFPS() {
@@ -434,7 +450,6 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     const clock = new THREE.Clock()
     let raf = 0
     let baseAngle = 0
-
     const shake = new THREE.Vector3()
     let beatCooldown = 0
 
@@ -444,23 +459,22 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       const dt = clock.getDelta()
       sampleFPS()
 
-      // Audio mappings
       const low = latest?.bands.low ?? 0.08
       const mid = latest?.bands.mid ?? 0.08
       const high = latest?.bands.high ?? 0.08
       const beat = !!latest?.beat
 
-      // Orbit arms by bass + user multiplier
+      // Spin with bass, scaled by UI
       const spinBase = preset.arms.speed * uiRef.current.spinMultiplier
       baseAngle += dt * (spinBase + low * 0.9 * uiRef.current.spinMultiplier)
-      ;(root as any).rotation.y = baseAngle
+      root.rotation.y = baseAngle
 
-      // Camera gentle motion
-      const camDist = 8.5 - Math.min(1.2, low * 2.5)
+      // Gentle camera motion
+      const camDist = 9.3 - Math.min(1.4, low * 2.8)
       const roll = Math.sin(t * 0.05) * 0.03
       camera.position.x = Math.cos(t * 0.06) * camDist
       camera.position.z = Math.sin(t * 0.06) * camDist
-      camera.position.y = 2.2 + Math.sin(t * 0.7) * 0.25 + low * 0.4
+      camera.position.y = 2.0 + Math.sin(t * 0.7) * 0.25 + low * 0.4
       camera.rotation.z = roll
 
       // Beat micro-shake
@@ -474,17 +488,16 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
         shake.multiplyScalar(0.86)
       }
 
-      // Live UI-to-uniform mapping
-      ;(starMat.uniforms.uTime as any).value = t
-      const twinkleSafe = accessibility.epilepsySafe ? 0.7 : 1.0
-      ;(starMat.uniforms.uTwinkle as any).value = THREE.MathUtils.clamp(high * 2.0 * uiRef.current.twinkleSensitivity, 0, twinkleSafe)
-      ;(starMat.uniforms.uGlow as any).value = THREE.MathUtils.lerp(0.4, 1.2, Math.min(1, (low * 2.2 + mid * 0.4) * uiRef.current.glowBoost))
-      // Adaptive throttling + user size scale
-      const sizeAuto = fpsAvg < 42 ? THREE.MathUtils.mapLinear(fpsAvg, 24, 42, 0.76, 1.0) : 1.0
-      ;(starMat.uniforms.uSizeScale as any).value = Math.max(0.65, Math.min(2.0, sizeAuto * uiRef.current.sizeScale))
-      ;(starMat.uniforms.uMouseFade as any).value = uiRef.current.cursorFadeRadius
-
-      // Live exposure update
+      // Update uniforms safely
+      if ((starMatRef.current.uniforms as any)) {
+        ;(starMatRef.current.uniforms.uTime as any).value = t
+        const twinkleSafe = accessibility.epilepsySafe ? 0.7 : 1.0
+        ;(starMatRef.current.uniforms.uTwinkle as any).value = THREE.MathUtils.clamp(high * 2.0 * uiRef.current.twinkleSensitivity, 0, twinkleSafe)
+        ;(starMatRef.current.uniforms.uGlow as any).value = THREE.MathUtils.lerp(0.35, 1.4, Math.min(1, (low * 2.2 + mid * 0.45) * uiRef.current.glowBoost))
+        const sizeAuto = fpsAvg < 42 ? THREE.MathUtils.mapLinear(fpsAvg, 24, 42, 0.76, 1.0) : 1.0
+        ;(starMatRef.current.uniforms.uSizeScale as any).value = Math.max(0.65, Math.min(2.0, sizeAuto * uiRef.current.sizeScale))
+        ;(starMatRef.current.uniforms.uMouseFade as any).value = uiRef.current.cursorFadeRadius
+      }
       renderer.toneMappingExposure = uiRef.current.exposure
 
       renderScene()
@@ -498,16 +511,14 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       window.removeEventListener('mousemove', updateMouse)
       window.clearInterval(palIv)
       cancelAnimationFrame(raf)
-      core.geo.dispose()
-      arms.geo.dispose()
-      dust.geo.dispose()
-      ;(starMat as any).dispose?.()
+      quad.dispose()
+      starMat.dispose()
+      ;(stars.geometry as any)?.dispose?.()
       disposeRenderer()
     }
-  // Recreate when preset or renderer-level settings change
   }, [presetIdx, quality.renderScale, ui.bloomEnabled, ui.bloomStrength])
 
-  // Apply preset color overrides if set (primary/accent/bg)
+  // Optional: preset color overrides if you set them later
   useEffect(() => {
     const c = PRESETS[presetIdx].colors
     if (c?.primary) primaryRef.current.set(c.primary)
@@ -515,7 +526,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     if (c?.background) bgRef.current.set(c.background)
   }, [presetIdx])
 
-  // Modal content (center popup)
+  // Center popup modal UI
   const Modal = useMemo(() => {
     if (!showModal) return null
     return (
@@ -523,20 +534,11 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
         <div className="pg-backdrop" onClick={() => setShowModal(false)} />
         <div className="pg-modal enter">
           <div className="pg-modal-frame">
-            {/* Circular tab buttons */}
             <div className="pg-tabs">
-              <button className={`pg-tab ${activeTab === 'presets' ? 'active' : ''}`} onClick={() => setActiveTab('presets')} title="Presets">
-                <span>PR</span>
-              </button>
-              <button className={`pg-tab ${activeTab === 'particles' ? 'active' : ''}`} onClick={() => setActiveTab('particles')} title="Particles">
-                <span>PA</span>
-              </button>
-              <button className={`pg-tab ${activeTab === 'motion' ? 'active' : ''}`} onClick={() => setActiveTab('motion')} title="Motion">
-                <span>MO</span>
-              </button>
-              <button className={`pg-tab ${activeTab === 'postfx' ? 'active' : ''}`} onClick={() => setActiveTab('postfx')} title="Post FX">
-                <span>FX</span>
-              </button>
+              <button className={`pg-tab ${activeTab === 'presets' ? 'active' : ''}`} onClick={() => setActiveTab('presets')} title="Presets"><span>PR</span></button>
+              <button className={`pg-tab ${activeTab === 'particles' ? 'active' : ''}`} onClick={() => setActiveTab('particles')} title="Particles"><span>PA</span></button>
+              <button className={`pg-tab ${activeTab === 'motion' ? 'active' : ''}`} onClick={() => setActiveTab('motion')} title="Motion"><span>MO</span></button>
+              <button className={`pg-tab ${activeTab === 'postfx' ? 'active' : ''}`} onClick={() => setActiveTab('postfx')} title="Post FX"><span>FX</span></button>
             </div>
 
             <div className="pg-title">
@@ -549,14 +551,12 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                 <div className="pg-pane">
                   <div className="pg-row">
                     <label>Preset</label>
-                    <select
-                      value={presetIdx}
-                      onChange={(e) => setPresetIdx(parseInt(e.currentTarget.value, 10))}
-                    >
+                    <select value={presetIdx} onChange={(e) => setPresetIdx(parseInt(e.currentTarget.value, 10))}>
                       {PRESETS.map((p, i) => <option key={i} value={i}>{i + 1}. {p.name}</option>)}
                     </select>
+                    <span />
                   </div>
-                  <div className="pg-hint">Tip: press number keys 1–5 to switch presets quickly.</div>
+                  <div className="pg-hint">Press 1–5 to switch presets.</div>
                 </div>
               )}
 
@@ -564,15 +564,13 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                 <div className="pg-pane">
                   <div className="pg-row">
                     <label>Size scale</label>
-                    <input type="range" min="0.5" max="1.8" step="0.01"
-                      value={ui.sizeScale}
+                    <input type="range" min="0.5" max="1.8" step="0.01" value={ui.sizeScale}
                       onChange={e => setUi(prev => ({ ...prev, sizeScale: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.sizeScale.toFixed(2)}</span>
                   </div>
                   <div className="pg-row">
                     <label>Cursor fade radius</label>
-                    <input type="range" min="0" max="6" step="0.1"
-                      value={ui.cursorFadeRadius}
+                    <input type="range" min="0" max="6" step="0.1" value={ui.cursorFadeRadius}
                       onChange={e => setUi(prev => ({ ...prev, cursorFadeRadius: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.cursorFadeRadius.toFixed(1)}</span>
                   </div>
@@ -583,22 +581,19 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                 <div className="pg-pane">
                   <div className="pg-row">
                     <label>Twinkle sensitivity</label>
-                    <input type="range" min="0" max="2" step="0.01"
-                      value={ui.twinkleSensitivity}
+                    <input type="range" min="0" max="2" step="0.01" value={ui.twinkleSensitivity}
                       onChange={e => setUi(prev => ({ ...prev, twinkleSensitivity: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.twinkleSensitivity.toFixed(2)}</span>
                   </div>
                   <div className="pg-row">
                     <label>Glow boost</label>
-                    <input type="range" min="0.5" max="2" step="0.01"
-                      value={ui.glowBoost}
+                    <input type="range" min="0.5" max="2" step="0.01" value={ui.glowBoost}
                       onChange={e => setUi(prev => ({ ...prev, glowBoost: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.glowBoost.toFixed(2)}</span>
                   </div>
                   <div className="pg-row">
                     <label>Spin multiplier</label>
-                    <input type="range" min="0.2" max="2.5" step="0.01"
-                      value={ui.spinMultiplier}
+                    <input type="range" min="0.2" max="2.5" step="0.01" value={ui.spinMultiplier}
                       onChange={e => setUi(prev => ({ ...prev, spinMultiplier: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.spinMultiplier.toFixed(2)}</span>
                   </div>
@@ -609,8 +604,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                 <div className="pg-pane">
                   <div className="pg-row">
                     <label>Exposure</label>
-                    <input type="range" min="0.6" max="1.6" step="0.01"
-                      value={ui.exposure}
+                    <input type="range" min="0.6" max="1.6" step="0.01" value={ui.exposure}
                       onChange={e => setUi(prev => ({ ...prev, exposure: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.exposure.toFixed(2)}</span>
                   </div>
@@ -620,15 +614,16 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                         onChange={e => setUi(prev => ({ ...prev, bloomEnabled: e.currentTarget.checked }))} />
                       <span>Bloom</span>
                     </label>
+                    <span />
+                    <span />
                   </div>
                   <div className="pg-row">
                     <label>Bloom strength</label>
-                    <input type="range" min="0" max="1.5" step="0.01"
-                      value={ui.bloomStrength}
+                    <input type="range" min="0" max="1.5" step="0.01" value={ui.bloomStrength}
                       onChange={e => setUi(prev => ({ ...prev, bloomStrength: parseFloat(e.currentTarget.value) }))} />
                     <span className="pg-val">{ui.bloomStrength.toFixed(2)}</span>
                   </div>
-                  <div className="pg-hint">Changing Bloom may briefly restart the scene to apply post-processing changes.</div>
+                  <div className="pg-hint">Bloom changes reinitialize post-processing.</div>
                 </div>
               )}
             </div>
@@ -639,9 +634,8 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
   }, [showModal, activeTab, ui, presetIdx])
 
   return (
-    <div style={{ position: 'absolute', inset: 0 }}>
+    <div style={{ position: 'absolute,', inset: 0 as any }}>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
-      {/* Config button */}
       <button className="pg-gear" onClick={() => setShowModal(true)} title="Open Galaxy Settings (C)">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
           <path fill="currentColor" d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9.44 3.26-1.78-.69c-.1-.34-.22-.67-.37-.99l.96-1.68a.5.5 0 0 0-.07-.59l-1.41-1.41a.5.5 0 0 0-.59-.07l-1.68.96c-.32-.15-.65-.27-.99-.37l-.69-1.78a.5.5 0 0 0-.48-.34h-2a.5.5 0 0 0-.48.34l-.69 1.78c-.34.1-.67.22-.99.37l-1.68-.96a.5.5 0 0 0-.59.07L3.82 6.83a.5.5 0 0 0-.07.59l.96 1.68c-.15.32-.27.65-.37.99l-1.78.69a.5.5 0 0 0-.34.48v2c0 .22.14.41.34.48l1.78.69c.1.34.22.67.37.99l-.96 1.68a.5.5 0 0 0 .07.59l1.41 1.41c.16.16.41.2.59.07l1.68-.96c.32.15.65.27.99.37l.69 1.78c.07.2.26.34.48.34h2c.22 0 .41-.14.48-.34l.69-1.78c.34-.1.67-.22.99-.37l1.68.96c.18.13.43.09.59-.07l1.41-1.41a.5.5 0 0 0 .07-.59l-.96-1.68c.15-.32.27-.65.37-.99l1.78-.69c.2-.07.34-.26.34-.48v-2a.5.5 0 0 0-.34-.48Z"/>

@@ -279,6 +279,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     floorMesh.position.y = 0.001
     scene.add(floorMesh)
 
+    // NEW: set a safe placeholder so floor isn't a dark slab before art loads
+    const floorPlaceholder = createDarkPlaceholderTexture()
+    floorMat.uniforms.tAlbum.value = floorPlaceholder
+
     // Mosaic (safe)
     const mosaicGroup = new THREE.Group()
     const tiles: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
@@ -657,17 +661,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             currentLineRef.current = idx
             const text = lines[idx].text || ''
             if (text) {
-              const nextText = lines[idx + 1]?.text || ''
-              billboard.prepareNext(nextText)
-              if (idx === 0 && !text) {
-                billboard.setLineNow(text)
+              // Prepare and swap to the current line, then pop
+              billboard.prepareNext(text).then(() => {
+                billboard.beginSwap()
                 billboard.triggerPop(1.0)
-              } else {
-                billboard.prepareNext(text).then(() => {
-                  billboard.beginSwap()
-                  billboard.triggerPop(1.0)
-                })
-              }
+              })
               if (marqueeMat && text !== marqueeText) { marqueeText = text; setupMarquee(text, 0.92) }
             }
           }
@@ -750,6 +748,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       comp.dispose()
       disposeRenderer()
       renderer.dispose()
+      // dispose floor placeholder
+      floorPlaceholder?.dispose()
     }
 
     // build edges helpers

@@ -4,7 +4,6 @@ import Callback from './auth/Callback'
 import PlayerController from './controllers/PlayerController'
 const WireframeHouse3D = React.lazy(() => import('./visuals/scenes/WireframeHouse3D'))
 const PsyKaleidoTunnel = React.lazy(() => import('./visuals/scenes/PsyKaleidoTunnel'))
-const ParticleGalaxy = React.lazy(() => import('./visuals/scenes/ParticleGalaxy'))
 import Popup from './ui/Popup'
 import QualityPanel from './ui/QualityPanel'
 import VJPanel from './ui/VJPanel'
@@ -38,8 +37,20 @@ export default function App() {
   })
   const [theme, setThemeState] = useState<ThemeName>(getTheme())
   const [scene, setScene] = useState<string>(() => {
-    const saved = localStorage.getItem('ffw_scene') || 'Particle Galaxy'
-    if (saved === 'Blank' || saved === 'Origami Fold' || saved === 'Wireframe House') return 'Particle Galaxy'
+    const saved = localStorage.getItem('ffw_scene') || 'Wireframe House 3D'
+    // Migrate old/removed names to supported ones
+    if (
+      saved === 'Blank' ||
+      saved === 'Origami Fold' ||
+      saved === 'Wireframe House' ||
+      saved === 'Particle Galaxy'
+    ) {
+      return 'Wireframe House 3D'
+    }
+    // Only allow the two supported scenes
+    if (saved !== 'Wireframe House 3D' && saved !== 'Psychedelic Tunnel') {
+      return 'Wireframe House 3D'
+    }
     return saved
   })
 
@@ -87,9 +98,7 @@ export default function App() {
           <Route path="/callback" element={<Callback />} />
           <Route path="/*" element={
             <Suspense fallback={<div className="badge" style={{ position: 'absolute', left: 16, top: 72 }}>Loading scene…</div>}>
-              {scene === 'Particle Galaxy' ? (
-                <ParticleGalaxy quality={quality} accessibility={accessibility} />
-              ) : scene === 'Wireframe House 3D' ? (
+              {scene === 'Wireframe House 3D' ? (
                 <WireframeHouse3D
                   quality={quality}
                   accessibility={{
@@ -114,7 +123,6 @@ export default function App() {
           <div style={{ display: 'inline-flex', gap: 8, marginLeft: 10, alignItems: 'center' }}>
             <label htmlFor="scene" style={{ fontSize: 11, color: 'var(--muted)' }}>Scene</label>
             <select id="scene" value={scene} onChange={(e) => onSceneChange(e.currentTarget.value)} title="Scene selector" aria-label="Scene selector">
-              <option value="Particle Galaxy">Particle Galaxy (Three)</option>
               <option value="Wireframe House 3D">Wireframe House 3D (Three)</option>
               <option value="Psychedelic Tunnel">Psychedelic Kaleido Tunnel</option>
             </select>

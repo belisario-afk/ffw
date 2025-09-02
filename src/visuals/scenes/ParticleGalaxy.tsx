@@ -27,11 +27,11 @@ const PRESETS: Preset[] = [
   { name: 'Dusty Arms',     arms: { count: 5, width: 2.6, curvature: 0.24, twist: 1.1, speed: 0.09 }, core: { count: 7000,  radius: 1.5 },  dust: { count: 16000, radius: 28 }, bloom: { strength: 0.5,  radius: 0.55, threshold: 0.62 } }
 ]
 
-// Safety limits and defaults to avoid white screens and lag
+// Safety limits
 const SAFE = {
-  MAX_TOTAL: 12000,          // hard ceiling for total particles (instanced or points)
-  START_COUNT: 3500,         // ramp from this count upward only if FPS allows
-  MIN_COUNT: 2500,           // never drop below this
+  MAX_TOTAL: 12000,
+  START_COUNT: 3500,
+  MIN_COUNT: 2500,
   MAX_SIZE_SCALE: 1.2,
   MIN_SIZE_SCALE: 0.55,
   TARGET_FPS: 58,
@@ -58,9 +58,7 @@ function supportsInstancing(renderer: THREE.WebGLRenderer) {
     const webgl2 = !!(gl && (gl as WebGL2RenderingContext).drawArraysInstanced)
     const angle = !!gl.getExtension?.('ANGLE_instanced_arrays')
     return webgl2 || angle
-  } catch {
-    return false
-  }
+  } catch { return false }
 }
 
 function spiralPoint(armIndex: number, arms: number, t: number, curvature: number, width: number, rand: number, twist: number) {
@@ -74,7 +72,7 @@ function spiralPoint(armIndex: number, arms: number, t: number, curvature: numbe
   return new THREE.Vector3(x, y, z)
 }
 
-// Instanced billboard star material (fast, high quality)
+// Instanced billboard star material
 function buildInstancedStarMaterial(primary: THREE.Color, accent: THREE.Color) {
   const uniforms = {
     uTime: { value: 0 },
@@ -138,9 +136,8 @@ function buildInstancedStarMaterial(primary: THREE.Color, accent: THREE.Color) {
       float c = core(uv) + 0.25*spikes(uv);
       float depthGlow = mix(0.65, 1.0, smoothstep(0.0, 120.0, vDepth));
       vec3 col = base * (1.0 + uGlow*0.8) * c * twinkle * depthGlow;
-      col = tonemap(col*1.1); // local tonemap to avoid washout
-      float alpha = smoothstep(1.0, 0.0, r);
-      alpha *= alpha;
+      col = tonemap(col*1.1);
+      float alpha = smoothstep(1.0, 0.0, r); alpha*=alpha;
       if (alpha < 0.01) discard;
       gl_FragColor = vec4(col, alpha);
     }
@@ -157,7 +154,7 @@ function buildInstancedStarMaterial(primary: THREE.Color, accent: THREE.Color) {
   return { mat, uniforms }
 }
 
-// Points fallback (even safer)
+// Points fallback
 function buildPointsMaterial(primary: THREE.Color, accent: THREE.Color) {
   const uniforms = {
     uTime: { value: 0 },
@@ -233,8 +230,7 @@ function makeInstancedGeometry(count: number) {
     -1, -1,  1,  1, -1,  1
   ])
   geom.setAttribute('corner', new THREE.BufferAttribute(corners, 2))
-  // dummy pos
-  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6 * 3), 3))
+  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6 * 3), 3)) // dummy
   const instancePosition = new Float32Array(count * 3)
   const instanceSize = new Float32Array(count)
   const instanceSeed = new Float32Array(count)
@@ -266,22 +262,21 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
   const [presetIdx, setPresetIdx] = useState(0)
   const preset = PRESETS[presetIdx]
 
-  // Album-driven palette
   const primaryRef = useRef(new THREE.Color('#4ad3ff'))
   const accentRef = useRef(new THREE.Color('#ff6bd6'))
   const bgRef = useRef(new THREE.Color('#04070c'))
 
-  // Safe defaults that won’t blow out brightness
+  // start in safe mode
   const [ui, setUi] = useState<UIConfig>({
     sizeScale: 0.85,
     twinkleSensitivity: 0.8,
     glowBoost: 0.85,
     spinMultiplier: 0.9,
     exposure: 0.9,
-    bloomEnabled: false, // start disabled to avoid white-out
+    bloomEnabled: false,
     bloomStrength: 0.55,
     cursorFadeRadius: 0.0,
-    safeMode: true      // start in safe mode; user can disable in UI
+    safeMode: true
   })
   const uiRef = useRef(ui)
   useEffect(() => { uiRef.current = ui }, [ui])
@@ -289,12 +284,14 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
   const [showModal, setShowModal] = useState(false)
   const [activeTab, setActiveTab] = useState<TabKey>('presets')
 
+  // pause control as a ref (clean)
+  const pausedRef = useRef(false)
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key >= '1' && e.key <= '5') setPresetIdx(Math.min(4, Math.max(0, parseInt(e.key, 10) - 1)))
       if (e.key === 'Escape') setShowModal(false)
       if (e.key.toLowerCase() === 'c') setShowModal(v => !v)
-      if (e.key.toLowerCase() === 'p') paused = !paused // pause toggle
+      if (e.key.toLowerCase() === 'p') pausedRef.current = !pausedRef.current
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -317,20 +314,19 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     renderer.toneMapping = THREE.ACESFilmicToneMapping
     renderer.toneMappingExposure = uiRef.current.exposure
     renderer.setClearColor(bgRef.current, 1)
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75)) // clamp DPR
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75))
 
     // Pause when tab not visible
-    let paused = false
-    function onVis() { paused = document.hidden }
+    function onVis() { pausedRef.current = document.hidden }
     document.addEventListener('visibilitychange', onVis)
 
-    // Post FX composer (can be a passthrough if createComposer returns function)
+    // Composer with FXAA disabled (silences your warnings and saves GPU)
     const comp = createComposer(renderer, scene, camera, {
       bloom: uiRef.current.bloomEnabled && !uiRef.current.safeMode,
       bloomStrength: uiRef.current.bloomStrength,
       bloomRadius: preset.bloom.radius,
       bloomThreshold: Math.max(0.65, preset.bloom.threshold),
-      fxaa: true,
+      fxaa: false, // IMPORTANT: disable FXAA to avoid gradients-in-loop warnings
       vignette: true,
       vignetteStrength: 0.2,
       filmGrain: false,
@@ -346,7 +342,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     const root = new THREE.Group()
     scene.add(root)
 
-    // Choose path: instanced quads (faster) vs points (safer)
+    // Path selection
     const useInstancing = supportsInstancing(renderer) && !uiRef.current.safeMode
 
     // Budget and caps
@@ -358,16 +354,14 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     const DUST = Math.min(Math.floor(preset.dust.count * baseScale), Math.max(0, MAX_TOTAL - CORE - ARM_TOTAL))
     const TOTAL = Math.max(SAFE.MIN_COUNT, Math.min(MAX_TOTAL, CORE + ARM_TOTAL + DUST))
 
-    // Geometry/material
     let liveCount = Math.min(SAFE.START_COUNT, TOTAL)
     let mesh: THREE.Object3D
     let uniforms: any
 
     if (useInstancing) {
-      const { geom, instancePosition, instanceSize, instanceSeed, instanceType } = makeInstancedGeometry(TOTAL)
-      // Fill data
+      const geomPack = makeInstancedGeometry(TOTAL)
+      const { geom, instancePosition, instanceSize, instanceSeed, instanceType } = geomPack
       let k = 0
-      // Core
       {
         const R = preset.core.radius
         for (let i = 0; i < CORE; i++) {
@@ -383,7 +377,6 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
           k++
         }
       }
-      // Arms
       {
         const perArm = Math.floor(ARM_TOTAL / preset.arms.count)
         for (let a = 0; a < preset.arms.count; a++) {
@@ -402,7 +395,6 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
           }
         }
       }
-      // Dust
       for (; k < TOTAL; k++) {
         const R = preset.dust.radius
         const r = THREE.MathUtils.lerp(5, R, Math.pow(Math.random(), 0.7))
@@ -414,23 +406,22 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
         instanceSeed[k] = Math.random()
         instanceType[k] = 2
       }
-
-      ;(geom.getAttribute('instancePosition') as THREE.InstancedBufferAttribute).needsUpdate = true
-      ;(geom.getAttribute('instanceSize') as THREE.InstancedBufferAttribute).needsUpdate = true
-      ;(geom.getAttribute('instanceSeed') as THREE.InstancedBufferAttribute).needsUpdate = true
-      ;(geom.getAttribute('instanceType') as THREE.InstancedBufferAttribute).needsUpdate = true
+      ;(geomPack.geom.getAttribute('instancePosition') as THREE.InstancedBufferAttribute).needsUpdate = true
+      ;(geomPack.geom.getAttribute('instanceSize') as THREE.InstancedBufferAttribute).needsUpdate = true
+      ;(geomPack.geom.getAttribute('instanceSeed') as THREE.InstancedBufferAttribute).needsUpdate = true
+      ;(geomPack.geom.getAttribute('instanceType') as THREE.InstancedBufferAttribute).needsUpdate = true
 
       const { mat, uniforms: u } = buildInstancedStarMaterial(primaryRef.current.clone(), accentRef.current.clone())
       uniforms = u
-      const stars = new THREE.Mesh(geom, mat)
+      const stars = new THREE.Mesh(geomPack.geom, mat)
       ;(stars as any).frustumCulled = false
+      ;(geomPack.geom as THREE.InstancedBufferGeometry).instanceCount = liveCount
       root.add(stars)
       mesh = stars
-      ;(geom as THREE.InstancedBufferGeometry).instanceCount = liveCount
     } else {
-      const { geom, position, aSize, aSeed, aType } = makePointsGeometry(TOTAL)
+      const geomPack = makePointsGeometry(TOTAL)
+      const { geom, position, aSize, aSeed, aType } = geomPack
       let k = 0
-      // Core
       {
         const R = preset.core.radius
         for (let i = 0; i < CORE; i++) {
@@ -446,7 +437,6 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
           k++
         }
       }
-      // Arms
       {
         const perArm = Math.floor(ARM_TOTAL / preset.arms.count)
         for (let a = 0; a < preset.arms.count; a++) {
@@ -465,7 +455,6 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
           }
         }
       }
-      // Dust
       for (; k < TOTAL; k++) {
         const R = preset.dust.radius
         const r = THREE.MathUtils.lerp(5, R, Math.pow(Math.random(), 0.7))
@@ -477,26 +466,27 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
         aSeed[k] = Math.random()
         aType[k] = 2
       }
-      ;(geom.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true
-      ;(geom.getAttribute('aSize') as THREE.BufferAttribute).needsUpdate = true
-      ;(geom.getAttribute('aSeed') as THREE.BufferAttribute).needsUpdate = true
-      ;(geom.getAttribute('aType') as THREE.BufferAttribute).needsUpdate = true
-      geom.setDrawRange(0, liveCount)
+      ;(geomPack.geom.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true
+      ;(geomPack.geom.getAttribute('aSize') as THREE.BufferAttribute).needsUpdate = true
+      ;(geomPack.geom.getAttribute('aSeed') as THREE.BufferAttribute).needsUpdate = true
+      ;(geomPack.geom.getAttribute('aType') as THREE.BufferAttribute).needsUpdate = true
+      geomPack.geom.setDrawRange(0, liveCount)
 
       const { mat, uniforms: u } = buildPointsMaterial(primaryRef.current.clone(), accentRef.current.clone())
       uniforms = u
-      const points = new THREE.Points(geom, mat)
+      const points = new THREE.Points(geomPack.geom, mat)
       ;(points as any).frustumCulled = false
       root.add(points)
       mesh = points
     }
 
-    // Audio frames
+    // Audio frames — FIX: keep unsubscribe function and call it later (no reactivityBus.off)
     let latest: ReactiveFrame | null = null
-    const offFrame = reactivityBus.on('frame', f => { latest = f })
+    const unsubscribeFrame = reactivityBus.on('frame', (f) => { latest = f })
 
-    // Palette from album art (safe, rare)
+    // Album palette (low frequency)
     let lastAlbumUrl: string | null = null
+    const palIv = window.setInterval(refreshPalette, 8000)
     async function refreshPalette() {
       try {
         const s = await getPlaybackState()
@@ -517,12 +507,10 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
             if (uniforms?.uAccent) uniforms.uAccent.value = acc
           }
         }
-      } catch { /* ignore palette failures */ }
+      } catch {}
     }
-    const palIv = window.setInterval(refreshPalette, 8000)
     refreshPalette()
 
-    // Resize
     function onResize() {
       const view = renderer.getSize(new THREE.Vector2())
       camera.aspect = Math.max(1e-3, view.x / Math.max(1, view.y))
@@ -536,7 +524,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     let fpsAvg = 60
     let lastT = performance.now()
     let rampT = 0
-    let whiteoutGuard = 0 // if brightness spikes, we back off exposure/bloom
+    let whiteoutGuard = 0
 
     function sampleFPS() {
       const now = performance.now()
@@ -554,33 +542,34 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
 
     function setLiveCount(n: number) {
       liveCount = Math.max(SAFE.MIN_COUNT, Math.min(TOTAL, n | 0))
-      if ((mesh as any).geometry instanceof THREE.InstancedBufferGeometry) {
-        ;((mesh as any).geometry as THREE.InstancedBufferGeometry).instanceCount = liveCount
-      } else {
-        ;((mesh as any).geometry as THREE.BufferGeometry).setDrawRange(0, liveCount)
-      }
+      const g: any = (mesh as any).geometry
+      if (g instanceof THREE.InstancedBufferGeometry) g.instanceCount = liveCount
+      else g.setDrawRange(0, liveCount)
     }
 
     function animate() {
       raf = requestAnimationFrame(animate)
-      if (paused) return
+
+      // Early out if context lost or paused
+      // @ts-ignore
+      const gl = renderer.getContext?.()
+      // @ts-ignore
+      if (gl?.isContextLost?.()) return
+      if (pausedRef.current) return
 
       const t = clock.getElapsedTime()
       const dt = clock.getDelta()
       sampleFPS()
 
-      // Audio
       const low = latest?.bands.low ?? 0.05
       const mid = latest?.bands.mid ?? 0.05
       const high = latest?.bands.high ?? 0.05
       const beat = !!latest?.beat
 
-      // Spin
       const spinBase = preset.arms.speed * uiRef.current.spinMultiplier
       baseAngle += dt * (spinBase + low * 0.6 * uiRef.current.spinMultiplier)
       root.rotation.y = baseAngle
 
-      // Camera gentle drift
       const camDist = 8.8 - Math.min(1.1, low * 2.0)
       camera.position.x = Math.cos(t * 0.05) * camDist
       camera.position.z = Math.sin(t * 0.05) * camDist
@@ -597,7 +586,6 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
         shake.multiplyScalar(0.86)
       }
 
-      // Uniforms (guarded)
       if (uniforms) {
         if (uniforms.uTime) uniforms.uTime.value = t
         const twSafe = accessibility.epilepsySafe ? 0.5 : 1.0
@@ -607,17 +595,14 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
         if (uniforms.uSizeScale) uniforms.uSizeScale.value = Math.max(SAFE.MIN_SIZE_SCALE, Math.min(SAFE.MAX_SIZE_SCALE, sizeAuto * uiRef.current.sizeScale))
       }
 
-      // Renderer exposure clamped
       renderer.toneMappingExposure = Math.max(0.7, Math.min(1.15, uiRef.current.exposure))
 
-      // Whiteout guard: if FPS tanks and bloom is on, reduce bloom/exposure automatically
+      // Whiteout guard
       if (fpsAvg < SAFE.DOWN_FPS) {
         whiteoutGuard += dt
         if (whiteoutGuard > 0.5) {
           whiteoutGuard = 0
           renderer.toneMappingExposure = Math.max(0.75, renderer.toneMappingExposure * 0.92)
-          // If composer object supports changing bloom at runtime
-          // we rely on lower exposure; bloom already disabled in safe mode.
         }
       } else {
         whiteoutGuard = Math.max(0, whiteoutGuard - dt)
@@ -638,16 +623,17 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     }
     raf = requestAnimationFrame(animate)
 
-    // Cleanup
+    // Cleanup — FIX: call unsubscribe function; don’t call reactivityBus.off
     return () => {
       cancelAnimationFrame(raf)
       window.removeEventListener('resize', onResize)
       document.removeEventListener('visibilitychange', onVis)
       window.clearInterval(palIv)
-      reactivityBus.off('frame', offFrame as any)
+      try { typeof unsubscribeFrame === 'function' && unsubscribeFrame() } catch {}
       try {
-        if ((mesh as any)?.geometry) (mesh as any).geometry.dispose?.()
-        if ((mesh as any)?.material) (mesh as any).material.dispose?.()
+        const m: any = mesh
+        m?.geometry?.dispose?.()
+        m?.material?.dispose?.()
       } catch {}
       disposeRenderer()
     }
@@ -660,7 +646,6 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
     if (c?.background) bgRef.current.set(c.background)
   }, [presetIdx])
 
-  // Center popup UI (adds Safe Mode toggle so you can try higher quality once stable)
   const Modal = useMemo(() => {
     if (!showModal) return null
     return (
@@ -702,7 +687,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                     <span />
                     <span />
                   </div>
-                  <div className="pg-hint">Safe Mode uses fewer particles and no bloom to prevent white screens and lag. Disable only after it looks stable.</div>
+                  <div className="pg-hint">Safe Mode uses fewer particles and no bloom to prevent white screens and lag.</div>
                 </div>
               )}
 
@@ -769,7 +754,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
                       onChange={e => setUi(prev => ({ ...prev, bloomStrength: parseFloat(e.currentTarget.value) }))} disabled={ui.safeMode} />
                     <span className="pg-val">{ui.bloomStrength.toFixed(2)}</span>
                   </div>
-                  <div className="pg-hint">Bloom can cause bright white if too strong; keep exposure low when enabling.</div>
+                  <div className="pg-hint">Enable Bloom only after it’s stable; reduce Exposure if it looks too bright.</div>
                 </div>
               )}
             </div>
@@ -784,7 +769,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
       <button className="pg-gear" onClick={() => setShowModal(true)} title="Open Galaxy Settings (C)">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-          <path fill="currentColor" d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9.44 3.26-1.78-.69c-.1-.34-.22-.67-.37-.99l.96-1.68a.5.5 0 0 0-.07-.59l-1.41-1.41a.5.5 0 0 0-.59-.07l-1.68.96c-.32-.15-.65-.27-.99-.37l-.69-1.78a.5.5 0 0 0-.48-.34h-2a.5.5 0 0 0-.48.34l-.69 1.78c-.34.1-.67.22-.99.37l-1.68-.96a.5.5 0 0 0-.59.07L3.82 6.83a.5.5 0 0 0-.07.59l.96 1.68c-.15.32-.27.65-.37.99l-1.78.69a.5.5 0 0 0-.34.48v2c0 .22.14.41.34.48l1.78.69c.1.34.22.67.37.99l-.96 1.68a.5.5 0 0 0 .07.59l1.41 1.41c.16.16.41.2.59.07l1.68-.96c.32.15.65.27.99.37l.69 1.78c.07.2.26.34.48.34h2c.22 0 .41-.14.48-.34l.69-1.78c.34-.1.67-.22.99-.37l1.68.96c.18.13.43.09.59-.07l1.41-1.41a.5.5 0 0 0 .07-.59l-.96-1.68c.15-.32.27-.65.37-.99l1.78-.69c.2-.07.34-.26.34-.48v-2a.5.5 0 0 0-.34-.48Z"/>
+          <path fill="currentColor" d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9.44 3.26-1.78-.69c-.1-.34-.22-.67-.37-.99l.96-1.68a.5.5 0 0 0-.07-.59l-1.41-1.41a.5.5 0 0 0-.59-.07l-1.68.96c-.32-.15-.65-.27-.99-.37l-.69-1.78a.5.5 0 0 0-.48-.34h-2a.5.5 0 0 0-.48.34l-.69 1.78c-.34.1-.67.22-.99.37l-1.68.96c.18.13.43.09.59-.07l1.41-1.41a.5.5 0 0 0 .07-.59l-.96-1.68c.15-.32.27-.65.37-.99l1.78-.69c.2-.07.34-.26.34-.48v-2a.5.5 0 0 0-.34-.48Z"/>
         </svg>
       </button>
       {Modal}

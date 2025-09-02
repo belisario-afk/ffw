@@ -1,6 +1,5 @@
 import React, { Suspense, useEffect, useState } from 'react'
 import { Route, Routes, useNavigate } from 'react-router-dom'
-import { restoreFromStorage, type AuthState } from './auth/token'
 import Callback from './auth/Callback'
 import PlayerController from './controllers/PlayerController'
 const WireframeHouse3D = React.lazy(() => import('./visuals/scenes/WireframeHouse3D'))
@@ -22,7 +21,6 @@ import GlobalTopBar from './ui/GlobalTopBar'
 type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
 
 export default function App() {
-  const [auth] = useState<AuthState | null>(restoreFromStorage())
   const [panel, setPanel] = useState<Panel>(null)
   const [gpu, setGpu] = useState<string>('Detecting GPU...')
   const [fps, setFps] = useState<number>(0)
@@ -96,12 +94,11 @@ export default function App() {
         <ThemeManager />
         <AlbumSkinWatcher />
         <Routes>
-          <Route path="/callback" element={<Callback onAuth={() => { /* handled by provider/spotify auth */ }} />} />
+          <Route path="/callback" element={<Callback onAuth={() => { /* handled by PlaybackProvider on redirect */ }} />} />
           <Route path="/*" element={
             <Suspense fallback={<div className="badge" style={{ position: 'absolute', left: 16, top: 72 }}>Loading scene…</div>}>
               {scene === 'Wireframe House 3D' ? (
                 <WireframeHouse3D
-                  auth={auth}
                   quality={quality}
                   accessibility={{
                     epilepsySafe: accessibility.epilepsySafe,
@@ -112,7 +109,6 @@ export default function App() {
                 />
               ) : (
                 <PsyKaleidoTunnel
-                  auth={auth}
                   quality={quality}
                   accessibility={accessibility}
                 />

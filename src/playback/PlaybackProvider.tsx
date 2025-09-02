@@ -47,8 +47,8 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
   }, [token])
 
   const signIn = useCallback(() => {
-    setStatus('')
-    ensureAuth()
+    setStatus('Redirecting to Spotify…')
+    ensureAuth() // Navigates to Spotify and back; token is restored on return (above)
   }, [])
 
   // 3) Create/connect player and transfer playback to it (user gesture)
@@ -58,7 +58,7 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
     if (!t) { setStatus('Sign in first'); return }
     try {
       await loadWebPlaybackSDK()
-      const { player, deviceId: did } = await ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
+      const { player, deviceId: did } = await ensurePlayerConnected({ deviceName: 'FFW Visualizer', setInitialVolume: true })
       try { await (player as any).activateElement?.() } catch {}
       setDeviceId(did || null)
       setIsDeviceReady(true)
@@ -67,7 +67,7 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
         await transferPlaybackToDevice({ deviceId: did, play: true })
         setStatus('Playing in browser')
       } else {
-        setStatus('Player ready. Select “FFw visualizer” in Spotify app if it did not auto-transfer.')
+        setStatus('Player ready. Select “FFW Visualizer” in Spotify app if it did not auto-transfer.')
       }
     } catch (e: any) {
       console.error(e)
@@ -98,13 +98,13 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
     signIn,
     playInBrowser,
     transferToBrowser
-  }), [deviceId, isDeviceReady, playInBrowser, signIn, status, token, transferToBrowser])
+  }), [token, deviceId, isDeviceReady, status, signIn, playInBrowser, transferToBrowser])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }
 
-export function usePlayback() {
+export function usePlayback(): PlaybackCtx {
   const ctx = useContext(Ctx)
-  if (!ctx) throw new Error('usePlayback must be used inside PlaybackProvider')
+  if (!ctx) throw new Error('usePlayback must be used within PlaybackProvider')
   return ctx
 }

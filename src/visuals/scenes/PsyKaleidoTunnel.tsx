@@ -673,9 +673,9 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
 
       for (let i = 0; i < count; i++) {
         const theta = Math.random() * Math.PI * 2
-        const r = radius * (0.9 + Math.random() * 0.25)
-        pos[i * 3 + 0] = Math.cos(theta) * r
-        pos[i * 3 + 1] = Math.sin(theta) * r
+        const r = Math.random() * 0.25 + 0.9
+        pos[i * 3 + 0] = Math.cos(theta) * radius * r
+        pos[i * 3 + 1] = Math.sin(theta) * radius * r
         pos[i * 3 + 2] = -Math.random() * tunnelLen
         vel[i] = 3 + Math.random() * 9
 
@@ -696,7 +696,8 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
       // @ts-ignore
       mesh.instanceColor!.needsUpdate = true
 
-      shardDataRef.current = { pos, vel, rot, rot: rot, rotVel, colors }
+      // FIX: remove duplicate key "rot" (keep single property name)
+      shardDataRef.current = { pos, vel, rot, rotVel, colors }
       shardsRef.current = mesh
       scene.add(mesh)
     }
@@ -847,7 +848,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
         destroyShards()
         shardsActiveRef.current = false
       } else if (s.shardsEnabled && shardsRef.current && shardDataRef.current) {
-        // update existing
         const mesh = shardsRef.current
         const { pos, vel, rot, rotVel } = shardDataRef.current
         const m = new THREE.Matrix4()
@@ -940,8 +940,6 @@ export default function PsyKaleidoTunnel({ quality, accessibility }: Props) {
   // Dispatch a custom event for "Play in browser" (host app should listen and handle activating the Web Playback device)
   const requestPlayInBrowser = () => {
     window.dispatchEvent(new CustomEvent('ffw:play-in-browser'))
-    // optional fallback open (host should override):
-    // window.open('https://open.spotify.com', '_blank', 'noopener,noreferrer')
   }
 
   return (

@@ -57,6 +57,7 @@ type LocalCfg = {
     bloomBreath: boolean
     lyricsMarquee: boolean
     mosaicFloor: boolean
+    wireCar: boolean
   }
 }
 
@@ -99,7 +100,8 @@ function defaults(initial?: any): LocalCfg {
       starfield: false,
       bloomBreath: false,
       lyricsMarquee: true,
-      mosaicFloor: false
+      mosaicFloor: false,
+      wireCar: true
     }
   }
 }
@@ -115,19 +117,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Billboard controller state (in-panel UI)
-  const [bbEditEnabled, setBbEditEnabled] = useState(false)
-  const [bbMode, setBbMode] = useState<'move'|'rotate'|'scale'>('move')
-  const [bbPlane, setBbPlane] = useState<'XZ'|'XY'>('XZ')
-
-  // Mirror UI state into refs so the animation loop always sees latest values (no scene re-init needed)
-  const bbEditRef = useRef(bbEditEnabled)
-  const bbModeRef = useRef<'move'|'rotate'|'scale'>(bbMode)
-  const bbPlaneRef = useRef<'XZ'|'XY'>(bbPlane)
-  useEffect(() => { bbEditRef.current = bbEditEnabled }, [bbEditEnabled])
-  useEffect(() => { bbModeRef.current = bbMode }, [bbMode])
-  useEffect(() => { bbPlaneRef.current = bbPlane }, [bbPlane])
-
   // stable refs
   const angleRef = useRef(0)
   const syncedRef = useRef<SyncedLine[] | null>(null)
@@ -135,21 +124,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const pbClock = useRef<{ playing: boolean; startedAt: number; offsetMs: number }>({ playing: false, startedAt: 0, offsetMs: 0 })
   const lastVisualMsRef = useRef<number>(0)
 
-  // Billboard transform refs (driven by UI)
-  const moveVecRef = useRef<{x:number,y:number}>({ x: 0, y: 0 })
-  const moveAxis3Ref = useRef<number>(0)
-  const rotateVecRef = useRef<{x:number,y:number}>({ x: 0, y: 0 })
-  const scaleDeltaRef = useRef<number>(0)
-  const billboardScaleRef = useRef<number>(1)
-  const billboardYawRef = useRef<number>(0)
-  const billboardPosRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 2.95, 1.05))
-
   useEffect(() => {
     const token = (auth as any)?.accessToken
     if (token) { try { setSpotifyTokenProvider(async () => token) } catch {} }
   }, [auth])
 
-  // Connect Spotify player if available
+  // Scenes should not create the SDK, but keeping this connect is harmless if the provider already did.
   useEffect(() => {
     if (hasSpotifyTokenProvider()) {
       ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
@@ -247,7 +227,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       motionBlur: false
     })
 
-    // Controls (never add controls to scene)
+    // Controls
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
@@ -301,7 +281,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     floorMesh.position.y = 0.001
     scene.add(floorMesh)
 
-    // Placeholder on floor tex
+    // NEW: set a safe placeholder so floor isn't a dark slab before art loads
     const floorPlaceholder = createDarkPlaceholderTexture()
     floorMat.uniforms.tAlbum.value = floorPlaceholder
 
@@ -372,9 +352,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       highlightColor: accent.getHex(),
       fontSize: 0.36
     })
-    billboard.group.position.copy(billboardPosRef.current)
-    billboard.group.rotation.y = billboardYawRef.current
-    billboard.group.scale.setScalar(billboardScaleRef.current)
+    billboard.group.position.set(0, 2.95, 1.05)
     scene.add(billboard.group)
 
     // Optional starfield (created once)
@@ -392,11 +370,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const z = r * Math.sin(theta) * Math.sin(phi)
         positions.set([x,y,z], i*3)
       }
-      g.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-      const m = new THREE.PointsMaterial({ color: 0xeaf3ff, size: 0.7, sizeAttenuation: true, transparent: true, opacity: 0.45, depthWrite: false })
-      starfield = new THREE.Points(g, m)
-      starfield.visible = !!cfgRef.current.fx.starfield
-      scene.add(starfield)
+     g.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+const m = new THREE.PointsMaterial({
+  color: 0xeaf3ff,            // FIX: valid hex literal
+  size: 0.7,
+  sizeAttenuation: true,
+  transparent: true,
+  opacity: 0.45,
+  depthWrite: false,
+})
+starfield = new THREE.Points(g, m)
+starfield.visible = !!cfgRef.current.fx.starfield
+scene.add(starfield)
     }
 
     // Haze
@@ -528,7 +513,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           floorTex?.dispose(); floorTex = tex
           floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
 
-          // Update mosaic when new art arrives
+          // FIX: always update the mosaic tiles when new art arrives (was only doing it on first cover)
           if (cfgRef.current.fx.mosaicFloor && tiles.length) {
             mosaicGroup.visible = true
             for (const t of tiles) {
@@ -576,6 +561,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     // Reactivity
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
+
+    // NEW: Wireframe car (drifting on top of the album cover)
+    const car = createWireframeCar()
+    car.group.visible = !!cfgRef.current.fx.wireCar
+    scene.add(car.group)
 
     // Resize
     const updateSizes = () => {
@@ -629,44 +619,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.minPolarAngle = cfgC.camera.minPolarAngle
       controls.maxPolarAngle = cfgC.camera.maxPolarAngle
 
-      // Apply panel controller transforms to billboard (reads refs, not state)
-      if (bbEditRef.current) {
-        // MOVE
-        if (bbModeRef.current === 'move') {
-          const mv = moveVecRef.current
-          const speed = 3.0
-          if (bbPlaneRef.current === 'XZ') {
-            billboardPosRef.current.x += (mv.x * speed) * dt
-            billboardPosRef.current.z += (-mv.y * speed) * dt
-            billboardPosRef.current.y += (moveAxis3Ref.current * speed) * dt
-          } else {
-            billboardPosRef.current.x += (mv.x * speed) * dt
-            billboardPosRef.current.y += (mv.y * speed) * dt
-            billboardPosRef.current.z += (moveAxis3Ref.current * speed) * dt
-          }
-          billboardPosRef.current.y = THREE.MathUtils.clamp(billboardPosRef.current.y, 1.2, 5.2)
-        }
-        // ROTATE
-        if (bbModeRef.current === 'rotate') {
-          const rvx = rotateVecRef.current.x
-          const yawSpeed = 2.8
-          billboardYawRef.current += (rvx * yawSpeed) * dt
-        }
-        // SCALE
-        if (bbModeRef.current === 'scale') {
-          const sDelta = scaleDeltaRef.current
-          const sSpeed = 1.4
-          const next = THREE.MathUtils.clamp(billboardScaleRef.current + (sDelta * sSpeed) * dt, 0.35, 3.0)
-          billboardScaleRef.current = next
-        }
-
-        // Push to actual object each frame
-        billboard.group.position.copy(billboardPosRef.current)
-        billboard.group.rotation.y = billboardYawRef.current
-        billboard.setUserScale(billboardScaleRef.current)
-        billboard.group.scale.setScalar(billboardScaleRef.current)
-      }
-
       // colors
       accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.25, 0, 0.25))
       accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.2, 0, 0.2))
@@ -680,14 +632,30 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       )
       billboard.setVisible(!!cfgC.fx.lyricsMarquee)
 
+      // Drive wireframe car
+      car.group.visible = !!cfgC.fx.wireCar
+      if (car.group.visible) {
+        car.update(dt, {
+          t,
+          loud,
+          beat: !!latest?.beat,
+          high,
+          floorHalf: floorSize * 0.5 - 0.6,
+          accent,
+          accent2
+        })
+      }
+
       // lines
       const px = cfgC.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
       setLinePixels(px)
 
       // fog
-      ;(fogMat as any).uniforms.uTime.value = t
-      ;(fogMat as any).uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
-      ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
+      if ((fogMat as any)?.uniforms?.uTime) {
+        ;(fogMat as any).uniforms.uTime.value = t
+        ;(fogMat as any).uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
+        ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
+      }
 
       // starfield visibility follows toggle
       if (starfield) starfield.visible = !!cfgC.fx.starfield
@@ -721,6 +689,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             currentLineRef.current = idx
             const text = lines[idx].text || ''
             if (text) {
+              // Prepare and swap to the current line, then pop
               billboard.prepareNext(text).then(() => {
                 billboard.beginSwap()
                 billboard.triggerPop(1.0)
@@ -760,8 +729,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const elev = cfgC.orbitElev
         const pos = pathPoint(cfgC.path, angleRef.current, radius)
         camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
-        camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
-        controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
+        camera.lookAt(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
+        controls.target.set(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
       } else {
         camera.position.y += (bob - (camera as any).__lastBobY || 0)
         ;(camera as any).__lastBobY = bob
@@ -796,6 +765,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       floorTex?.dispose()
       marqueeTex?.dispose?.()
       billboard.dispose()
+      // dispose car
+      car.dispose()
       scene.traverse(obj => {
         const any = obj as any
         if (any.geometry?.dispose) any.geometry.dispose()
@@ -807,6 +778,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       comp.dispose()
       disposeRenderer()
       renderer.dispose()
+      // dispose floor placeholder
       floorPlaceholder?.dispose()
     }
 
@@ -906,244 +878,159 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         }
       }
     }
-  // keep renderScale/bloom/accessibility/auth as triggers; avoid re-running on UI changes
+
+    // Helper: Wireframe car builder and updater
+    function createWireframeCar() {
+      const group = new THREE.Group()
+      group.position.set(0, 0.06, 0)
+      group.renderOrder = 2
+
+      // Materials (wireframe)
+      const carMat = new THREE.MeshBasicMaterial({ color: accent.getHex(), wireframe: true, transparent: true, opacity: 0.95, depthWrite: false })
+      const cabinMat = new THREE.MeshBasicMaterial({ color: accent2.getHex(), wireframe: true, transparent: true, opacity: 0.8, depthWrite: false })
+      const wheelMat = new THREE.MeshBasicMaterial({ color: accent.getHex(), wireframe: true, transparent: true, opacity: 0.95, depthWrite: false })
+      const glowMat = new THREE.MeshBasicMaterial({ color: 0x90d7ff, transparent: true, opacity: 0.18, depthWrite: false, blending: THREE.AdditiveBlending })
+
+      // Chassis
+      const chassis = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.3, 0.9), carMat)
+      chassis.position.y = 0.15
+      group.add(chassis)
+
+      // Cabin
+      const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.35, 0.8), cabinMat)
+      cabin.position.set(0, 0.5, 0)
+      group.add(cabin)
+
+      // Wheels (tori)
+      const wheelRadius = 0.28
+      const wheelTube = 0.08
+      const wheelGeom = new THREE.TorusGeometry(wheelRadius, wheelTube, 6, 14)
+      const wheels: THREE.Mesh[] = []
+      const wheelOffsets: [number, number][] = [
+        [ 0.72,  0.42],
+        [-0.72,  0.42],
+        [ 0.72, -0.42],
+        [-0.72, -0.42],
+      ]
+      for (const [x,z] of wheelOffsets) {
+        const w = new THREE.Mesh(wheelGeom, wheelMat)
+        w.rotation.y = Math.PI / 2
+        w.position.set(x, 0.18, z)
+        wheels.push(w)
+        group.add(w)
+      }
+
+      // Glow under car (soft circle)
+      const glow = new THREE.Mesh(new THREE.CircleGeometry(1.0, 24), glowMat)
+      glow.rotation.x = -Math.PI / 2
+      glow.position.y = 0.001
+      group.add(glow)
+
+      // Shadow (very soft)
+      const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.9, 20), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.14, depthWrite: false }))
+      shadow.rotation.x = -Math.PI / 2
+      shadow.position.y = 0.0005
+      group.add(shadow)
+
+      // Car kinematics state
+      const state = {
+        t: 0,
+        lastPos: new THREE.Vector3(0, 0.06, 0),
+        distance: 0,
+        slip: 0
+      }
+
+      const tmp = {
+        p0: new THREE.Vector3(),
+        p1: new THREE.Vector3(),
+        tangent: new THREE.Vector3(),
+        side: new THREE.Vector3(),
+      }
+
+      function update(dt: number, env: { t: number; loud: number; beat: boolean; high: number; floorHalf: number; accent: THREE.Color; accent2: THREE.Color }) {
+        // Update colors to match palette
+        carMat.color.copy(env.accent)
+        wheelMat.color.copy(env.accent)
+        cabinMat.color.copy(env.accent2)
+
+        // Speed follows loudness; extra kick on beat
+        const baseSpeed = 0.55 + env.loud * 1.2
+        const speed = baseSpeed * (env.beat ? 1.15 : 1.0)
+        state.t += dt * speed
+
+        // Follow a smooth lemniscate path centered at origin
+        const R = 6.4
+        const a0 = state.t * 0.75
+        const a1 = a0 + 0.02
+        tmp.p0.copy(pathPoint('Lemniscate', a0, R))
+        tmp.p1.copy(pathPoint('Lemniscate', a1, R))
+
+        // Tangent and heading
+        tmp.tangent.subVectors(tmp.p1, tmp.p0).normalize()
+        const heading = Math.atan2(tmp.tangent.z, tmp.tangent.x)
+
+        // Drifting slip oscillates with highs and beats
+        const targetSlip = (0.25 + env.high * 0.6) * Math.sin(state.t * 0.9) + (env.beat ? 0.15 : 0)
+        state.slip += (targetSlip - state.slip) * Math.min(1, dt * 3.0)
+
+        // Side offset for drift
+        tmp.side.set(-Math.sin(heading), 0, Math.cos(heading)) // right-hand side vector
+        const driftOffset = tmp.side.clone().multiplyScalar(state.slip * 0.8)
+
+        // Position on floor with slight bob
+        const pos = tmp.p0.clone().add(driftOffset)
+        pos.y = 0.06 + Math.sin(env.t * 3.2) * 0.01
+        // Keep within bounds
+        pos.x = THREE.MathUtils.clamp(pos.x, -env.floorHalf, env.floorHalf)
+        pos.z = THREE.MathUtils.clamp(pos.z, -env.floorHalf, env.floorHalf)
+        group.position.copy(pos)
+
+        // Orientation: yaw follows heading + small drift yaw; bank on turns
+        const yaw = heading + state.slip * 0.55
+        const bank = THREE.MathUtils.clamp(-state.slip * 0.25, -0.35, 0.35)
+        group.rotation.set(0, yaw, bank)
+
+        // Wheel rotation from distance traveled
+        const stepDist = pos.distanceTo(state.lastPos)
+        state.distance += stepDist
+        state.lastPos.copy(pos)
+        const wheelRot = state.distance / (wheelRadius) * 0.6
+        for (const w of wheels) {
+          w.rotation.x = wheelRot
+        }
+
+        // Pulse glow with audio
+        glow.material.opacity = THREE.MathUtils.clamp(0.12 + env.loud * 0.35 + (env.beat ? 0.08 : 0), 0.08, 0.45)
+        ;(glow.material as THREE.MeshBasicMaterial).color.copy(env.accent.clone().multiplyScalar(1.0))
+      }
+
+      function dispose() {
+        group.removeFromParent()
+        chassis.geometry.dispose()
+        cabin.geometry.dispose()
+        ;(carMat as any).dispose?.()
+        ;(cabinMat as any).dispose?.()
+        ;(wheelMat as any).dispose?.()
+        glow.geometry.dispose()
+        ;(glow.material as any).dispose?.()
+        shadow.geometry.dispose()
+        ;(shadow.material as any).dispose?.()
+        for (const w of wheels) {
+          w.geometry.dispose()
+          ;(w.material as any).dispose?.()
+        }
+      }
+
+      return { group, update, dispose }
+    }
+  // keep renderScale/bloom/accessibility/auth as triggers; avoid re-running on cfg changes
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
-
-  // Simple UI controls used inside 3D Settings panel
-  const Joystick = (props: {
-    size?: number
-    onChange: (nx: number, ny: number) => void
-    label?: string
-  }) => {
-    const size = props.size ?? 110
-    const radius = size / 2
-    const knobRef = useRef<HTMLDivElement | null>(null)
-    const baseRef = useRef<HTMLDivElement | null>(null)
-    const dragRef = useRef<{active:boolean; cx:number; cy:number}>({ active:false, cx:0, cy:0 })
-
-    const setKnob = (nx: number, ny: number) => {
-      const k = knobRef.current
-      if (!k) return
-      const x = nx * (radius - 14)
-      const y = ny * (radius - 14)
-      k.style.transform = `translate(${x}px, ${y}px)`
-    }
-    const onPointerDown = (e: React.PointerEvent) => {
-      const rect = baseRef.current!.getBoundingClientRect()
-      dragRef.current.active = true
-      dragRef.current.cx = rect.left + rect.width/2
-      dragRef.current.cy = rect.top + rect.height/2
-      ;(e.target as HTMLElement).setPointerCapture?.((e as any).pointerId)
-      onPointerMove(e)
-    }
-    const onPointerMove = (e: React.PointerEvent) => {
-      if (!dragRef.current.active) return
-      const dx = e.clientX - dragRef.current.cx
-      const dy = e.clientY - dragRef.current.cy
-      const dist = Math.min(1, Math.hypot(dx, dy) / (radius - 14))
-      const ang = Math.atan2(dy, dx)
-      const nx = Math.cos(ang) * dist
-      const ny = Math.sin(ang) * dist
-      setKnob(nx, ny)
-      props.onChange(nx, ny)
-    }
-    const end = (e?: React.PointerEvent) => {
-      dragRef.current.active = false
-      setKnob(0, 0)
-      props.onChange(0, 0)
-      if (e) (e.target as HTMLElement).releasePointerCapture?.((e as any).pointerId)
-    }
-
-    return (
-      <div style={{ display:'inline-flex', flexDirection:'column', alignItems:'center', gap:6 }}>
-        <div
-          ref={baseRef}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={end}
-          onPointerCancel={end}
-          onPointerLeave={() => { if (!dragRef.current.active) return }}
-          style={{
-            position:'relative',
-            width:size, height:size, borderRadius:'50%',
-            background:'radial-gradient(ellipse at center, rgba(40,48,60,0.65), rgba(15,18,24,0.85))',
-            border:'1px solid #2b2f3a',
-            boxShadow:'inset 0 2px 14px rgba(0,0,0,0.4)',
-            touchAction:'none',
-            userSelect:'none'
-          }}
-        >
-          <div ref={knobRef} style={{
-            position:'absolute', left:'50%', top:'50%',
-            width:28, height:28, marginLeft:-14, marginTop:-14, borderRadius:'50%',
-            background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)', boxShadow:'0 2px 8px rgba(0,0,0,0.35)',
-            border:'1px solid #5a6b84', transform:'translate(0px,0px)'
-          }}/>
-        </div>
-        {props.label && <div style={{ fontSize:10, opacity:0.75 }}>{props.label}</div>}
-      </div>
-    )
-  }
-
-  const Rail = (props: {
-    length?: number
-    vertical?: boolean
-    onChange: (n: number) => void // -1..1
-    value?: number
-    label?: string
-  }) => {
-    const length = props.length ?? 120
-    const vertical = !!props.vertical
-    const railRef = useRef<HTMLDivElement | null>(null)
-    const knobRef = useRef<HTMLDivElement | null>(null)
-    const dragRef = useRef<{active:boolean; min:number; max:number}>({ active:false, min:0, max:0 })
-
-    useEffect(() => {
-      const k = knobRef.current
-      if (!k) return
-      const v = THREE.MathUtils.clamp(props.value ?? 0, -1, 1)
-      if (vertical) k.style.transform = `translate(0px, ${((1 - v) * 0.5 * length) - (length/2)}px)`
-      else k.style.transform = `translate(${((v + 1) * 0.5 * length) - (length/2)}px, 0px)`
-    }, [props.value, vertical, length])
-
-    const start = (e: React.PointerEvent) => {
-      const rect = railRef.current!.getBoundingClientRect()
-      dragRef.current.active = true
-      dragRef.current.min = vertical ? rect.top : rect.left
-      dragRef.current.max = vertical ? rect.bottom : rect.right
-      ;(e.target as HTMLElement).setPointerCapture?.((e as any).pointerId)
-      move(e)
-    }
-    const move = (e: React.PointerEvent) => {
-      if (!dragRef.current.active) return
-      const pos = vertical ? e.clientY : e.clientX
-      const t = THREE.MathUtils.clamp((pos - dragRef.current.min) / Math.max(1, (dragRef.current.max - dragRef.current.min)), 0, 1)
-      const v = vertical ? (1 - t) * 2 - 1 : t * 2 - 1
-      if (knobRef.current) {
-        if (vertical) knobRef.current.style.transform = `translate(0px, ${((1 - v) * 0.5 * length) - (length/2)}px)`
-        else knobRef.current.style.transform = `translate(${((v + 1) * 0.5 * length) - (length/2)}px, 0px)`
-      }
-      props.onChange(v)
-    }
-    const end = (e: React.PointerEvent) => {
-      dragRef.current.active = false
-      ;(e.target as HTMLElement).releasePointerCapture?.((e as any).pointerId)
-    }
-
-    return (
-      <div style={{ display:'inline-flex', flexDirection:'column', alignItems:'center', gap:6 }}>
-        <div
-          ref={railRef}
-          onPointerDown={start}
-          onPointerMove={move}
-          onPointerUp={end}
-          onPointerCancel={end}
-          style={{
-            width: vertical ? 18 : length,
-            height: vertical ? length : 18,
-            borderRadius: 9,
-            background:'linear-gradient(180deg, rgba(28,34,44,0.9), rgba(18,22,28,0.9))',
-            border:'1px solid #2b2f3a',
-            position:'relative',
-            touchAction:'none',
-            userSelect:'none'
-          }}
-        >
-          <div ref={knobRef} style={{
-            position:'absolute',
-            left: vertical ? 3 : '50%',
-            top: vertical ? '50%' : 3,
-            width: 12,
-            height: 12,
-            marginLeft: vertical ? 0 : -6,
-            marginTop: vertical ? -6 : 0,
-            borderRadius: 6,
-            background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)',
-            border:'1px solid #5a6b84',
-            boxShadow:'0 2px 6px rgba(0,0,0,0.35)',
-            transform: 'translate(0px,0px)'
-          }}/>
-        </div>
-        {props.label && <div style={{ fontSize:10, opacity:0.75 }}>{props.label}</div>}
-      </div>
-    )
-  }
-
-  const BillboardControllerCard = () => (
-    <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
-      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
-        <div style={{ fontSize:12, opacity:0.8 }}>Billboard (Move/Rotate/Scale)</div>
-        <label style={{ display:'flex', alignItems:'center', gap:6, fontSize:12 }}>
-          <input type="checkbox" checked={bbEditEnabled} onChange={e => setBbEditEnabled(e.target.checked)} />
-          Edit
-        </label>
-      </div>
-
-      <div style={{ display:'flex', gap:6, marginBottom:10 }}>
-        <button onClick={() => setBbMode('move')} style={tabBtnStyle(bbMode === 'move')}>Move</button>
-        <button onClick={() => setBbMode('rotate')} style={tabBtnStyle(bbMode === 'rotate')}>Rotate</button>
-        <button onClick={() => setBbMode('scale')} style={tabBtnStyle(bbMode === 'scale')}>Scale</button>
-      </div>
-
-      {bbMode === 'move' && (
-        <div style={{ display:'flex', gap:12, alignItems:'center', flexWrap:'wrap' }}>
-          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-            <div style={{ display:'flex', gap:6 }}>
-              <button onClick={() => setBbPlane('XZ')} style={chipStyle(bbPlane === 'XZ')}>XZ</button>
-              <button onClick={() => setBbPlane('XY')} style={chipStyle(bbPlane === 'XY')}>XY</button>
-            </div>
-            <Joystick label={bbPlane === 'XZ' ? 'X/Z' : 'X/Y'} onChange={(nx, ny) => { moveVecRef.current.x = nx; moveVecRef.current.y = ny }} />
-          </div>
-          <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'center' }}>
-            <Rail vertical length={120} label={bbPlane === 'XZ' ? 'Y' : 'Z'} onChange={(v) => { moveAxis3Ref.current = v }} />
-            <div style={{ fontSize:11, opacity:0.7 }}>
-              Pos: {billboardPosRef.current.x.toFixed(2)}, {billboardPosRef.current.y.toFixed(2)}, {billboardPosRef.current.z.toFixed(2)}
-            </div>
-            <button
-              onClick={() => { billboardPosRef.current.set(0, 2.95, 1.05) }}
-              style={btnMini}
-            >Center</button>
-          </div>
-        </div>
-      )}
-
-      {bbMode === 'rotate' && (
-        <div style={{ display:'flex', gap:12, alignItems:'center', flexWrap:'wrap' }}>
-          <Joystick label="Yaw" onChange={(nx, ny) => { rotateVecRef.current.x = nx; rotateVecRef.current.y = ny }} />
-          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-            <div style={{ fontSize:11, opacity:0.7 }}>Yaw: {(billboardYawRef.current * 57.2958).toFixed(1)}°</div>
-            <button onClick={() => { billboardYawRef.current = 0 }} style={btnMini}>Reset</button>
-          </div>
-        </div>
-      )}
-
-      {bbMode === 'scale' && (
-        <div style={{ display:'flex', gap:12, alignItems:'center', flexWrap:'wrap' }}>
-          <Rail length={160} label="Scale velocity" onChange={(v) => { scaleDeltaRef.current = v }} />
-          <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'center' }}>
-            <div style={{ fontSize:11, opacity:0.7 }}>Scale: {billboardScaleRef.current.toFixed(2)}×</div>
-            <div style={{ display:'flex', gap:6 }}>
-              <button onClick={() => { billboardScaleRef.current = Math.max(0.35, billboardScaleRef.current - 0.1) }} style={btnMini}>-</button>
-              <button onClick={() => { billboardScaleRef.current = Math.min(3.0, billboardScaleRef.current + 0.1) }} style={btnMini}>+</button>
-            </div>
-            <button onClick={() => { billboardScaleRef.current = 1 }} style={btnMini}>Reset</button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
 
   return (
     <div data-visual="wireframe3d" style={{ position: 'relative', width: '100%', height: '100%' }}>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} aria-label="Wireframe House 3D" />
-      <Wire3DPanel
-        open={panelOpen}
-        cfg={cfg}
-        onToggle={() => setPanelOpen(o => !o)}
-        onChange={setCfg}
-        extra={<BillboardControllerCard />}
-      />
+      <Wire3DPanel open={panelOpen} cfg={cfg} onToggle={() => setPanelOpen(o => !o)} onChange={setCfg} />
     </div>
   )
 }
@@ -1153,9 +1040,8 @@ function Wire3DPanel(props: {
   cfg: LocalCfg
   onToggle: () => void
   onChange: (updater: (prev: LocalCfg) => LocalCfg | LocalCfg) => void
-  extra?: React.ReactNode // billboard controls go here
 }) {
-  const { open, cfg, onToggle, onChange, extra } = props
+  const { open, cfg, onToggle, onChange } = props
   const Row = (p: { label: string, children: React.ReactNode }) => (
     <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, margin:'6px 0' }}>
       <label style={{ fontSize:12, opacity:0.9 }}>{p.label}</label>
@@ -1215,9 +1101,8 @@ function Wire3DPanel(props: {
             <Row label="Mosaic floor"><input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, mosaicFloor: e.target.checked } }))}/></Row>
             <Row label="Starfield"><input type="checkbox" checked={cfg.fx.starfield} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, starfield: e.target.checked } }))}/></Row>
             <Row label="Lyrics marquee"><input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, lyricsMarquee: e.target.checked } }))}/></Row>
+            <Row label="Wireframe car"><input type="checkbox" checked={cfg.fx.wireCar} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, wireCar: e.target.checked } }))}/></Row>
           </Card>
-
-          {props.extra}
 
           <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
             <button onClick={() => onChange(defaults())} style={btnStyle}>Reset</button>
@@ -1233,30 +1118,5 @@ const btnStyle: React.CSSProperties = {
   padding:'6px 10px', fontSize:12, borderRadius:6, border:'1px solid #2b2f3a',
   background:'rgba(16,18,22,0.8)', color:'#cfe7ff', cursor:'pointer'
 }
-
-const btnMini: React.CSSProperties = {
-  padding:'6px 8px', fontSize:12, borderRadius:6, border:'1px solid #2b2f3a',
-  background:'rgba(16,18,22,0.8)', color:'#cfe7ff', cursor:'pointer'
-}
-
-const tabBtnStyle = (active: boolean): React.CSSProperties => ({
-  padding:'6px 10px',
-  fontSize:12,
-  borderRadius:6,
-  border:'1px solid #2b2f3a',
-  background: active ? 'linear-gradient(180deg,#1e2632,#141a23)' : 'rgba(16,18,22,0.8)',
-  color: active ? '#e6f0ff' : '#cfe7ff',
-  cursor:'pointer'
-})
-
-const chipStyle = (active: boolean): React.CSSProperties => ({
-  padding:'4px 8px',
-  fontSize:11,
-  borderRadius:12,
-  border:'1px solid #2b2f3a',
-  background: active ? 'rgba(32,38,48,0.9)' : 'rgba(16,18,22,0.7)',
-  color: active ? '#e6f0ff' : '#cfe7ff',
-  cursor:'pointer'
-})
 
 function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }

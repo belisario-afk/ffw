@@ -64,6 +64,14 @@ type LocalCfg = {
     mosaicFloor: boolean
     wireCar: boolean
   }
+  car: {
+    scale: number
+    yOffset: number
+    pathRadius: number
+    turntable: boolean
+    outline: boolean
+    flipForward: boolean
+  }
 }
 
 const LS_KEY = 'ffw.wire3d.settings.v2'
@@ -114,6 +122,14 @@ function defaults(initial?: any): LocalCfg {
       lyricsMarquee: true,
       mosaicFloor: false,
       wireCar: true
+    },
+    car: {
+      scale: 0.75,         // smaller by default for readability
+      yOffset: 0.0,
+      pathRadius: 10.5,    // keep it further away by default
+      turntable: false,
+      outline: false,      // off by default
+      flipForward: false   // user can flip if heuristic is wrong
     }
   }
 }
@@ -158,6 +174,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   // Car color adapts to album art
   const carColorRef = useRef<THREE.Color>(new THREE.Color(0x88c8ff))
+
+  // Car API (for frame-to-view)
+  const carApiRef = useRef<ReturnType<typeof createGlbCarModel> | null>(null)
 
   useEffect(() => {
     const token = (auth as any)?.accessToken
@@ -600,15 +619,23 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // GLB car model (replaces wireframe car)
+    // GLB car model (replaces wireframe car) + outline option + auto forward detection
     const car = createGlbCarModel({
       url: DEFAULT_GLB_URL,
       fallbackUrl: LOCAL_FALLBACK_GLB_URL,
-      targetLengthMeters: 4.6,   // approximate Aventador length for auto-scale
-      yGround: 0.055             // sits just above floor
+      targetLengthMeters: 4.6,                      // scale to realistic length
+      baseY: 0.055,                                  // base above floor
+      getAlbumColor: () => carColorRef.current,      // for color + outline
+      getControls: () => ({
+        scale: cfgRef.current.car.scale,
+        yOffset: cfgRef.current.car.yOffset,
+        outline: cfgRef.current.car.outline,
+        flipForward: cfgRef.current.car.flipForward
+      })
     })
     car.group.visible = !!cfgRef.current.fx.wireCar
     scene.add(car.group)
+    carApiRef.current = car
 
     // Resize
     const updateSizes = () => {
@@ -619,7 +646,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       comp.onResize()
       fatMat.resolution.set(draw.x, draw.y)
       setLinePixels(cfgRef.current.lineWidthPx)
-      car.setResolution?.(draw.x, draw.y)
     }
     window.addEventListener('resize', updateSizes)
     updateSizes()
@@ -709,14 +735,20 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       )
       billboard.setVisible(!!cfgC.fx.lyricsMarquee)
 
-      // Update GLB car (album-adaptive tint; gentle showcase path)
+      // Update GLB car (album-adaptive tint; showcase path or turntable)
       car.group.visible = !!cfgC.fx.wireCar
       if (car.group.visible) {
         car.setColor?.(carColorRef.current)
+        const radius = Math.min(cfgC.car.pathRadius, (floorSize * 0.5 - 0.6))
         car.update(dt, {
           t,
-          floorHalf: floorSize * 0.5 - 0.6
+          radius,
+          turntable: cfgC.car.turntable,
+          flipForward: cfgC.car.flipForward,
+          scale: cfgC.car.scale,
+          yOffset: cfgC.car.yOffset
         })
+        car.setOutlineVisible(cfgC.car.outline)
       }
 
       // lines
@@ -726,7 +758,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       // fog
       ;(fogMat as any).uniforms.uTime.value = t
       ;(fogMat as any).uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
-      ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
+      ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerr(accent, 0.5))
 
       // starfield visibility
       if (starfield) starfield.visible = !!cfgC.fx.starfield
@@ -936,16 +968,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
     }
 
-    // GLB car loader and driver
+    // GLB car loader and driver + outline + front/back detection + face motion direction
     function createGlbCarModel(opts: {
       url: string
       fallbackUrl?: string
       targetLengthMeters: number
-      yGround: number
+      baseY: number
+      getAlbumColor: () => THREE.Color
+      getControls: () => { scale: number; yOffset: number; outline: boolean; flipForward: boolean }
     }) {
       const group = new THREE.Group()
       group.renderOrder = 3
-      group.position.y = opts.yGround
+      group.position.y = opts.baseY
 
       const holder = new THREE.Group() // transforms on model
       group.add(holder)
@@ -953,11 +987,17 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       // Keep a map of original material colors/emissive to apply tint idempotently
       const originals = new WeakMap<THREE.Material, { color?: THREE.Color; emissive?: THREE.Color }>()
       const candidatePaintMats = new Set<THREE.Material>()
+      const edgeLines: THREE.LineSegments[] = []
 
-      let loaded = false
+      // track facing direction relative to +X: +1 means +X is forward, -1 means -X
+      let forwardSign: 1 | -1 = 1
+      let baseScale = 1
+
+      // Previous world position to orient with motion vector
+      const prevWorldPos = new THREE.Vector3()
+      group.getWorldPosition(prevWorldPos)
 
       const loader = new GLTFLoader()
-      // Optional DRACO
       try {
         const dracoPath = (window as any)?.FFW_DRACO_DECODER_PATH
         if (dracoPath) {
@@ -966,10 +1006,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           loader.setDRACOLoader(dracoLoader)
         }
       } catch {}
-      // Optional Meshopt
-      try {
-        ;(loader as any).setMeshoptDecoder?.(MeshoptDecoder)
-      } catch {}
+      try { (loader as any).setMeshoptDecoder?.(MeshoptDecoder) } catch {}
 
       const sourceList = [opts.url, opts.fallbackUrl].filter(Boolean) as string[]
 
@@ -978,41 +1015,45 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           try {
             const gltf = await loader.loadAsync(src)
             prepareModel(gltf.scene)
-            loaded = true
             break
           } catch (e) {
             console.warn('GLB load failed, trying next source:', src, e)
           }
         }
-        if (!loaded) {
-          console.warn('No GLB source could be loaded. Car will be hidden.')
-          group.visible = false
-        }
       })()
 
       function prepareModel(scene: THREE.Object3D) {
-        // Center, scale to target length, drop to ground
-        const bbox = new THREE.Box3().setFromObject(scene)
-        const size = new THREE.Vector3()
-        bbox.getSize(size)
+        // Align the longest axis to +X (car length). Most glTF models are +Y up.
+        const bbox0 = new THREE.Box3().setFromObject(scene)
+        const size0 = new THREE.Vector3(); bbox0.getSize(size0)
 
-        // Auto-scale by X size (length)
-        const lengthX = Math.max(0.001, size.x)
-        const scale = opts.targetLengthMeters / lengthX
-        scene.scale.setScalar(scale)
+        // Decide yaw rotation to map longest axis to X
+        let yaw = 0
+        if (size0.z > size0.x && size0.z >= size0.y) yaw = -Math.PI / 2 // map Z->X
+        // If Y is longest, ignore (assume it's vertical)
+        scene.rotation.y = yaw
 
-        // Recompute bounds after scale
+        // Recompute bounds after yaw
+        const bbox1 = new THREE.Box3().setFromObject(scene)
+        const size1 = new THREE.Vector3(); bbox1.getSize(size1)
+
+        // Auto-scale by X-size to target length
+        const lengthX = Math.max(0.001, size1.x)
+        baseScale = opts.targetLengthMeters / lengthX
+        scene.scale.setScalar(baseScale)
+
+        // Recompute bounds after scale for centering/grounding
         const bbox2 = new THREE.Box3().setFromObject(scene)
         const size2 = new THREE.Vector3(); const center2 = new THREE.Vector3()
         bbox2.getSize(size2); bbox2.getCenter(center2)
 
-        // Move so center XZ is at origin
-        scene.position.x = scene.position.x - center2.x
-        scene.position.z = scene.position.z - center2.z
-        // Lower to ground (yGround handled by parent 'group')
-        scene.position.y = scene.position.y - bbox2.min.y
+        // Center XZ at origin
+        scene.position.x = -center2.x
+        scene.position.z = -center2.z
+        // Ground at y=0 (holder's local)
+        scene.position.y = -bbox2.min.y
 
-        // Material prep + candidate paint detection
+        // Candidate material detection + outline edges creation
         scene.traverse((obj) => {
           const mesh = obj as THREE.Mesh
           if (!mesh.isMesh) return
@@ -1025,30 +1066,72 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
                 emissive: (m as any).emissive ? (m as any).emissive.clone() : undefined
               })
             }
-            // Heuristic: pick likely body/paint materials by name or attributes
             const nm = ((m.name || '') + ' ' + (mesh.name || '')).toLowerCase()
             const nameHit = /paint|carpaint|body|exterior|coat|shell|door|hood|roof|fender/.test(nm)
-            const pbr = (m as any)
-            const hasColor = !!pbr.color
-            const nonGlass = !/glass|window|mirror|windshield|headlight|taillight/.test(nm)
-            const notTire = !/tire|wheel|rim|rubber|brake|caliper/.test(nm)
-            if ((nameHit || (hasColor && nonGlass && notTire)) && pbr instanceof THREE.MeshStandardMaterial) {
-              // Prefer metallic paint-like
+            const nonGlass = !/glass|window|mirror|windshield|headlight|taillight|lamp/.test(nm)
+            const notTire = !/tire|tyre|wheel|rim|rubber|brake|caliper/.test(nm)
+            const std = (m as any)
+            if ((nameHit || (std?.color && nonGlass && notTire)) && std instanceof THREE.MeshStandardMaterial) {
               candidatePaintMats.add(m)
-              // Ensure tone mapping works nicely
-              pbr.toneMapped = true
+              std.toneMapped = true
+              std.depthWrite = true
             }
-            // Improve visuals
             if ((m as any).side !== THREE.FrontSide) (m as any).side = THREE.FrontSide
             if ((m as any).transparent && (m as any).opacity < 0.04) (m as any).opacity = 0.04
           }
+
+          // Outline edges child (hidden by default; toggled globally)
+          try {
+            const eg = new THREE.EdgesGeometry(mesh.geometry, 30)
+            const emat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthWrite: false, depthTest: true, toneMapped: true })
+            const edges = new THREE.LineSegments(eg, emat)
+            edges.name = `edges_of_${mesh.name || 'mesh'}`
+            // Attach to the mesh so it inherits transforms
+            mesh.add(edges)
+            edgeLines.push(edges)
+          } catch {}
         })
+
+        // Heuristic front/back detection
+        forwardSign = detectForwardSign(scene)
 
         holder.add(scene)
       }
 
+      function detectForwardSign(root: THREE.Object3D): 1 | -1 {
+        // Try semantic names to find front vs rear parts
+        const fronts: number[] = []
+        const rears: number[] = []
+        const wheels: number[] = []
+        root.traverse(o => {
+          const nm = (o.name || '').toLowerCase()
+          const b = new THREE.Box3().setFromObject(o)
+          const c = new THREE.Vector3(); b.getCenter(c)
+          if (!isFinite(c.x)) return
+          if (/front|hood|grill|bumper|head ?light|lamp|bonnet/.test(nm)) fronts.push(c.x)
+          if (/rear|tail|exhaust|spoiler|diffuser|trunk|boot|tail ?light/.test(nm)) rears.push(c.x)
+          if (/wheel|tire|tyre|rim/.test(nm)) wheels.push(c.x)
+        })
+        if (fronts.length && rears.length) {
+          const f = avg(fronts), r = avg(rears)
+          return f > r ? 1 : -1
+        }
+        if (wheels.length >= 2) {
+          // Split wheels into two groups by x (front/rear axles). Assume larger x is front.
+          const min = Math.min(...wheels), max = Math.max(...wheels)
+          return (max - min) > 0 ? 1 : 1 // assume +X is forward if unknown
+        }
+        // Fallback: assume +X is forward
+        return 1
+      }
+
+      function avg(a: number[]) { return a.reduce((s, v) => s + v, 0) / a.length }
+
+      function applyUserScale(scale: number) {
+        holder.scale.setScalar(Math.max(0.05, scale))
+      }
+
       function setColor(albumColor: THREE.Color) {
-        // Apply tint to candidate car paint; subtle emissive tint to others
         const temp = new THREE.Color()
         holder.traverse((obj) => {
           const mesh = obj as THREE.Mesh
@@ -1057,45 +1140,90 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           for (const m of mats) {
             if (!m) continue
             const orig = originals.get(m)
-            // Restore from originals each time (idempotent)
             if (orig?.color && (m as any).color) (m as any).color.copy(orig.color)
             if (orig?.emissive && (m as any).emissive) (m as any).emissive.copy(orig.emissive)
 
             const std = m as any
             if (candidatePaintMats.has(m) && std.color) {
-              // Multiply base color with album color (slightly desaturated for readability)
               temp.copy(albumColor)
               const l = 0.2126*temp.r + 0.7152*temp.g + 0.0722*temp.b
               if (l < 0.3) temp.multiplyScalar(1.18).clampScalar(0,1)
-              // Blend: keep some original paint hue (0.4) and apply album color (0.6)
               std.color.lerp(temp, 0.6)
               std.needsUpdate = true
             } else if (std.emissive) {
-              // Very subtle emissive tint
               temp.copy(albumColor).multiplyScalar(0.06)
               std.emissive.lerp(temp, 0.6)
               std.needsUpdate = true
             }
           }
         })
+        // Outline color (slightly brighter)
+        const outlineCol = albumColor.clone().multiplyScalar(1.2).clampScalar(0, 1)
+        for (const e of edgeLines) {
+          const mat = e.material as THREE.LineBasicMaterial
+          mat.color.copy(outlineCol)
+          mat.needsUpdate = true
+        }
       }
 
-      // Gentle showcase motion
+      function setOutlineVisible(v: boolean) {
+        for (const e of edgeLines) e.visible = v
+      }
+
+      // Motion driver: figure-8 (if !turntable) with proper facing, or turntable at center
       const state = { t: 0 }
-      function update(dt: number, env: { t: number; floorHalf: number }) {
+      function update(dt: number, env: { t: number; radius: number; turntable: boolean; flipForward: boolean; scale: number; yOffset: number }) {
+        // Live scale and height
+        applyUserScale(env.scale)
+        group.position.y = opts.baseY + env.yOffset
+
         state.t += dt * 0.8
-        const R = Math.min(env.floorHalf, 7.0)
         const a = state.t * 0.6
         const s = Math.sin(a), c = Math.cos(a)
         const denom = 1 + s*s
-        const x = (R * c) / denom
-        const z = (R * s * c) / denom
-        group.position.x = THREE.MathUtils.clamp(x, -env.floorHalf, env.floorHalf)
-        group.position.z = THREE.MathUtils.clamp(z, -env.floorHalf, env.floorHalf)
-        group.rotation.y = a * 0.35
+
+        if (env.turntable) {
+          // Centered, rotate in place
+          group.position.x = 0
+          group.position.z = 0
+          holder.rotation.y = (a * 0.6 + (env.flipForward ? Math.PI : 0))
+        } else {
+          const R = env.radius
+          const x = (R * c) / denom
+          const z = (R * s * c) / denom
+          const prev = prevWorldPos.clone()
+          group.position.x = x
+          group.position.z = z
+          // Face motion direction (tangent)
+          const vel = new THREE.Vector3().subVectors(group.position, prev)
+          prevWorldPos.copy(group.position)
+          let yaw = holder.rotation.y
+          if (vel.lengthSq() > 1e-6) {
+            yaw = Math.atan2(vel.z, vel.x) + (forwardSign === 1 ? 0 : Math.PI)
+            if (env.flipForward) yaw += Math.PI
+          }
+          // Smooth a bit
+          holder.rotation.y = THREE.MathUtils.lerp(holder.rotation.y, yaw, 0.25)
+        }
       }
 
-      function setResolution() { /* not needed for GLB */ }
+      function frameToView(camera: THREE.PerspectiveCamera, controls: OrbitControls) {
+        // Compute world bounding sphere of the holder
+        const box = new THREE.Box3().setFromObject(holder)
+        const center = new THREE.Vector3(); const size = new THREE.Vector3()
+        box.getCenter(center); box.getSize(size)
+        const radius = size.length() * 0.5
+        // Target the center
+        controls.target.copy(center)
+        // Compute optimal distance from FOV
+        const fov = camera.fov * Math.PI / 180
+        const dist = radius / Math.tan(fov / 2) * 1.3 // padding
+        // Move camera along current view direction but at new distance
+        const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize()
+        camera.position.copy(controls.target).addScaledVector(dir, dist)
+        camera.updateProjectionMatrix()
+        controls.update()
+      }
 
       function dispose() {
         group.removeFromParent()
@@ -1107,9 +1235,20 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             mesh.geometry?.dispose?.()
           }
         })
+        for (const e of edgeLines) {
+          e.geometry.dispose()
+          ;(e.material as any).dispose?.()
+        }
       }
 
-      return { group, setResolution, update, dispose, setColor }
+      return {
+        group,
+        update,
+        dispose,
+        setColor,
+        setOutlineVisible,
+        frameToView
+      }
     }
 
   // Only re-run when renderScale/bloom/accessibility/auth change
@@ -1316,6 +1455,72 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     </div>
   )
 
+  const CarControlsCard = () => {
+    const onFrame = () => {
+      const api = carApiRef.current
+      const canvas = canvasRef.current
+      if (!api || !canvas) return
+      // Access OrbitControls by querying the renderer domElement's event listener chain is brittle; we have closure access
+      // So we dispatch a custom event handled inside scene? Simpler: expose a window handler; but here we'll use a ref via closure
+      // Since we don't have direct controls ref here, we re-open the settings with an event that main scope listens to.
+      const ev = new CustomEvent('ffw:frame-car-request')
+      window.dispatchEvent(ev as any)
+    }
+
+    // We'll wire the frame event to actual action inside the effect scope where controls/camera exist
+    useEffect(() => {
+      const handler = () => {
+        const api = carApiRef.current
+        if (!api) return
+        // We don't have direct camera/controls here; we'll stash them on window when created:
+        const cam = (window as any).__FFW_camera as THREE.PerspectiveCamera | undefined
+        const ctr = (window as any).__FFW_controls as OrbitControls | undefined
+        if (cam && ctr) api.frameToView(cam, ctr)
+      }
+      window.addEventListener('ffw:frame-car-request', handler as EventListener)
+      return () => window.removeEventListener('ffw:frame-car-request', handler as EventListener)
+    }, [])
+
+    return (
+      <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
+        <div style={{ fontSize:12, opacity:0.8, marginBottom:8 }}>Car</div>
+        <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Scale: {cfg.car.scale.toFixed(2)}×</span>
+            <input type="range" min={0.4} max={1.6} step={0.01} value={cfg.car.scale}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, scale: +e.target.value } }))} />
+          </label>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Height: {cfg.car.yOffset.toFixed(2)} m</span>
+            <input type="range" min={-0.2} max={0.5} step={0.01} value={cfg.car.yOffset}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, yOffset: +e.target.value } }))} />
+          </label>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Showcase radius: {cfg.car.pathRadius.toFixed(1)} m</span>
+            <input type="range" min={6} max={15} step={0.1} value={cfg.car.pathRadius}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, pathRadius: +e.target.value } }))} />
+          </label>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Turntable mode</span>
+            <input type="checkbox" checked={cfg.car.turntable}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, turntable: e.target.checked } }))} />
+          </label>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Outline overlay</span>
+            <input type="checkbox" checked={cfg.car.outline}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, outline: e.target.checked } }))} />
+          </label>
+          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+            <button onClick={() => setCfg(prev => ({ ...prev, car: { ...prev.car, flipForward: !prev.car.flipForward } }))} style={btnStyle}>
+              {cfg.car.flipForward ? 'Unflip forward' : 'Flip forward'}
+            </button>
+            <button onClick={onFrame} style={btnStyle}>Frame car</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div data-visual="wireframe3d" style={{ position: 'relative', width: '100%', height: '100%' }}>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} aria-label="Wireframe House 3D" />
@@ -1325,6 +1530,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         onToggle={() => setPanelOpen(o => !o)}
         onChange={setCfg}
         extra={<>
+          <CarControlsCard />
           <BillboardControllerCard />
           <EffectsCardToggles cfg={cfg} onChange={setCfg} />
         </>}
@@ -1386,7 +1592,7 @@ function Wire3DPanel(props: {
         {open ? 'Close 3D Settings' : '3D Settings'}
       </button>
       {open && (
-        <div style={{ width: 320, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
+        <div style={{ width: 340, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
           background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
           <Card title="Camera">
             <Row label={`FOV: ${cfg.camera.fov.toFixed(0)}`}>
@@ -1462,12 +1668,3 @@ const chipStyle = (active: boolean): React.CSSProperties => ({
 })
 
 function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
-
-// Robust angle lerp (kept for reference)
-function lerpAngle(a: number, b: number, t: number) {
-  const TAU = Math.PI * 2
-  let d = (b - a) % TAU
-  if (d > Math.PI) d -= TAU
-  if (d < -Math.PI) d += TAU
-  return a + d * t
-}

@@ -12,6 +12,8 @@
     <meta name="description" content="FFW — Cyber-Punk Spotify Visualizer with Web Playback SDK and album-reactive scenes (Wireframe House 3D, Kaleido Tunnel)." />
     <link rel="preconnect" href="https://api.spotify.com" />
     <link rel="preconnect" href="https://accounts.spotify.com" />
+    <link rel="preconnect" href="https://sdk.scdn.co" crossorigin />
+    <link rel="preconnect" href="https://i.scdn.co" crossorigin />
     <script>
       (function () {
         var path = location.pathname;
@@ -23,7 +25,11 @@
           location.replace(base + search + '#/callback');
         }
       })();
+      // Ensure the Spotify Web Playback SDK ready callback always exists to prevent AnthemError
+      window.onSpotifyWebPlaybackSDKReady = window.onSpotifyWebPlaybackSDKReady || function () {};
     </script>
+    <!-- Load Spotify Web Playback SDK early so window.Spotify is available before app boot -->
+    <script src="https://sdk.scdn.co/spotify-player.js"></script>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>

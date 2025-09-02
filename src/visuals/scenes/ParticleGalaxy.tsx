@@ -230,12 +230,24 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       motionBlur: false
     })
 
+    // Normalize composer API (object with render/onResize OR plain function)
+    const compAny: any = comp as any
+    const renderScene: () => void =
+      typeof compAny === 'function'
+        ? compAny
+        : (compAny?.render?.bind(compAny) ?? (() => renderer.render(scene, camera)))
+
+    const resizeComposer: () => void =
+      typeof compAny === 'function'
+        ? () => {}
+        : (compAny?.onResize?.bind(compAny) ?? (() => {}))
+
     // Groups
     const root = new THREE.Group()
     scene.add(root)
 
     // Materials
-    const { mat: starMat, uniforms: starU } = buildParticleMaterial({
+    const { mat: starMat } = buildParticleMaterial({
       primary: primaryRef.current.clone(),
       accent: accentRef.current.clone()
     })
@@ -363,7 +375,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       const view = renderer.getSize(new THREE.Vector2())
       camera.aspect = Math.max(1e-3, view.x / Math.max(1, view.y))
       camera.updateProjectionMatrix()
-      comp.onResize()
+      resizeComposer()
     }
     window.addEventListener('resize', onResize)
     onResize()
@@ -433,7 +445,7 @@ export default function ParticleGalaxy({ quality, accessibility }: Props) {
       const sizeScale = fpsAvg < 42 ? THREE.MathUtils.mapLinear(fpsAvg, 24, 42, 0.76, 1.0) : 1.0
       ;(starMat.uniforms.uSizeScale as any).value = Math.max(0.65, Math.min(1.0, sizeScale))
 
-      comp.render()
+      renderScene()
     }
     raf = requestAnimationFrame(animate)
 

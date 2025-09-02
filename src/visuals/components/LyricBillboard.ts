@@ -26,6 +26,8 @@ export class LyricBillboard {
 
   // Pop effect state (decays over time)
   private pop = 0
+  // User base scale (used with pop scale)
+  private userScale = 1
 
   constructor(opts?: {
     baseColor?: THREE.ColorRepresentation
@@ -82,6 +84,14 @@ export class LyricBillboard {
     this.pop = Math.min(1.5, this.pop + Math.max(0, strength))
   }
 
+  // Allow external controls to set a baseline scale
+  setUserScale(s: number) {
+    this.userScale = THREE.MathUtils.clamp(s, 0.1, 4.0)
+  }
+  getUserScale() {
+    return this.userScale
+  }
+
   setProgress(p: number) {
     // Reveal highlight in current layer [0..1] and grow underline accordingly
     if (!this.current) return
@@ -121,8 +131,9 @@ export class LyricBillboard {
       this.pop = Math.max(0, this.pop - dt * 3.5)
     }
     const popT = easeOutQuad(Math.min(1, this.pop))
-    const scale = 1 + 0.06 * popT
-    this.group.scale.setScalar(scale)
+    const effectScale = 1 + 0.06 * popT
+    // Combine user scale and pop effect
+    this.group.scale.setScalar(this.userScale * effectScale)
 
     // Increase highlight outline while popping
     if (this.current) {

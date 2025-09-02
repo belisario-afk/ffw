@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
 import { createRenderer, createComposer } from '../../three/Renderer'
 import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
 import type { AuthState } from '../../auth/token'
@@ -350,8 +351,57 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       highlightColor: accent.getHex(),
       fontSize: 0.36
     })
-    billboard.group.position.set(0, 2.95, 1.05)
+    const billboardDefaultY = 2.95
+    billboard.group.position.set(0, billboardDefaultY, 1.05)
     scene.add(billboard.group)
+
+    // Transform controls (translate/rotate/scale the billboard)
+    const tctrl = new TransformControls(camera, renderer.domElement)
+    tctrl.enabled = false
+    tctrl.visible = false
+    tctrl.setMode('translate')
+    tctrl.setSize(0.9)
+    tctrl.attach(billboard.group)
+    scene.add(tctrl)
+    // Disable orbit while dragging
+    tctrl.addEventListener('dragging-changed', (e: any) => { controls.enabled = !e.value })
+    // Constrain transforms
+    tctrl.addEventListener('objectChange', () => {
+      const mode = (tctrl as any).mode as 'translate'|'rotate'|'scale'
+      if (mode === 'translate') {
+        // keep billboard at fixed Y so it slides on XZ "floor"
+        billboard.group.position.y = billboardDefaultY
+      } else if (mode === 'rotate') {
+        // only yaw (around Y)
+        billboard.group.rotation.x = 0
+        billboard.group.rotation.z = 0
+      } else if (mode === 'scale') {
+        // uniform scale clamp
+        const s = (billboard.group.scale.x + billboard.group.scale.y + billboard.group.scale.z) / 3
+        const clamped = THREE.MathUtils.clamp(s, 0.35, 3.0)
+        billboard.setUserScale(clamped)
+        billboard.group.scale.setScalar(clamped)
+      }
+    })
+    // Keyboard shortcuts to toggle/edit billboard
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'b' || e.key === 'B') {
+        const enable = !tctrl.enabled
+        tctrl.enabled = enable
+        tctrl.visible = enable
+        e.preventDefault()
+      }
+      if (!tctrl.enabled) return
+      if (e.key === 't' || e.key === 'T') { tctrl.setMode('translate'); e.preventDefault() }
+      if (e.key === 'r' || e.key === 'R') { tctrl.setMode('rotate'); e.preventDefault() }
+      if (e.key === 's' || e.key === 'S') { tctrl.setMode('scale'); e.preventDefault() }
+      if (e.key === 'Escape') {
+        tctrl.enabled = false
+        tctrl.visible = false
+        e.preventDefault()
+      }
+    }
+    window.addEventListener('keydown', onKey)
 
     // Optional starfield (created once)
     let starfield: THREE.Points | null = null
@@ -564,6 +614,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       setLinePixels(cfgRef.current.lineWidthPx)
     }
     window.addEventListener('resize', updateSizes)
+    window.addEventListener('keydown', onKey)
     updateSizes()
 
     // Animate
@@ -701,8 +752,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const elev = cfgC.orbitElev
         const pos = pathPoint(cfgC.path, angleRef.current, radius)
         camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
-        camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
-        controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
+        camera.lookAt(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
+        controls.target.set(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
       } else {
         camera.position.y += (bob - (camera as any).__lastBobY || 0)
         ;(camera as any).__lastBobY = bob
@@ -729,11 +780,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     // cleanup
     return () => {
       window.removeEventListener('resize', updateSizes)
+      window.removeEventListener('keydown', onKey)
       cancelAnimationFrame(raf)
       clearInterval(albumIv)
       clearInterval(pbIv)
       offFrame?.()
       controls.dispose()
+      tctrl?.dispose?.()
       floorTex?.dispose()
       marqueeTex?.dispose?.()
       billboard.dispose()

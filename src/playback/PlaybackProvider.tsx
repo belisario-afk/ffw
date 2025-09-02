@@ -15,6 +15,8 @@ type PlaybackCtx = {
   signIn: () => Promise<boolean>
   // Ensures SDK playback in browser; will sign in first if needed.
   playInBrowser: () => Promise<void>
+  // One-click: Sign in (if needed) and enable SDK playback/transfer.
+  signInAndPlay: () => Promise<void>
   transferToBrowser: (opts?: { play?: boolean }) => Promise<void>
 }
 
@@ -62,12 +64,10 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       setToken(t)
       setStatus('')
       return true
-    } catch (e: any) {
+    } catch {
       // If popup blocked or user closed it, fall back to redirect
       setStatus('Opening Spotify…')
-      try {
-        ensureAuth() // navigates away; if it doesn’t (rare), return false
-      } catch {}
+      try { ensureAuth() } catch {}
       return false
     }
   }, [])
@@ -103,10 +103,17 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
     }
   }, [signIn])
 
+  const signInAndPlay = useCallback(async () => {
+    // Single entrypoint: signs in (popup preferred) and starts SDK playback
+    const ok = await signIn()
+    if (!ok) return
+    await playInBrowser()
+  }, [signIn, playInBrowser])
+
   const transferToBrowser = useCallback(async ({ play = true }: { play?: boolean } = {}) => {
     const t = getAccessToken()
     if (!t) { setStatus('Sign in first'); return }
-    if (!deviceId) { setStatus('Player not ready. Click Play in Browser.'); return }
+    if (!deviceId) { setStatus('Player not ready. Click the login button to enable playback.'); return }
     try {
       setStatus('Transferring playback...')
       await transferPlaybackToDevice({ deviceId, play })
@@ -125,8 +132,9 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
     status,
     signIn,
     playInBrowser,
+    signInAndPlay,
     transferToBrowser
-  }), [token, deviceId, isDeviceReady, status, signIn, playInBrowser, transferToBrowser])
+  }), [token, deviceId, isDeviceReady, status, signIn, playInBrowser, signInAndPlay, transferToBrowser])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

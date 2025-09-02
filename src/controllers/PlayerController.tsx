@@ -5,6 +5,12 @@ type Props = {
   onOpenDevices: () => void
 }
 
+/**
+Transport bar with album art and controls.
+- Auth/UI buttons removed per request. Use the single global "Log in" button in the top bar.
+- Controls are disabled until logged in.
+*/
+
 type RepeatMode = 'off' | 'context' | 'track'
 
 function mmss(ms: number) {
@@ -15,7 +21,8 @@ function mmss(ms: number) {
 }
 
 export default function PlayerController({ onOpenDevices }: Props) {
-  const { token, isSignedIn, signIn, playInBrowser } = usePlayback()
+  const { token } = usePlayback()
+
   const hasToken = !!token
   const bearer = token || ''
 
@@ -205,43 +212,36 @@ export default function PlayerController({ onOpenDevices }: Props) {
         </div>
       </div>
 
-      {/* Controls */}
+      {/* Controls (no auth buttons here) */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '0 0 auto' }}>
-        {!isSignedIn ? (
-          <button onClick={signIn} style={btnStyle('#b7ffbf')}>Sign in to Spotify</button>
-        ) : (
-          <>
-            <button onClick={doPrev} disabled={busy} style={btnStyle('#cfe7ff')} title="Previous">⏮</button>
-            <button onClick={doTogglePlay} disabled={busy} style={btnStyle('#b7ffbf')} title="Play/Pause">
-              {isPlaying ? '⏸' : '▶️'}
-            </button>
-            <button onClick={doNext} disabled={busy} style={btnStyle('#cfe7ff')} title="Next">⏭</button>
+        <button onClick={doPrev} disabled={busy || !hasToken} style={btnStyle('#cfe7ff')} title="Previous">⏮</button>
+        <button onClick={doTogglePlay} disabled={busy || !hasToken} style={btnStyle('#b7ffbf')} title="Play/Pause">
+          {isPlaying ? '⏸' : '▶️'}
+        </button>
+        <button onClick={doNext} disabled={busy || !hasToken} style={btnStyle('#cfe7ff')} title="Next">⏭</button>
 
-            <button onClick={() => doShuffle(!shuffle)} disabled={busy} style={btnToggle(shuffle)} title="Shuffle">🔀</button>
-            <button onClick={doRepeat} disabled={busy} style={btnToggle(repeat !== 'off')} title={`Repeat: ${repeat}`}>🔁</button>
+        <button onClick={() => doShuffle(!shuffle)} disabled={busy || !hasToken} style={btnToggle(shuffle)} title="Shuffle">🔀</button>
+        <button onClick={doRepeat} disabled={busy || !hasToken} style={btnToggle(repeat !== 'off')} title={`Repeat: ${repeat}`}>🔁</button>
 
-            <button onClick={onOpenDevices} style={btnStyle('#cfe7ff')} title="Devices">🖧</button>
-            <button onClick={playInBrowser} style={btnStyle('#cfe7ff')} title="Play in browser">▶</button>
+        <button onClick={onOpenDevices} style={btnStyle('#cfe7ff')} title="Devices" disabled={!hasToken}>🖧</button>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 180 }}>
-              <span title="Volume">🔊</span>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={1}
-                value={volume}
-                onChange={(e) => setVolume(Number(e.currentTarget.value))}
-                onPointerUp={() => doVol(volume)}
-                onKeyUp={(e) => { if (e.key === 'Enter') doVol(volume) }}
-                disabled={!hasToken}
-                aria-label="Volume"
-                style={{ width: 140 }}
-              />
-              <span style={{ width: 28, textAlign: 'right', fontSize: 12, color: '#9bb3cc' }}>{Math.round(volume)}%</span>
-            </div>
-          </>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 180 }}>
+          <span title="Volume">🔊</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={volume}
+            onChange={(e) => setVolume(Number(e.currentTarget.value))}
+            onPointerUp={() => doVol(volume)}
+            onKeyUp={(e) => { if (e.key === 'Enter') doVol(volume) }}
+            disabled={!hasToken}
+            aria-label="Volume"
+            style={{ width: 140 }}
+          />
+          <span style={{ width: 28, textAlign: 'right', fontSize: 12, color: '#9bb3cc' }}>{Math.round(volume)}%</span>
+        </div>
       </div>
 
       {error && <div style={{ color: '#ffb3b3', marginLeft: 8, maxWidth: 320, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{error}</div>}
@@ -272,7 +272,7 @@ function btnToggle(active: boolean): React.CSSProperties {
 function humanizeError(e: any): string {
   const msg = (e && (e.message || e.toString?.())) || 'Unexpected error'
   if (/No access token/i.test(msg)) return 'Not signed in with Spotify'
-  if (/401/.test(msg)) return 'Spotify session expired — please sign in again'
+  if (/401/.test(msg)) return 'Spotify session expired — please log in again'
   if (/403/.test(msg)) return 'Spotify refused the action (check Premium / device)'
   if (/404/.test(msg)) return 'No active Spotify device found'
   return msg

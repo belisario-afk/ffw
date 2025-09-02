@@ -2,15 +2,7 @@ import React from 'react'
 import { usePlayback } from '../playback/PlaybackProvider'
 
 export default function GlobalTopBar() {
-  const { isSignedIn, status, signIn, playInBrowser } = usePlayback()
-
-  const onPlay = async () => {
-    if (!isSignedIn) {
-      const ok = await signIn()
-      if (!ok) return
-    }
-    await playInBrowser()
-  }
+  const { isSignedIn, status, signInAndPlay } = usePlayback()
 
   return (
     <div
@@ -30,9 +22,10 @@ export default function GlobalTopBar() {
       }}
     >
       {!isSignedIn && (
-        <button onClick={signIn} style={btn}>Sign in with Spotify</button>
+        <button onClick={signInAndPlay} style={btn} aria-label="Log in">
+          Log in
+        </button>
       )}
-      <button onClick={onPlay} style={btn}>▶ Play in Browser</button>
       {!!status && (
         <div style={{ color: '#b9d6ff', fontSize: 12, pointerEvents: 'none' }}>{status}</div>
       )}

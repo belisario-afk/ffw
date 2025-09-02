@@ -1,8 +1,3 @@
-/* NOTE: This is your existing file with two targeted fixes:
-   1) Mosaic floor no longer depends on floorTex to render. It uses a placeholder until album art arrives.
-   2) Aventador wireframe gains a ThinLines fallback tied to the same 'fat-lines don't draw' check.
-*/
-
 import React, { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
@@ -94,7 +89,10 @@ function defaults(initial?: any): LocalCfg {
       autoPath: true,
       target: { x: 0, y: 2.2, z: 0 }
     },
-    cameraPresets: { enabled: true, strength: 0.7 },
+    cameraPresets: {
+      enabled: true,
+      strength: 0.7
+    },
     fx: {
       beams: false,
       groundRings: false,
@@ -102,7 +100,7 @@ function defaults(initial?: any): LocalCfg {
       starfield: false,
       bloomBreath: false,
       lyricsMarquee: true,
-      mosaicFloor: true,   // enable by default so you see it
+      mosaicFloor: false,
       wireCar: true
     }
   }
@@ -119,7 +117,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Billboard UI
+  // Billboard controller UI
   const [bbEditEnabled, setBbEditEnabled] = useState(false)
   const [bbMode, setBbMode] = useState<'move'|'rotate'|'scale'>('move')
   const [bbPlane, setBbPlane] = useState<'XZ'|'XY'>('XZ')
@@ -146,8 +144,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const pbClock = useRef<{ playing: boolean; startedAt: number; offsetMs: number }>({ playing: false, startedAt: 0, offsetMs: 0 })
   const lastVisualMsRef = useRef<number>(0)
 
-  // album-adaptive car color
-  const carColorRef = useRef<THREE.Color>(new THREE.Color(0x9fdcff))
+  // Car color adapts to album art
+  const carColorRef = useRef<THREE.Color>(new THREE.Color(0x88c8ff))
 
   useEffect(() => {
     const token = (auth as any)?.accessToken
@@ -158,6 +156,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     if (hasSpotifyTokenProvider()) {
       ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
         .catch(e => console.warn('Spotify ensurePlayerConnected (3D) failed:', e))
+    } else {
+      console.warn('WireframeHouse3D: Spotify token provider not set. Skipping player connect.')
     }
   }, [])
 
@@ -184,12 +184,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       return new THREE.Vector3(Math.sin(a) * r, 0, Math.cos(a) * r)
     }
     function createDarkPlaceholderTexture() {
-      const c = document.createElement('canvas'); c.width = c.height = 128
+      const c = document.createElement('canvas'); c.width = c.height = 64
       const g = c.getContext('2d')!
-      g.fillStyle = '#0b0e13'; g.fillRect(0,0,128,128)
-      g.strokeStyle = '#1b2433'; g.lineWidth = 2
-      for (let i=0;i<=8;i++){ g.beginPath(); g.moveTo(0, i*16); g.lineTo(128, i*16); g.stroke()
-                              g.beginPath(); g.moveTo(i*16, 0); g.lineTo(i*16, 128); g.stroke() }
+      g.fillStyle = '#0b0e13'; g.fillRect(0,0,64,64)
+      g.fillStyle = '#111722'
+      for (let y=0;y<8;y++) for (let x=0;x<8;x++) if ((x+y)%2===0) g.fillRect(x*8,y*8,8,8)
       const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; return tex
     }
     async function estimateTextureLuminance(tex: THREE.Texture): Promise<number> {
@@ -207,15 +206,15 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const img = tex.image as HTMLImageElement | HTMLCanvasElement | ImageBitmap
       const w = 32, h = 32
       const c = document.createElement('canvas'); c.width = w; c.height = h
-      const g = c.getContext('2d'); if (!g) return new THREE.Color(0x9fdcff)
-      try { g.drawImage(img as any, 0, 0, w, h) } catch { return new THREE.Color(0x9fdcff) }
+      const g = c.getContext('2d'); if (!g) return new THREE.Color(0x88c8ff)
+      try { g.drawImage(img as any, 0, 0, w, h) } catch { return new THREE.Color(0x88c8ff) }
       const data = g.getImageData(0, 0, w, h).data
       let r = 0, gr = 0, b = 0
       for (let i = 0; i < data.length; i += 4) { r += data[i]; gr += data[i+1]; b += data[i+2] }
       const n = data.length / 4
       const col = new THREE.Color(r/(255*n), gr/(255*n), b/(255*n))
-      const lum = 0.2126*col.r + 0.7152*col.g + 0.0722*col.b
-      if (lum < 0.35) col.multiplyScalar(1.25).clampScalar(0,1)
+      const luminance = 0.2126*col.r + 0.7152*col.g + 0.0722*col.b
+      if (luminance < 0.35) col.multiplyScalar(1.25).clampScalar(0,1)
       return col
     }
     function addMansionWindows(add: (p: THREE.Vector3, out: THREE.Vector3) => void) {
@@ -319,11 +318,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     floorMesh.position.y = 0.001
     scene.add(floorMesh)
 
-    // Placeholder for floor and mosaic tiles
+    // Placeholder on floor tex
     const floorPlaceholder = createDarkPlaceholderTexture()
     floorMat.uniforms.tAlbum.value = floorPlaceholder
 
-    // Mosaic (FIX: decouple from album art; use placeholder until cover arrives)
+    // Mosaic
     const mosaicGroup = new THREE.Group()
     const tiles: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
     const tileN = 8
@@ -332,18 +331,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     for (let y = 0; y < tileN; y++) {
       for (let x = 0; x < tileN; x++) {
         const g = new THREE.PlaneGeometry(tileSize, tileSize)
-        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, map: placeholderTex, transparent: true, opacity: 0.85, depthWrite: false, toneMapped: false })
-        m.color.setScalar(0.9)
+        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, map: placeholderTex, transparent: true, opacity: 0.8, depthWrite: false, toneMapped: false })
+        m.color.setScalar(0.85)
         const mesh = new THREE.Mesh(g, m)
         mesh.rotation.x = -Math.PI / 2
         mesh.position.set((x + 0.5) * tileSize - floorSize / 2, 0.0025, (y + 0.5) * tileSize - floorSize / 2)
         mosaicGroup.add(mesh); tiles.push(mesh)
       }
     }
-    mosaicGroup.visible = !!cfgRef.current.fx.mosaicFloor // FIX: no dependency on floorTex
+    mosaicGroup.visible = false
     scene.add(mosaicGroup)
 
-    // Mansion fat/thin lines
+    // Wireframe mansion edges
     const mansionPositions = buildMansionEdges()
     const fatGeo = new LineSegmentsGeometry()
     fatGeo.setPositions(mansionPositions)
@@ -369,7 +368,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     thinLines.visible = false
     scene.add(thinLines)
 
-    // Windows
+    // Static windows
     const windowGroup = new THREE.Group()
     {
       const winGeom = new THREE.PlaneGeometry(0.22, 0.16)
@@ -383,7 +382,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       scene.add(windowGroup)
     }
 
-    // Billboard
+    // 3D Lyric Billboard
     const billboard = new LyricBillboard({
       baseColor: 0xffffff,
       outlineColor: accent2.getHex(),
@@ -395,7 +394,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     billboard.group.scale.setScalar(billboardScaleRef.current)
     scene.add(billboard.group)
 
-    // Starfield
+    // Optional starfield
     let starfield: THREE.Points | null = null
     {
       const g = new THREE.BufferGeometry()
@@ -438,7 +437,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       return mat
     })()
 
-    // Marquee
+    // Lyrics marquee (secondary)
     let marqueeMat: THREE.ShaderMaterial | null = null
     let marqueeTex: THREE.Texture | null = null
     let marqueeText = ''
@@ -533,21 +532,15 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           floorMat.uniforms.uDim.value = clamp(1.02 - brightness * 0.45, 0.6, 0.92)
           floorMat.uniforms.uOpacity.value = clamp(0.9 - (brightness - 0.6) * 0.25, 0.65, 0.9)
 
-          const avg = await averageTextureColor(tex).catch(() => new THREE.Color(0x9fdcff))
+          const avg = await averageTextureColor(tex).catch(() => new THREE.Color(0x88c8ff))
           carColorRef.current.copy(avg)
 
           floorTex?.dispose(); floorTex = tex
           floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
 
-          // Keep mosaic visible even if album art fails; update tiles' maps when cover arrives.
-          if (tiles.length) {
-            for (const t of tiles) {
-              t.material.map = tex
-              t.material.needsUpdate = true
-            }
-          }
+          mosaicGroup.visible = !!cfgRef.current.fx.mosaicFloor
         } else {
-          // No cover yet: keep placeholder tiles
+          mosaicGroup.visible = false
         }
 
         if (cfgRef.current.fx.lyricsMarquee && id && id !== currentTrackId) {
@@ -578,11 +571,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     const albumIv = window.setInterval(loadAlbumCoverAndLyrics, 5000)
     const pbIv = window.setInterval(syncPlaybackClock, 2000)
 
-    // Reactivity (for palette breathing)
+    // Reactivity
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Procedural Aventador wireframe with ThinLines fallback
+    // Procedural Aventador wireframe (code-only, no physics/underglow)
     const aventador = createAventadorWireframeModel({ dims: { L: 4.6, W: 2.04, H: 1.14 }, linePx: 1.35 }, renderer)
     aventador.group.visible = !!cfgRef.current.fx.wireCar
     aventador.group.position.y = 0.055
@@ -618,9 +611,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const cfgC = cfgRef.current
       const high = latest?.bands.high ?? 0.08
 
-      // Live-apply camera config
-      if (camera.fov !== cfgC.camera.fov) { camera.fov = cfgC.camera.fov; camera.updateProjectionMatrix() }
+      // Live-apply FOV
+      if (camera.fov !== cfgC.camera.fov) {
+        camera.fov = cfgC.camera.fov
+        camera.updateProjectionMatrix()
+      }
 
+      // Controls live updates
       controls.enableDamping = cfgC.camera.enableDamping
       controls.dampingFactor = cfgC.camera.dampingFactor
       controls.enablePan = cfgC.camera.enablePan
@@ -633,7 +630,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.minPolarAngle = cfgC.camera.minPolarAngle
       controls.maxPolarAngle = cfgC.camera.maxPolarAngle
 
-      // Billboard edits
+      // Apply billboard controller
       if (bbEditRef.current) {
         if (bbModeRef.current === 'move') {
           const mv = moveVecRef.current
@@ -649,9 +646,15 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           }
           billboardPosRef.current.y = THREE.MathUtils.clamp(billboardPosRef.current.y, 1.2, 5.2)
         }
-        if (bbModeRef.current === 'rotate') billboardYawRef.current += (rotateVecRef.current.x * 2.8) * dt
+        if (bbModeRef.current === 'rotate') {
+          const rvx = rotateVecRef.current.x
+          const yawSpeed = 2.8
+          billboardYawRef.current += (rvx * yawSpeed) * dt
+        }
         if (bbModeRef.current === 'scale') {
-          const next = THREE.MathUtils.clamp(billboardScaleRef.current + (scaleDeltaRef.current * 1.4) * dt, 0.35, 3.0)
+          const sDelta = scaleDeltaRef.current
+          const sSpeed = 1.4
+          const next = THREE.MathUtils.clamp(billboardScaleRef.current + (sDelta * sSpeed) * dt, 0.35, 3.0)
           billboardScaleRef.current = next
         }
         billboard.group.position.copy(billboardPosRef.current)
@@ -660,7 +663,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         billboard.group.scale.setScalar(billboardScaleRef.current)
       }
 
-      // Palette
+      // colors
       accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.25, 0, 0.25))
       accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(high * 0.2, 0, 0.2))
       fatMat.color.set(accent); thinMat.color.set(accent)
@@ -672,11 +675,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       )
       billboard.setVisible(!!cfgC.fx.lyricsMarquee)
 
-      // Car showcase
+      // Update car (album-adaptive color; slow figure-8 showcase)
       aventador.group.visible = !!cfgC.fx.wireCar
       if (aventador.group.visible) {
         aventador.setColor(carColorRef.current)
-        aventador.update(dt, { t, floorHalf: floorSize * 0.5 - 0.6 })
+        aventador.update(dt, {
+          t,
+          floorHalf: floorSize * 0.5 - 0.6
+        })
       }
 
       // fog
@@ -684,8 +690,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       ;(fogMat as any).uniforms.uIntensity.value = accessibility.epilepsySafe ? 0.24 : 0.32
       ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
 
-      // Mosaic toggle (FIX: independent of album art)
-      mosaicGroup.visible = !!cfgC.fx.mosaicFloor
+      // starfield visibility
+      if (starfield) starfield.visible = !!cfgC.fx.starfield
+
+      // mosaic/floor
+      mosaicGroup.visible = !!cfgC.fx.mosaicFloor && !!floorTex
       floorMesh.visible = !mosaicGroup.visible
 
       // Lyrics timing
@@ -724,6 +733,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         }
       }
 
+      // Animate billboard transitions
       billboard.update(dt)
 
       // camera autopilot + bob
@@ -746,15 +756,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.update()
       comp.composer.render()
 
-      // Fallback detector: if shader Lines2 aren’t drawing on this device, swap both mansion and car to thin lines
+      // fallback: if fat lines aren’t drawing, swap to thin
       frames++
       if (!fallbackArmed && frames > 12) {
-        const calls = (renderer.info.render.calls || 0)
-        if (calls <= 1) { // likely nothing but the post chain got drawn
+        const dc = (renderer.info.render.calls || 0)
+        if (dc <= 1) {
           fallbackArmed = true
           fatLines.visible = false
           thinLines.visible = true
-          aventador.useThin(true) // FIX: make car visible on devices where Lines2 fails
         }
       }
     }
@@ -787,7 +796,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       floorPlaceholder?.dispose()
     }
 
-    // mansion edges (unchanged)
+    // build edges helpers
     function buildMansionEdges(): Float32Array {
       const out: number[] = []
       const y0 = 0.0, y1 = 1.2, y2 = 2.35, y3 = 3.5
@@ -884,292 +893,490 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
     }
 
-    // Procedural Aventador with Lines2 + ThinLines fallback
-   function createAventadorWireframeModel(
+    // Procedural Aventador wireframe builder (inspired by your reference image)
+    function createAventadorWireframeModel(
   opts: { dims: { L:number; W:number; H:number }, linePx: number },
   renderer: THREE.WebGLRenderer
 ) {
-  const group = new THREE.Group()
-  group.renderOrder = 3
 
-  // Wide line material
-  const fatMat = new LineMaterial({ color: carColorRef.current.getHex(), transparent: true, opacity: 0.98, depthTest: true })
-  ;(fatMat as any).worldUnits = false
-  const fatGeo = new LineSegmentsGeometry()
-  const fatLines = new LineSegments2(fatGeo, fatMat)
-  group.add(fatLines)
+      // Single line material/geometry for everything (crisp pixels)
+      const mat = new LineMaterial({ color: carColorRef.current.getHex(), transparent: true, opacity: 0.98, depthTest: true })
+      ;(mat as any).worldUnits = false
+      const geo = new LineSegmentsGeometry()
+      const lines = new LineSegments2(geo, mat)
+      group.add(lines)
 
-  // Thin fallback (initially hidden)
-  const thinMat = new THREE.LineBasicMaterial({ color: carColorRef.current, transparent: true, opacity: 0.98, depthTest: true })
-  const thinGeo = new THREE.BufferGeometry()
-  const thinLines = new THREE.LineSegments(thinGeo, thinMat)
-  thinLines.visible = false
-  group.add(thinLines)
+      const setResolution = (w: number, h: number) => {
+        mat.resolution.set(w, h)
+        const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
+        mat.linewidth = Math.max(0.001, opts.linePx / Math.max(1, draw.y))
+        mat.needsUpdate = true
+      }
+      {
+        const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
+        setResolution(draw.x, draw.y)
+      }
 
-  // setResolution (ONLY defined once)
-  const setResolution = (w: number, h: number) => {
-    fatMat.resolution.set(w, h)
-    const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-    fatMat.linewidth = Math.max(0.001, opts.linePx / Math.max(1, draw.y))
-    fatMat.needsUpdate = true
-  }
-  {
-    const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-    setResolution(draw.x, draw.y)
-  }
+      const pos: number[] = []
+      const { L, W, H } = opts.dims
+      const halfL = L / 2, halfW = W / 2
+      const yBase = 0.12
+      const yWheel = 0.28
+      const rWheel = 0.42
 
-  const pos: number[] = []
-  const { L, W, H } = opts.dims
-  const halfL = L / 2, halfW = W / 2
-  const yBase = 0.12
-  const yWheel = 0.28
-  const rWheel = 0.42
+      // Helpers
+      const V = (x:number,y:number,z:number) => new THREE.Vector3(x,y,z)
+      const seg = (a:THREE.Vector3,b:THREE.Vector3) => { pos.push(a.x,a.y,a.z,b.x,b.y,b.z) }
+      const poly = (pts:THREE.Vector3[], closed=false) => {
+        for (let i=0;i<pts.length-1;i++) seg(pts[i], pts[i+1])
+        if (closed && pts.length>2) seg(pts[pts.length-1], pts[0])
+      }
+      const arcXZ = (cx:number, y:number, cz:number, rx:number, rz:number, a0:number, a1:number, steps:number) => {
+        const pts: THREE.Vector3[] = []
+        for (let i=0;i<=steps;i++){
+          const t = THREE.MathUtils.lerp(a0, a1, i/steps)
+          pts.push(V(cx + Math.cos(t)*rx, y, cz + Math.sin(t)*rz))
+        }
+        poly(pts)
+      }
+      const circleYZ = (cx:number, cy:number, cz:number, r:number, steps:number) => {
+        const pts: THREE.Vector3[] = []
+        for (let i=0;i<=steps;i++){
+          const t = (i/steps)*Math.PI*2
+          pts.push(V(cx, cy + Math.cos(t)*r, cz + Math.sin(t)*r))
+        }
+        poly(pts, true)
+      }
+      const spokesYZ = (cx:number, cy:number, cz:number, r:number, count:number) => {
+        for (let i=0;i<count;i++){
+          const t = (i/count)*Math.PI*2
+          const p = V(cx, cy + Math.cos(t)*r, cz + Math.sin(t)*r)
+          seg(V(cx, cy, cz), p)
+        }
+      }
+      const mirrorZ = (fn:(s:number)=>void) => { fn(1); fn(-1) }
 
-  // helpers
-  const V = (x:number,y:number,z:number) => new THREE.Vector3(x,y,z)
-  const seg = (a:THREE.Vector3,b:THREE.Vector3) => { pos.push(a.x,a.y,a.z,b.x,b.y,b.z) }
-  const poly = (pts:THREE.Vector3[], closed=false) => { for (let i=0;i<pts.length-1;i++) seg(pts[i], pts[i+1]); if (closed && pts.length>2) seg(pts[pts.length-1], pts[0]) }
-  const arcXZ = (cx:number, y:number, cz:number, rx:number, rz:number, a0:number, a1:number, steps:number) => {
-    const pts: THREE.Vector3[] = []
-    for (let i=0;i<=steps;i++){ const t = THREE.MathUtils.lerp(a0, a1, i/steps); pts.push(V(cx + Math.cos(t)*rx, y, cz + Math.sin(t)*rz)) }
-    poly(pts)
-  }
-  const circleYZ = (cx:number, cy:number, cz:number, r:number, steps:number) => {
-    const pts: THREE.Vector3[] = []
-    for (let i=0;i<=steps;i++){ const t = (i/steps)*Math.PI*2; pts.push(V(cx, cy + Math.cos(t)*r, cz + Math.sin(t)*r)) }
-    poly(pts, true)
-  }
-  const spokesYZ = (cx:number, cy:number, cz:number, r:number, count:number) => {
-    for (let i=0;i<count;i++){ const t = (i/count)*Math.PI*2; const p = V(cx, cy + Math.cos(t)*r, cz + Math.sin(t)*r); seg(V(cx, cy, cz), p) }
-  }
-  const mirrorZ = (fn:(s:number)=>void) => { fn(1); fn(-1) }
+      // Top outline (tapered nose, wide hips)
+      {
+        const yTop = 0.62
+        const nose = halfL
+        const tail = -halfL
+        const hips = halfW * 0.98
+        const waist = halfW * 0.72
+        const deck = halfW * 0.90
 
-  // Top outline
-  {
-    const yTop = 0.62
-    const nose = halfL
-    const tail = -halfL
-    const hips = halfW * 0.98
-    const waist = halfW * 0.72
-    const deck = halfW * 0.90
-    const outlineTop: THREE.Vector3[] = [
-      V( tail, yTop,  hips * 0.96 ),
-      V( tail+0.35, yTop,  deck ),
-      V( -0.10, yTop,  waist ),
-      V( 0.65, yTop,  waist*0.88 ),
-      V( nose*0.55, yTop,  waist*0.55 ),
-      V( nose*0.9, yTop,  waist*0.22 ),
-      V( nose, yTop,  0.0 ),
-      V( nose*0.9, yTop, -waist*0.22 ),
-      V( nose*0.55, yTop,-waist*0.55 ),
-      V( 0.65, yTop, -waist*0.88 ),
-      V( -0.10, yTop, -waist ),
-      V( tail+0.35, yTop, -deck ),
-      V( tail, yTop, -hips * 0.96 ),
-    ]
-    poly(outlineTop, true)
-  }
+        const outlineTop: THREE.Vector3[] = [
+          V( tail, yTop,  hips * 0.96 ),
+          V( tail+0.35, yTop,  deck ),
+          V( -0.10, yTop,  waist ),
+          V( 0.65, yTop,  waist*0.88 ),
+          V( nose*0.55, yTop,  waist*0.55 ),
+          V( nose*0.9, yTop,  waist*0.22 ),
+          V( nose, yTop,  0.0 ),
+          V( nose*0.9, yTop, -waist*0.22 ),
+          V( nose*0.55, yTop,-waist*0.55 ),
+          V( 0.65, yTop, -waist*0.88 ),
+          V( -0.10, yTop, -waist ),
+          V( tail+0.35, yTop, -deck ),
+          V( tail, yTop, -hips * 0.96 ),
+        ]
+        poly(outlineTop, true)
+      }
 
-  // Roof / windshield
-  {
-    const zA = halfW*0.62
-    poly([ V( halfL*0.38, 0.60,  zA), V( halfL*0.05,  0.80,  zA*0.94), V(-halfL*0.15,  0.82,  zA*0.88), V(-halfL*0.40,  0.74,  zA*0.86) ])
-    poly([ V( halfL*0.38, 0.60, -zA), V( halfL*0.05,  0.80, -zA*0.94), V(-halfL*0.15,  0.82, -zA*0.88), V(-halfL*0.40,  0.74, -zA*0.86) ])
-    poly([ V( halfL*0.05, 0.80, 0), V(-halfL*0.15,0.82, 0), V(-halfL*0.40,0.74, 0) ])
-  }
+      // Roof and windshield/A-pillar lines
+      {
+        const zA = halfW*0.62
+        poly([
+          V( halfL*0.38, 0.60,  zA),
+          V( halfL*0.05,  0.80,  zA*0.94),
+          V(-halfL*0.15,  0.82,  zA*0.88),
+          V(-halfL*0.40,  0.74,  zA*0.86),
+        ])
+        poly([
+          V( halfL*0.38, 0.60, -zA),
+          V( halfL*0.05,  0.80, -zA*0.94),
+          V(-halfL*0.15,  0.82, -zA*0.88),
+          V(-halfL*0.40,  0.74, -zA*0.86),
+        ])
+        // center roof rib
+        poly([
+          V( halfL*0.05, 0.80, 0),
+          V(-halfL*0.15,0.82, 0),
+          V(-halfL*0.40,0.74, 0),
+        ])
+      }
 
-  // Side details
-  mirrorZ((s)=> {
-    poly([ V( halfL*0.90, yBase+0.06,  s*halfW*0.82 ), V( halfL*0.35, yBase+0.10,  s*halfW*0.95 ), V( 0.20, yBase+0.14, s*halfW*0.96 ),
-           V(-halfL*0.15, yBase+0.16, s*halfW*0.88 ), V(-halfL*0.45, yBase+0.18, s*halfW*0.85 ), V(-halfL*0.95, yBase+0.16, s*halfW*0.80 ) ])
-    poly([ V( halfL*0.65, 0.44, s*halfW*0.72 ), V( 0.20, 0.48, s*halfW*0.86 ), V(-0.05, 0.50, s*halfW*0.82 ), V(-halfL*0.40, 0.52, s*halfW*0.74 ), V(-halfL*0.70, 0.50, s*halfW*0.70 ) ])
-    poly([ V( 0.15, 0.44, s*halfW*0.86 ), V(-0.05, 0.54, s*halfW*0.96 ), V(-0.25, 0.58, s*halfW*0.90 ), V(-0.45, 0.56, s*halfW*0.82 ) ])
-  })
+      // Side profile: sill, beltline, shoulder
+      mirrorZ((s)=> {
+        // Sill
+        poly([
+          V( halfL*0.90, yBase+0.06,  s*halfW*0.82 ),
+          V( halfL*0.35, yBase+0.10,  s*halfW*0.95 ),
+          V( 0.20,       yBase+0.14,  s*halfW*0.96 ),
+          V(-halfL*0.15, yBase+0.16,  s*halfW*0.88 ),
+          V(-halfL*0.45, yBase+0.18,  s*halfW*0.85 ),
+          V(-halfL*0.95, yBase+0.16,  s*halfW*0.80 ),
+        ])
 
-  // Front cues
-  {
-    const xF = halfL
-    const zIn = halfW*0.72, zOut = halfW*0.95
-    poly([ V(xF, 0.45, 0), V(xF*0.80, 0.50,  zIn) ])
-    poly([ V(xF, 0.45, 0), V(xF*0.80, 0.50, -zIn) ])
-    poly([ V(xF*0.92, 0.22,  zOut), V(xF*0.70, 0.24,  zIn), V(xF*0.55, 0.25,  zIn*0.85) ])
-    poly([ V(xF*0.92, 0.22, -zOut), V(xF*0.70, 0.24, -zIn), V(xF*0.55, 0.25, -zIn*0.85) ])
-  }
+        // Beltline (door cut)
+        poly([
+          V( halfL*0.65, 0.44, s*halfW*0.72 ),
+          V( 0.20,       0.48, s*halfW*0.86 ),
+          V(-0.05,       0.50, s*halfW*0.82 ),
+          V(-halfL*0.40, 0.52, s*halfW*0.74 ),
+          V(-halfL*0.70, 0.50, s*halfW*0.70 ),
+        ])
 
-  // Rear deck X-brace and lip
-  {
-    const x0 = -halfL*0.20, x1 = -halfL*0.62
-    const z0 = halfW*0.36
-    const y = 0.64
-    seg(V(x0, y,  z0), V(x1, y, -z0))
-    seg(V(x0, y, -z0), V(x1, y,  z0))
-    poly([ V(-halfL*0.65, 0.62,  halfW*0.60), V(-halfL*0.85, 0.60,  halfW*0.70), V(-halfL, 0.58,  halfW*0.62) ])
-    poly([ V(-halfL*0.65, 0.62, -halfW*0.60), V(-halfL*0.85, 0.60, -halfW*0.70), V(-halfL, 0.58, -halfW*0.62) ])
-  }
+        // Shoulder/side intake edges
+        poly([
+          V( 0.15, 0.44, s*halfW*0.86 ),
+          V(-0.05, 0.54, s*halfW*0.96 ),
+          V(-0.25, 0.58, s*halfW*0.90 ),
+          V(-0.45, 0.56, s*halfW*0.82 ),
+        ])
+      })
 
-  // Spoiler
-  {
-    const y = 0.72
-    const span = halfW*1.10
-    poly([ V(-halfL*0.80, y,  span*0.80), V(-halfL*0.55, y,  span), V(-halfL*0.30, y,  span*0.80) ])
-    poly([ V(-halfL*0.80, y, -span*0.80), V(-halfL*0.55, y, -span), V(-halfL*0.30, y, -span*0.80) ])
-    seg(V(-halfL*0.55, y,  span), V(-halfL*0.55, y-0.16,  halfW*0.80))
-    seg(V(-halfL*0.55, y, -span), V(-halfL*0.55, y-0.16, -halfW*0.80))
-  }
+      // Front V nose and lower bumper geometry hints
+      {
+        const xF = halfL
+        const zIn = halfW*0.72, zOut = halfW*0.95
+        // Upper V
+        poly([
+          V(xF, 0.45, 0),
+          V(xF*0.80, 0.50,  zIn),
+        ])
+        poly([
+          V(xF, 0.45, 0),
+          V(xF*0.80, 0.50, -zIn),
+        ])
+        // Lower corner sweep
+        poly([
+          V(xF*0.92, 0.22,  zOut),
+          V(xF*0.70, 0.24,  zIn),
+          V(xF*0.55, 0.25,  zIn*0.85),
+        ])
+        poly([
+          V(xF*0.92, 0.22, -zOut),
+          V(xF*0.70, 0.24, -zIn),
+          V(xF*0.55, 0.25, -zIn*0.85),
+        ])
+      }
 
-  // Arches
-  mirrorZ((s) => {
-    const zc = s*halfW*0.82
-    arcXZ( halfL*0.35, yWheel, zc, 0.50, 0.52, Math.PI*0.15, Math.PI*0.85, 18)
-    arcXZ(-halfL*0.28, yWheel, zc, 0.56, 0.58, Math.PI*0.15, Math.PI*0.85, 18)
-  })
+      // Rear deck engine "X" brace
+      {
+        const x0 = -halfL*0.20, x1 = -halfL*0.62
+        const z0 = halfW*0.36
+        const y = 0.64
+        seg(V(x0, y,  z0), V(x1, y, -z0))
+        seg(V(x0, y, -z0), V(x1, y,  z0))
+        // Rear outline lip
+        poly([
+          V(-halfL*0.65, 0.62,  halfW*0.60),
+          V(-halfL*0.85, 0.60,  halfW*0.70),
+          V(-halfL,      0.58,  halfW*0.62),
+        ])
+        poly([
+          V(-halfL*0.65, 0.62, -halfW*0.60),
+          V(-halfL*0.85, 0.60, -halfW*0.70),
+          V(-halfL,      0.58, -halfW*0.62),
+        ])
+      }
 
-  // Wheels
-  mirrorZ((s) => {
-    const zc = s*halfW*0.82
-    const fcx = halfL*0.35
-    const rcx = -halfL*0.28
-    circleYZ(fcx, yWheel, zc, rWheel, 28)
-    circleYZ(rcx, yWheel, zc, rWheel, 28)
-    spokesYZ(fcx, yWheel, zc, rWheel*0.92, 10)
-    spokesYZ(rcx, yWheel, zc, rWheel*0.92, 10)
-    circleYZ(fcx, yWheel, zc, rWheel*0.30, 16)
-    circleYZ(rcx, yWheel, zc, rWheel*0.30, 16)
-  })
+      // Spoiler (wing)
+      {
+        const y = 0.72
+        const span = halfW*1.10
+        poly([
+          V(-halfL*0.80, y,  span*0.80),
+          V(-halfL*0.55, y,  span),
+          V(-halfL*0.30, y,  span*0.80),
+        ])
+        poly([
+          V(-halfL*0.80, y, -span*0.80),
+          V(-halfL*0.55, y, -span),
+          V(-halfL*0.30, y, -span*0.80),
+        ])
+        seg(V(-halfL*0.55, y,  span), V(-halfL*0.55, y-0.16,  halfW*0.80))
+        seg(V(-halfL*0.55, y, -span), V(-halfL*0.55, y-0.16, -halfW*0.80))
+      }
 
-  // Door cut hints
-  mirrorZ((s)=>{
-    poly([ V( 0.10, 0.46, s*halfW*0.88 ), V(-0.05, 0.58, s*halfW*0.96 ), V(-0.28, 0.60, s*halfW*0.88 ), V(-0.18, 0.46, s*halfW*0.80 ), V( 0.10, 0.46, s*halfW*0.88 ) ])
-  })
+      // Wheel arches (elliptical arcs)
+      mirrorZ((s) => {
+        const zc = s*halfW*0.82
+        // Front arch
+        arcXZ( halfL*0.35, yWheel, zc, 0.50, 0.52, Math.PI*0.15, Math.PI*0.85, 18)
+        // Rear arch
+        arcXZ(-halfL*0.28, yWheel, zc, 0.56, 0.58, Math.PI*0.15, Math.PI*0.85, 18)
+      })
 
-  // Hood creases
-  poly([ V( halfL*0.82, 0.50,  halfW*0.18 ), V( halfL*0.35, 0.60,  halfW*0.10 ), V( 0.10, 0.70, 0.06 ) ])
-  poly([ V( halfL*0.82, 0.50, -halfW*0.18 ), V( halfL*0.35, 0.60, -halfW*0.10 ), V( 0.10, 0.70, -0.06 ) ])
+      // Wheels: rim circle + spokes (in YZ plane)
+      mirrorZ((s) => {
+        const zc = s*halfW*0.82
+        const fcx = halfL*0.35
+        const rcx = -halfL*0.28
+        circleYZ(fcx, yWheel, zc, rWheel, 28)
+        circleYZ(rcx, yWheel, zc, rWheel, 28)
+        spokesYZ(fcx, yWheel, zc, rWheel*0.92, 10)
+        spokesYZ(rcx, yWheel, zc, rWheel*0.92, 10)
+        // small hub
+        circleYZ(fcx, yWheel, zc, rWheel*0.30, 16)
+        circleYZ(rcx, yWheel, zc, rWheel*0.30, 16)
+      })
 
-  // Commit positions to both fat and thin geos
-  const arr = new Float32Array(pos)
-  fatGeo.setPositions(arr)
-  thinGeo.setAttribute('position', new THREE.BufferAttribute(arr, 3))
+      // Door cut polygon hints
+      mirrorZ((s)=>{
+        poly([
+          V( 0.10, 0.46, s*halfW*0.88 ),
+          V(-0.05, 0.58, s*halfW*0.96 ),
+          V(-0.28, 0.60, s*halfW*0.88 ),
+          V(-0.18, 0.46, s*halfW*0.80 ),
+          V( 0.10, 0.46, s*halfW*0.88 ),
+        ])
+      })
 
-  function setColor(c: THREE.Color) { fatMat.color.set(c); thinMat.color.set(c) }
-  function useThin(on: boolean) { thinLines.visible = on; fatLines.visible = !on }
+      // Hood creases
+      poly([
+        V( halfL*0.82, 0.50,  halfW*0.18 ),
+        V( halfL*0.35, 0.60,  halfW*0.10 ),
+        V( 0.10,       0.70,  0.06 ),
+      ])
+      poly([
+        V( halfL*0.82, 0.50, -halfW*0.18 ),
+        V( halfL*0.35, 0.60, -halfW*0.10 ),
+        V( 0.10,       0.70, -0.06 ),
+      ])
 
-  // Showcase motion
-  const state = { t: 0 }
-  function update(dt: number, env: { t: number; floorHalf: number }) {
-    state.t += dt * 0.8
-    const R = Math.min(env.floorHalf, 7.0)
-    const a = state.t * 0.6
-    const s = Math.sin(a), c = Math.cos(a)
-    const denom = 1 + s*s
-    const x = (R * c) / denom
-    const z = (R * s * c) / denom
-    group.position.x = THREE.MathUtils.clamp(x, -env.floorHalf, env.floorHalf)
-    group.position.z = THREE.MathUtils.clamp(z, -env.floorHalf, env.floorHalf)
-    group.rotation.y = a * 0.35
-  }
+      // Commit geometry
+      geo.setPositions(new Float32Array(pos))
 
-  function dispose() {
-    group.removeFromParent()
-    fatGeo.dispose(); thinGeo.dispose()
-    ;(fatMat as any).dispose?.(); (thinMat as any).dispose?.()
-  }
+      function setColor(c: THREE.Color) { mat.color.set(c) }
 
-  return { group, setResolution, update, dispose, setColor, useThin }
-}
+      // Showcase motion (gentle figure-8)
+      const state = { t: 0 }
+      function update(dt: number, env: { t: number; floorHalf: number }) {
+        state.t += dt * 0.8
+        const R = Math.min(env.floorHalf, 7.0)
+        const a = state.t * 0.6
+        const s = Math.sin(a), c = Math.cos(a)
+        const denom = 1 + s*s
+        const x = (R * c) / denom
+        const z = (R * s * c) / denom
+        group.position.x = THREE.MathUtils.clamp(x, -env.floorHalf, env.floorHalf)
+        group.position.z = THREE.MathUtils.clamp(z, -env.floorHalf, env.floorHalf)
+        group.rotation.y = a * 0.35
+      }
+
+      function dispose() {
+        group.removeFromParent()
+        geo.dispose()
+        ;(mat as any).dispose?.()
+      }
+
+      return { group, setResolution, update, dispose, setColor }
+    }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
-  // UI helpers and components unchanged...
-  const Joystick = (props: { size?: number; onChange: (nx: number, ny: number) => void; label?: string }) => { /* unchanged */ const size = props.size ?? 110; const radius = size/2; const knobRef = useRef<HTMLDivElement|null>(null); const baseRef = useRef<HTMLDivElement|null>(null); const dragRef = useRef<{active:boolean; cx:number; cy:number}>({ active:false, cx:0, cy:0 }); const setKnob=(nx:number,ny:number)=>{ const k=knobRef.current; if(!k) return; const x=nx*(radius-14), y=ny*(radius-14); k.style.transform=`translate(${x}px, ${y}px)`}; const onPointerDown=(e:React.PointerEvent)=>{ const rect=baseRef.current!.getBoundingClientRect(); dragRef.current.active=true; dragRef.current.cx=rect.left+rect.width/2; dragRef.current.cy=rect.top+rect.height/2; (e.target as HTMLElement).setPointerCapture?.((e as any).pointerId); onPointerMove(e)}; const onPointerMove=(e:React.PointerEvent)=>{ if(!dragRef.current.active) return; const dx=e.clientX-dragRef.current.cx; const dy=e.clientY-dragRef.current.cy; const dist=Math.min(1, Math.hypot(dx,dy)/(radius-14)); const ang=Math.atan2(dy,dx); const nx=Math.cos(ang)*dist; const ny=Math.sin(ang)*dist; setKnob(nx,ny); props.onChange(nx,ny)}; const end=(e?:React.PointerEvent)=>{ dragRef.current.active=false; setKnob(0,0); props.onChange(0,0); if(e) (e.target as HTMLElement).releasePointerCapture?.((e as any).pointerId)}; return (<div style={{ display:'inline-flex', flexDirection:'column', alignItems:'center', gap:6 }}><div ref={baseRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={end} onPointerCancel={end} style={{ position:'relative', width:size, height:size, borderRadius:'50%', background:'radial-gradient(ellipse at center, rgba(40,48,60,0.65), rgba(15,18,24,0.85))', border:'1px solid #2b2f3a', boxShadow:'inset 0 2px 14px rgba(0,0,0,0.4)', touchAction:'none', userSelect:'none' }}><div ref={knobRef} style={{ position:'absolute', left:'50%', top:'50%', width:28, height:28, marginLeft:-14, marginTop:-14, borderRadius:'50%', background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)', boxShadow:'0 2px 8px rgba(0,0,0,0.35)', border:'1px solid #5a6b84', transform:'translate(0px,0px)' }}/></div>{props.label && <div style={{ fontSize:10, opacity:0.75 }}>{props.label}</div>}</div>) }
+  // UI: Joystick and Rail components for the Billboard controller inside Settings
+  const Joystick = (props: { size?: number; onChange: (nx: number, ny: number) => void; label?: string }) => {
+    const size = props.size ?? 110
+    const radius = size / 2
+    const knobRef = useRef<HTMLDivElement | null>(null)
+    const baseRef = useRef<HTMLDivElement | null>(null)
+    const dragRef = useRef<{active:boolean; cx:number; cy:number}>({ active:false, cx:0, cy:0 })
 
-  const Rail = (props: { length?: number; vertical?: boolean; onChange: (n: number) => void; value?: number; label?: string }) => { /* unchanged */ const length=props.length??120; const vertical=!!props.vertical; const railRef=useRef<HTMLDivElement|null>(null); const knobRef=useRef<HTMLDivElement|null>(null); const dragRef=useRef<{active:boolean;min:number;max:number}>({active:false,min:0,max:0}); useEffect(()=>{ const k=knobRef.current; if(!k) return; const v=THREE.MathUtils.clamp(props.value??0,-1,1); if(vertical) k.style.transform=`translate(0px, ${((1 - v) * 0.5 * length) - (length/2)}px)`; else k.style.transform=`translate(${((v + 1) * 0.5 * length) - (length/2)}px, 0px)`},[props.value,vertical,length]); const start=(e:React.PointerEvent)=>{ const rect=railRef.current!.getBoundingClientRect(); dragRef.current.active=true; dragRef.current.min=vertical?rect.top:rect.left; dragRef.current.max=vertical?rect.bottom:rect.right; (e.target as HTMLElement).setPointerCapture?.((e as any).pointerId); move(e)}; const move=(e:React.PointerEvent)=>{ if(!dragRef.current.active) return; const pos=vertical?e.clientY:e.clientX; const t=THREE.MathUtils.clamp((pos-dragRef.current.min)/Math.max(1,(dragRef.current.max-dragRef.current.min)),0,1); const v=vertical?(1-t)*2-1:t*2-1; if(knobRef.current){ if(vertical) knobRef.current.style.transform=`translate(0px, ${((1 - v) * 0.5 * length) - (length/2)}px)`; else knobRef.current.style.transform=`translate(${((v + 1) * 0.5 * length) - (length/2)}px, 0px)`} props.onChange(v)}; const end=(e:React.PointerEvent)=>{ dragRef.current.active=false; (e.target as HTMLElement).releasePointerCapture?.((e as any).pointerId)}; return (<div style={{ display:'inline-flex', flexDirection:'column', alignItems:'center', gap:6 }}><div ref={railRef} onPointerDown={start} onPointerMove={move} onPointerUp={end} onPointerCancel={end} style={{ width:vertical?18:length, height:vertical?length:18, borderRadius:9, background:'linear-gradient(180deg, rgba(28,34,44,0.9), rgba(18,22,28,0.9))', border:'1px solid #2b2f3a', position:'relative', touchAction:'none', userSelect:'none' }}><div ref={knobRef} style={{ position:'absolute', left: vertical ? 3 : '50%', top: vertical ? '50%' : 3, width:12, height:12, marginLeft: vertical ? 0 : -6, marginTop: vertical ? -6 : 0, borderRadius:6, background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)', border:'1px solid #5a6b84', boxShadow:'0 2px 6px rgba(0,0,0,0.35)', transform:'translate(0px,0px)' }}/></div>{props.label && <div style={{ fontSize:10, opacity:0.75 }}>{props.label}</div>}</div>) }
+    const setKnob = (nx: number, ny: number) => {
+      const k = knobRef.current; if (!k) return
+      const x = nx * (radius - 14), y = ny * (radius - 14)
+      k.style.transform = `translate(${x}px, ${y}px)`
+    }
+    const onPointerDown = (e: React.PointerEvent) => {
+      const rect = baseRef.current!.getBoundingClientRect()
+      dragRef.current.active = true
+      dragRef.current.cx = rect.left + rect.width/2
+      dragRef.current.cy = rect.top + rect.height/2
+      ;(e.target as HTMLElement).setPointerCapture?.((e as any).pointerId)
+      onPointerMove(e)
+    }
+    const onPointerMove = (e: React.PointerEvent) => {
+      if (!dragRef.current.active) return
+      const dx = e.clientX - dragRef.current.cx
+      const dy = e.clientY - dragRef.current.cy
+      const dist = Math.min(1, Math.hypot(dx, dy) / (radius - 14))
+      const ang = Math.atan2(dy, dx)
+      const nx = Math.cos(ang) * dist
+      const ny = Math.sin(ang) * dist
+      setKnob(nx, ny)
+      props.onChange(nx, ny)
+    }
+    const end = (e?: React.PointerEvent) => {
+      dragRef.current.active = false
+      setKnob(0, 0)
+      props.onChange(0, 0)
+      if (e) (e.target as HTMLElement).releasePointerCapture?.((e as any).pointerId)
+    }
 
-  function EffectsCardToggles({ cfg, onChange }: { cfg: LocalCfg; onChange: (updater: (prev: LocalCfg) => LocalCfg | LocalCfg) => void }) {
     return (
-      <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
-        <div style={{ fontSize:12, opacity:0.8, marginBottom:8 }}>Effects</div>
-        <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Mosaic floor</span>
-            <input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, mosaicFloor: e.target.checked } }))}/>
-          </label>
-          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Starfield</span>
-            <input type="checkbox" checked={cfg.fx.starfield} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, starfield: e.target.checked } }))}/>
-          </label>
-          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Lyrics marquee</span>
-            <input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, lyricsMarquee: e.target.checked } }))}/>
-          </label>
-          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Wireframe car (Aventador)</span>
-            <input type="checkbox" checked={cfg.fx.wireCar} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, wireCar: e.target.checked } }))}/>
-          </label>
+      <div style={{ display:'inline-flex', flexDirection:'column', alignItems:'center', gap:6 }}>
+        <div
+          ref={baseRef}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={end}
+          onPointerCancel={end}
+          onPointerLeave={() => {}}
+          style={{
+            position:'relative',
+            width:size, height:size, borderRadius:'50%',
+            background:'radial-gradient(ellipse at center, rgba(40,48,60,0.65), rgba(15,18,24,0.85))',
+            border:'1px solid #2b2f3a',
+            boxShadow:'inset 0 2px 14px rgba(0,0,0,0.4)',
+            touchAction:'none',
+            userSelect:'none'
+          }}
+        >
+          <div ref={knobRef} style={{
+            position:'absolute', left:'50%', top:'50%',
+            width:28, height:28, marginLeft:-14, marginTop:-14, borderRadius:'50%',
+            background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)', boxShadow:'0 2px 8px rgba(0,0,0,0.35)',
+            border:'1px solid #5a6b84', transform:'translate(0px,0px)'
+          }}/>
         </div>
+        {props.label && <div style={{ fontSize:10, opacity:0.75 }}>{props.label}</div>}
       </div>
     )
   }
 
-  function Wire3DPanel(props: { open: boolean; cfg: LocalCfg; onToggle: () => void; onChange: (updater: (prev: LocalCfg) => LocalCfg | LocalCfg) => void; extra?: React.ReactNode }) {
-    const { open, cfg, onToggle, onChange, extra } = props
-    const Row = (p: { label: string, children: React.ReactNode }) => (<div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, margin:'6px 0' }}><label style={{ fontSize:12, opacity:0.9 }}>{p.label}</label><div>{p.children}</div></div>)
-    const Card = (p: { title: string, children: React.ReactNode }) => (<div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}><div style={{ fontSize:12, opacity:0.8, marginBottom:8 }}>{p.title}</div>{p.children}</div>)
+  const Rail = (props: { length?: number; vertical?: boolean; onChange: (n: number) => void; value?: number; label?: string }) => {
+    const length = props.length ?? 120
+    const vertical = !!props.vertical
+    const railRef = useRef<HTMLDivElement | null>(null)
+    const knobRef = useRef<HTMLDivElement | null>(null)
+    const dragRef = useRef<{active:boolean; min:number; max:number}>({ active:false, min:0, max:0 })
+
+    useEffect(() => {
+      const k = knobRef.current; if (!k) return
+      const v = THREE.MathUtils.clamp(props.value ?? 0, -1, 1)
+      if (vertical) k.style.transform = `translate(0px, ${((1 - v) * 0.5 * length) - (length/2)}px)`
+      else k.style.transform = `translate(${((v + 1) * 0.5 * length) - (length/2)}px, 0px)`
+    }, [props.value, vertical, length])
+
+    const start = (e: React.PointerEvent) => {
+      const rect = railRef.current!.getBoundingClientRect()
+      dragRef.current.active = true
+      dragRef.current.min = vertical ? rect.top : rect.left
+      dragRef.current.max = vertical ? rect.bottom : rect.right
+      ;(e.target as HTMLElement).setPointerCapture?.((e as any).pointerId)
+      move(e)
+    }
+    const move = (e: React.PointerEvent) => {
+      if (!dragRef.current.active) return
+      const pos = vertical ? e.clientY : e.clientX
+      const t = THREE.MathUtils.clamp((pos - dragRef.current.min) / Math.max(1, (dragRef.current.max - dragRef.current.min)), 0, 1)
+      const v = vertical ? (1 - t) * 2 - 1 : t * 2 - 1
+      if (knobRef.current) {
+        if (vertical) knobRef.current.style.transform = `translate(0px, ${((1 - v) * 0.5 * length) - (length/2)}px)`
+        else knobRef.current.style.transform = `translate(${((v + 1) * 0.5 * length) - (length/2)}px, 0px)`
+      }
+      props.onChange(v)
+    }
+    const end = (e: React.PointerEvent) => {
+      dragRef.current.active = false
+      ;(e.target as HTMLElement).releasePointerCapture?.((e as any).pointerId)
+    }
 
     return (
-      <div data-panel="wireframe3d" style={{ position:'absolute', top:12, right:12, zIndex:10, userSelect:'none', pointerEvents:'auto' }}>
-        <button onClick={(e) => { e.stopPropagation(); onToggle() }} style={btnStyle}>
-          {open ? 'Close 3D Settings' : '3D Settings'}
-        </button>
-        {open && (
-          <div style={{ width: 320, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
-            background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
-            <Card title="Camera">
-              <Row label={`FOV: ${cfg.camera.fov.toFixed(0)}`}>
-                <input type="range" min={30} max={85} step={1} value={cfg.camera.fov}
-                      onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, fov: +e.target.value } }))} />
-              </Row>
-              <Row label={`Orbit speed: ${cfg.orbitSpeed.toFixed(2)}`}>
-                <input type="range" min={0.05} max={2} step={0.01} value={cfg.orbitSpeed}
-                      onChange={e => onChange(prev => ({ ...prev, orbitSpeed: +e.target.value }))} />
-              </Row>
-              <Row label={`Orbit radius: ${cfg.orbitRadius.toFixed(1)}`}>
-                <input type="range" min={6} max={12} step={0.1} value={cfg.orbitRadius}
-                      onChange={e => onChange(prev => ({ ...prev, orbitRadius: +e.target.value }))} />
-              </Row>
-              <Row label={`Elevation: ${cfg.orbitElev.toFixed(2)}`}>
-                <input type="range" min={0.03} max={0.2} step={0.01} value={cfg.orbitElev}
-                      onChange={e => onChange(prev => ({ ...prev, orbitElev: +e.target.value }))} />
-              </Row>
-              <Row label={`Camera bob: ${cfg.camBob.toFixed(2)}`}>
-                <input type="range" min={0} max={0.6} step={0.01} value={cfg.camBob}
-                      onChange={e => onChange(prev => ({ ...prev, camBob: +e.target.value }))} />
-              </Row>
-              <Row label={`Auto path`}>
-                <input type="checkbox" checked={cfg.camera.autoPath}
-                      onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoPath: e.target.checked } }))}/>
-              </Row>
-            </Card>
-
-            <Card title="Wireframe">
-              <Row label={`Line width: ${cfg.lineWidthPx.toFixed(2)} px`}>
-                <input type="range" min={0.8} max={4} step={0.1} value={cfg.lineWidthPx}
-                      onChange={e => onChange(prev => ({ ...prev, lineWidthPx: +e.target.value }))} />
-              </Row>
-            </Card>
-
-            {extra}
-
-            <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
-              <button onClick={() => onChange(defaults())} style={btnStyle}>Reset</button>
-              <button onClick={onToggle} style={btnStyle}>Close</button>
-            </div>
-          </div>
-        )}
+      <div style={{ display:'inline-flex', flexDirection:'column', alignItems:'center', gap:6 }}>
+        <div
+          ref={railRef}
+          onPointerDown={start}
+          onPointerMove={move}
+          onPointerUp={end}
+          onPointerCancel={end}
+          style={{
+            width: vertical ? 18 : length,
+            height: vertical ? length : 18,
+            borderRadius: 9,
+            background:'linear-gradient(180deg, rgba(28,34,44,0.9), rgba(18,22,28,0.9))',
+            border:'1px solid #2b2f3a',
+            position:'relative',
+            touchAction:'none',
+            userSelect:'none'
+          }}
+        >
+          <div ref={knobRef} style={{
+            position:'absolute', left: vertical ? 3 : '50%', top: vertical ? '50%' : 3,
+            width: 12, height: 12, marginLeft: vertical ? 0 : -6, marginTop: vertical ? -6 : 0,
+            borderRadius: 6, background:'linear-gradient(180deg,#cfe7ff,#9fb7d6)',
+            border:'1px solid #5a6b84', boxShadow:'0 2px 6px rgba(0,0,0,0.35)', transform: 'translate(0px,0px)'
+          }}/>
+        </div>
+        {props.label && <div style={{ fontSize:10, opacity:0.75 }}>{props.label}</div>}
       </div>
     )
   }
+
+  const BillboardControllerCard = () => (
+    <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+        <div style={{ fontSize:12, opacity:0.8 }}>Billboard (Move/Rotate/Scale)</div>
+        <label style={{ display:'flex', alignItems:'center', gap:6, fontSize:12 }}>
+          <input type="checkbox" checked={bbEditEnabled} onChange={e => setBbEditEnabled(e.target.checked)} />
+          Edit
+        </label>
+      </div>
+
+      <div style={{ display:'flex', gap:6, marginBottom:10 }}>
+        <button onClick={() => setBbMode('move')} style={tabBtnStyle(bbMode === 'move')}>Move</button>
+        <button onClick={() => setBbMode('rotate')} style={tabBtnStyle(bbMode === 'rotate')}>Rotate</button>
+        <button onClick={() => setBbMode('scale')} style={tabBtnStyle(bbMode === 'scale')}>Scale</button>
+      </div>
+
+      {bbMode === 'move' && (
+        <div style={{ display:'flex', gap:12, alignItems:'center', flexWrap:'wrap' }}>
+          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+            <div style={{ display:'flex', gap:6 }}>
+              <button onClick={() => setBbPlane('XZ')} style={chipStyle(bbPlane === 'XZ')}>XZ</button>
+              <button onClick={() => setBbPlane('XY')} style={chipStyle(bbPlane === 'XY')}>XY</button>
+            </div>
+            <Joystick label={bbPlane === 'XZ' ? 'X/Z' : 'X/Y'} onChange={(nx, ny) => { moveVecRef.current.x = nx; moveVecRef.current.y = ny }} />
+          </div>
+          <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'center' }}>
+            <Rail vertical length={120} label={bbPlane === 'XZ' ? 'Y' : 'Z'} onChange={(v) => { moveAxis3Ref.current = v }} />
+            <div style={{ fontSize:11, opacity:0.7 }}>
+              Pos: {billboardPosRef.current.x.toFixed(2)}, {billboardPosRef.current.y.toFixed(2)}, {billboardPosRef.current.z.toFixed(2)}
+            </div>
+            <button onClick={() => { billboardPosRef.current.set(0, 2.95, 1.05) }} style={btnMini}>Center</button>
+          </div>
+        </div>
+      )}
+
+      {bbMode === 'rotate' && (
+        <div style={{ display:'flex', gap:12, alignItems:'center', flexWrap:'wrap' }}>
+          <Joystick label="Yaw" onChange={(nx) => { rotateVecRef.current.x = nx; rotateVecRef.current.y = 0 }} />
+          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+            <div style={{ fontSize:11, opacity:0.7 }}>Yaw: {(billboardYawRef.current * 57.2958).toFixed(1)}°</div>
+            <button onClick={() => { billboardYawRef.current = 0 }} style={btnMini}>Reset</button>
+          </div>
+        </div>
+      )}
+
+      {bbMode === 'scale' && (
+        <div style={{ display:'flex', gap:12, alignItems:'center', flexWrap:'wrap' }}>
+          <Rail length={160} label="Scale velocity" onChange={(v) => { scaleDeltaRef.current = v }} />
+          <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'center' }}>
+            <div style={{ fontSize:11, opacity:0.7 }}>Scale: {billboardScaleRef.current.toFixed(2)}×</div>
+            <div style={{ display:'flex', gap:6 }}>
+              <button onClick={() => { billboardScaleRef.current = Math.max(0.35, billboardScaleRef.current - 0.1) }} style={btnMini}>-</button>
+              <button onClick={() => { billboardScaleRef.current = Math.min(3.0, billboardScaleRef.current + 0.1) }} style={btnMini}>+</button>
+            </div>
+            <button onClick={() => { billboardScaleRef.current = 1 }} style={btnMini}>Reset</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 
   return (
     <div data-visual="wireframe3d" style={{ position: 'relative', width: '100%', height: '100%' }}>
@@ -1179,7 +1386,112 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         cfg={cfg}
         onToggle={() => setPanelOpen(o => !o)}
         onChange={setCfg}
+        extra={<>
+          <BillboardControllerCard />
+          <EffectsCardToggles cfg={cfg} onChange={setCfg} />
+        </>}
       />
+    </div>
+  )
+}
+
+function EffectsCardToggles({ cfg, onChange }: { cfg: LocalCfg; onChange: (updater: (prev: LocalCfg) => LocalCfg | LocalCfg) => void }) {
+  return (
+    <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
+      <div style={{ fontSize:12, opacity:0.8, marginBottom:8 }}>Effects</div>
+      <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+        <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+          <span>Mosaic floor</span>
+          <input type="checkbox" checked={cfg.fx.mosaicFloor} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, mosaicFloor: e.target.checked } }))}/>
+        </label>
+        <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+          <span>Starfield</span>
+          <input type="checkbox" checked={cfg.fx.starfield} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, starfield: e.target.checked } }))}/>
+        </label>
+        <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+          <span>Lyrics marquee</span>
+          <input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, lyricsMarquee: e.target.checked } }))}/>
+        </label>
+        <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+          <span>Wireframe car (Aventador)</span>
+          <input type="checkbox" checked={cfg.fx.wireCar} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, wireCar: e.target.checked } }))}/>
+        </label>
+      </div>
+    </div>
+  )
+}
+
+function Wire3DPanel(props: {
+  open: boolean
+  cfg: LocalCfg
+  onToggle: () => void
+  onChange: (updater: (prev: LocalCfg) => LocalCfg | LocalCfg) => void
+  extra?: React.ReactNode
+}) {
+  const { open, cfg, onToggle, onChange, extra } = props
+  const Row = (p: { label: string, children: React.ReactNode }) => (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, margin:'6px 0' }}>
+      <label style={{ fontSize:12, opacity:0.9 }}>{p.label}</label>
+      <div>{p.children}</div>
+    </div>
+  )
+  const Card = (p: { title: string, children: React.ReactNode }) => (
+    <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
+      <div style={{ fontSize:12, opacity:0.8, marginBottom:8 }}>{p.title}</div>
+      {p.children}
+    </div>
+  )
+
+  return (
+    <div data-panel="wireframe3d" style={{ position:'absolute', top:12, right:12, zIndex:10, userSelect:'none', pointerEvents:'auto' }}>
+      <button onClick={(e) => { e.stopPropagation(); onToggle() }} style={btnStyle}>
+        {open ? 'Close 3D Settings' : '3D Settings'}
+      </button>
+      {open && (
+        <div style={{ width: 320, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
+          background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
+          <Card title="Camera">
+            <Row label={`FOV: ${cfg.camera.fov.toFixed(0)}`}>
+              <input type="range" min={30} max={85} step={1} value={cfg.camera.fov}
+                     onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, fov: +e.target.value } }))} />
+            </Row>
+            <Row label={`Orbit speed: ${cfg.orbitSpeed.toFixed(2)}`}>
+              <input type="range" min={0.05} max={2} step={0.01} value={cfg.orbitSpeed}
+                     onChange={e => onChange(prev => ({ ...prev, orbitSpeed: +e.target.value }))} />
+            </Row>
+            <Row label={`Orbit radius: ${cfg.orbitRadius.toFixed(1)}`}>
+              <input type="range" min={6} max={12} step={0.1} value={cfg.orbitRadius}
+                     onChange={e => onChange(prev => ({ ...prev, orbitRadius: +e.target.value }))} />
+            </Row>
+            <Row label={`Elevation: ${cfg.orbitElev.toFixed(2)}`}>
+              <input type="range" min={0.03} max={0.2} step={0.01} value={cfg.orbitElev}
+                     onChange={e => onChange(prev => ({ ...prev, orbitElev: +e.target.value }))} />
+            </Row>
+            <Row label={`Camera bob: ${cfg.camBob.toFixed(2)}`}>
+              <input type="range" min={0} max={0.6} step={0.01} value={cfg.camBob}
+                     onChange={e => onChange(prev => ({ ...prev, camBob: +e.target.value }))} />
+            </Row>
+            <Row label={`Auto path`}>
+              <input type="checkbox" checked={cfg.camera.autoPath}
+                     onChange={e => onChange(prev => ({ ...prev, camera: { ...prev.camera, autoPath: e.target.checked } }))}/>
+            </Row>
+          </Card>
+
+          <Card title="Wireframe">
+            <Row label={`Line width: ${cfg.lineWidthPx.toFixed(2)} px`}>
+              <input type="range" min={0.8} max={4} step={0.1} value={cfg.lineWidthPx}
+                     onChange={e => onChange(prev => ({ ...prev, lineWidthPx: +e.target.value }))} />
+            </Row>
+          </Card>
+
+          {extra}
+
+          <div style={{ display:'flex', gap:8, marginTop:10, justifyContent:'flex-end' }}>
+            <button onClick={() => onChange(defaults())} style={btnStyle}>Reset</button>
+            <button onClick={onToggle} style={btnStyle}>Close</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1188,5 +1500,36 @@ const btnStyle: React.CSSProperties = {
   padding:'6px 10px', fontSize:12, borderRadius:6, border:'1px solid #2b2f3a',
   background:'rgba(16,18,22,0.8)', color:'#cfe7ff', cursor:'pointer'
 }
+const btnMini: React.CSSProperties = {
+  padding:'6px 8px', fontSize:12, borderRadius:6, border:'1px solid #2b2f3a',
+  background:'rgba(16,18,22,0.8)', color:'#cfe7ff', cursor:'pointer'
+}
+const tabBtnStyle = (active: boolean): React.CSSProperties => ({
+  padding:'6px 10px',
+  fontSize:12,
+  borderRadius:6,
+  border:'1px solid #2b2f3a',
+  background: active ? 'linear-gradient(180deg,#1e2632,#141a23)' : 'rgba(16,18,22,0.8)',
+  color: active ? '#e6f0ff' : '#cfe7ff',
+  cursor:'pointer'
+})
+const chipStyle = (active: boolean): React.CSSProperties => ({
+  padding:'4px 8px',
+  fontSize:11,
+  borderRadius:12,
+  border:'1px solid #2b2f3a',
+  background: active ? 'rgba(32,38,48,0.9)' : 'rgba(16,18,22,0.7)',
+  color: active ? '#e6f0ff' : '#cfe7ff',
+  cursor:'pointer'
+})
 
 function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
+
+// Robust angle lerp (kept for reference)
+function lerpAngle(a: number, b: number, t: number) {
+  const TAU = Math.PI * 2
+  let d = (b - a) % TAU
+  if (d > Math.PI) d -= TAU
+  if (d < -Math.PI) d += TAU
+  return a + d * t
+}

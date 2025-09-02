@@ -3,15 +3,18 @@
   "file_creator": "ffw",
   "vertices_coords": [
     [0,0],[1,0],[1,1],[0,1],
-    [0.5,0.0],[1.0,0.5],[0.5,1.0],[0.0,0.5]
+    [0.5,0.0],[1.0,0.5],[0.5,1.0],[0.0,0.5],
+    [0.30,0.15],[0.30,0.85],
+    [0.70,0.15],[0.70,0.85],
+    [0.20,0.30],[0.80,0.30]
   ],
   "edges_vertices": [
-    [0,1],[1,2],[2,3],[3,0],
-    [0,2],  // main diagonal (triangle fold)
-    [7,5],  // ears hinges approx verticals
-    [4,6],  // snout hinge approx horizontal
-    [3,1]   // second diagonal (optional support)
+    [0,1],[1,2],[2,3],[3,0],     // borders
+    [0,2],                        // main diagonal (triangle fold)
+    [8,9],                        // left ear (vertical-ish)
+    [10,11],                      // right ear
+    [12,13]                       // snout pinch
   ],
-  "edges_assignment": ["B","B","B","B","V","M","M","F"],
-  "edges_foldAngle": [0,0,0,0,180,130,40,0]
+  "edges_assignment": ["B","B","B","B","V","M","M","M],
+  "edges_foldAngle":  [ 0,  0,  0,  0, 180,130,130, 40]
 }

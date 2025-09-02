@@ -943,7 +943,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       rear.position.set(-L*0.34, 0.36, 0)
       group.add(rear)
 
-      // Side intakes (triangular prisms via skewed thin boxes)
+      // Side intakes
       const intakeL = new THREE.Mesh(skewBox(L*0.28, H*0.2, 0.06, 0.05, 0, 0), wireMain)
       intakeL.position.set(-L*0.05, 0.28,  W*0.48)
       const intakeR = intakeL.clone()
@@ -1032,40 +1032,33 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       group.add(flameL, flameR)
 
       // Vehicle dynamics (bicycle model)
-      const m = 1600 // kg
-      const Iz = 3000 // yaw inertia
-      const lf = 1.6, lr = 1.6 // distances to axles
-      let Cf = 90000, Cr = 95000 // cornering stiffness (will scale with audio)
-      const Fmax = 6000 // drive force scale
-      const Bmax = 9000 // brake force
-      const drag = 0.6, rr = 40 // drag and rolling resistance
+      const m = 1600
+      const Iz = 3000
+      const lf = 1.6, lr = 1.6
+      let Cf = 90000, Cr = 95000
+      const Fmax = 6000
+      const Bmax = 9000
+      const drag = 0.6, rr = 40
       const Lwb = lf + lr
 
       const state = {
         x: 0, z: 0, y: 0.06,
         yaw: 0,
-        vx: 3.0, vy: 0.0, r: 0.0, // forward speed, lateral speed, yaw rate
+        vx: 3.0, vy: 0.0, r: 0.0,
         sDist: 0.0,
         steer: 0.0
       }
 
       const tmp = {
-        // target/path
         p0: new THREE.Vector3(),
         p1: new THREE.Vector3(),
         tForward: new THREE.Vector3(),
-        // helpers
-        worldForward: new THREE.Vector3(),
-        worldRight: new THREE.Vector3(),
-        carVel: new THREE.Vector3(),
       }
 
       function purePursuitSteer(target: THREE.Vector3, lookahead: number) {
-        // Compute steering to reach a target point (in world)
         const dx = target.x - state.x
         const dz = target.z - state.z
         const sinYaw = Math.sin(state.yaw), cosYaw = Math.cos(state.yaw)
-        // transform target to car coordinates
         const xCar =  cosYaw * dx + sinYaw * dz
         const zCar = -sinYaw * dx + cosYaw * dz
         if (lookahead < 0.001) return 0
@@ -1093,19 +1086,19 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         accent2: THREE.Color
       }) {
         // Palette sync
-        ;(wireMain.color as THREE.Color).copy(env.accent)
-        ;(wireSec.color as THREE.Color).copy(env.accent2)
-        ;(addGlow.color as THREE.Color).copy(env.accent.clone().multiplyScalar(1.0))
+        wireMain.color.copy(env.accent)
+        wireSec.color.copy(env.accent2)
 
-        // Audio -> grip/speed
-        const mu = 0.9 - 0.25 * THREE.MathUtils.clamp(env.high, 0, 1) // less grip on highs => more drift
+        // Audio -> grip/speed (FIX: use env.bands.high, not env.high)
+        const high = THREE.MathUtils.clamp(env.bands?.high ?? 0, 0, 1)
+        const mu = 0.9 - 0.25 * high
         Cf = 90000 * mu
         Cr = 95000 * mu
         const vTarget = 6.0 + 10.0 * THREE.MathUtils.clamp(env.loud, 0, 1) + (env.beat ? 1.0 : 0)
 
-        // Path following target point (advance with time proportional to speed)
+        // Path following target point
         const tParam = env.t * 0.5 + (state.vx * 0.08)
-        const targetPt = desiredPathPoint(tParam + 0.18 * (0.6 + env.loud)) // look forward along path
+        const targetPt = desiredPathPoint(tParam + 0.18 * (0.6 + THREE.MathUtils.clamp(env.loud, 0, 1)))
         const lookahead = THREE.MathUtils.clamp(1.4 + state.vx * 0.4, 2.0, 6.0)
         const steerCmd = purePursuitSteer(targetPt, lookahead)
         state.steer += (steerCmd - state.steer) * Math.min(1, dt * 8.0)
@@ -1120,32 +1113,31 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const alphaF = Math.atan2(state.vy + lf * state.r, Math.max(eps, state.vx)) - state.steer
         const alphaR = Math.atan2(state.vy - lr * state.r, Math.max(eps, state.vx))
 
-        // Lateral forces (linear region, mildly clamped)
-        let Fyf = -Cf * alphaF
-        let Fyr = -Cr * alphaR
+        // Lateral forces
         const FyMax = mu * m * 9.81 * 0.6
-        Fyf = THREE.MathUtils.clamp(Fyf, -FyMax, FyMax)
-        Fyr = THREE.MathUtils.clamp(Fyr, -FyMax, FyMax)
+        let Fyf = THREE.MathUtils.clamp(-Cf * alphaF, -FyMax, FyMax)
+        let Fyr = THREE.MathUtils.clamp(-Cr * alphaR, -FyMax, FyMax)
 
         // Longitudinal force
         const Fx = throttle * Fmax - brake * Bmax * Math.sign(state.vx)
 
         // Dynamics (planar)
-        const ax = (Fx - Fyf * Math.sin(state.steer)) / m + state.vy * state.r - (drag * state.vx + rr * Math.sign(state.vx)) / m
-        const ay = (Fyf * Math.cos(state.steer) + Fyr) / m - state.vx * state.r
-        const rDot = (lf * Fyf * Math.cos(state.steer) - lr * Fyr) / Iz
+        let ax = (Fx - Fyf * Math.sin(state.steer)) / m + state.vy * state.r - (drag * state.vx + rr * Math.sign(state.vx)) / m
+        let ay = (Fyf * Math.cos(state.steer) + Fyr) / m - state.vx * state.r
+        let rDot = (lf * Fyf * Math.cos(state.steer) - lr * Fyr) / Iz
+        ax = finite(ax); ay = finite(ay); rDot = finite(rDot)
 
-        state.vx += ax * dt
-        state.vy += ay * dt
-        state.r += rDot * dt
+        state.vx = finite(state.vx + ax * dt, 0)
+        state.vy = finite(state.vy + ay * dt, 0)
+        state.r  = finite(state.r  + rDot * dt, 0)
         state.vx = THREE.MathUtils.clamp(state.vx, -20, 45)
 
         // Integrate position in world
         const cosY = Math.cos(state.yaw), sinY = Math.sin(state.yaw)
-        const dx = (state.vx * cosY - state.vy * sinY) * dt
-        const dz = (state.vx * sinY + state.vy * cosY) * dt
-        state.x += dx
-        state.z += dz
+        const dx = finite((state.vx * cosY - state.vy * sinY) * dt)
+        const dz = finite((state.vx * sinY + state.vy * cosY) * dt)
+        state.x = finite(state.x + dx)
+        state.z = finite(state.z + dz)
         state.yaw = lerpAngle(state.yaw, state.yaw + state.r * dt, 1.0)
         state.y = 0.06 + Math.sin(env.t * 3.2) * 0.01
 
@@ -1162,7 +1154,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         // Front wheels steer
         for (const fw of frontHubs) fw.rotation.y = state.steer
 
-        // Wheel spin (based on forward speed)
+        // Wheel spin (based on forward distance)
         state.sDist += Math.hypot(dx, dz)
         const wRot = state.sDist / (tireR) * 0.7
         for (const hub of wheelHubs) {
@@ -1172,9 +1164,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           rim.rotation.x = wRot
         }
 
-        // Lights / glow based on input and audio
+        // Lights / glow
         const moving = Math.abs(state.vx) + Math.abs(state.vy)
-        ;(glow.material as THREE.MeshBasicMaterial).opacity = THREE.MathUtils.clamp(0.12 + moving * 0.015 + env.loud * 0.2 + (env.beat ? 0.12 : 0), 0.08, 0.55)
+        ;(glow.material as THREE.MeshBasicMaterial).opacity = THREE.MathUtils.clamp(0.12 + moving * 0.015 + THREE.MathUtils.clamp(env.loud,0,1) * 0.2 + (env.beat ? 0.12 : 0), 0.08, 0.55)
         ;(glow.material as THREE.MeshBasicMaterial).color.copy(env.accent.clone().multiplyScalar(1.0))
         ;(tailL.material as THREE.MeshBasicMaterial).opacity = brake > 0 ? 0.6 : 0.28
         ;(tailR.material as THREE.MeshBasicMaterial).opacity = brake > 0 ? 0.6 : 0.28
@@ -1182,10 +1174,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         // Flames on beat or heavy throttle with slip
         const slipMag = Math.abs(alphaR) + Math.abs(alphaF)
         const flameOn = env.beat || (throttle > 0.75 && slipMag > 0.12)
-        const flameOpacity = flameOn ? THREE.MathUtils.clamp(0.15 + env.loud * 0.4, 0.0, 0.75) : 0.0
+        const flameOpacity = flameOn ? THREE.MathUtils.clamp(0.15 + THREE.MathUtils.clamp(env.loud,0,1) * 0.4, 0.0, 0.75) : 0.0
         ;(flameL.material as THREE.MeshBasicMaterial).opacity = flameOpacity
         ;(flameR.material as THREE.MeshBasicMaterial).opacity = flameOpacity
-        // face flames backward
         flameL.lookAt(flameL.position.clone().add(new THREE.Vector3(-1, 0, 0)))
         flameR.lookAt(flameR.position.clone().add(new THREE.Vector3(-1, 0, 0)))
       }
@@ -1567,4 +1558,9 @@ function lerpAngle(a: number, b: number, t: number) {
   if (d > Math.PI) d -= TAU
   if (d < -Math.PI) d += TAU
   return a + d * t
+}
+
+// Guard against NaN/Infinity
+function finite(n: number, fallback = 0) {
+  return Number.isFinite(n) ? n : fallback
 }

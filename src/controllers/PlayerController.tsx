@@ -16,7 +16,6 @@ function mmss(ms: number) {
 
 export default function PlayerController({ onOpenDevices }: Props) {
   const { token, isSignedIn, signIn, playInBrowser } = usePlayback()
-
   const hasToken = !!token
   const bearer = token || ''
 
@@ -75,6 +74,7 @@ export default function PlayerController({ onOpenDevices }: Props) {
     }
   }
 
+  // Initial and periodic refresh
   useEffect(() => { refresh() }, [hasToken])
   useEffect(() => {
     if (!hasToken) return
@@ -82,6 +82,7 @@ export default function PlayerController({ onOpenDevices }: Props) {
     return () => clearInterval(id)
   }, [hasToken])
 
+  // Progress tick while playing
   useEffect(() => {
     if (!state?.is_playing || scrubbing) return
     const id = setInterval(() => {
@@ -90,6 +91,7 @@ export default function PlayerController({ onOpenDevices }: Props) {
     return () => clearInterval(id)
   }, [state?.is_playing, scrubbing, duration])
 
+  // Actions
   const doTogglePlay = async () => {
     if (!hasToken || !throttle(250)) return
     setBusy(true); setError(null)
@@ -163,6 +165,7 @@ export default function PlayerController({ onOpenDevices }: Props) {
         pointerEvents: 'auto'
       }}
     >
+      {/* Album art */}
       <div style={{ width: 54, height: 54, borderRadius: 8, overflow: 'hidden', background: '#0f1218', border: '1px solid #2b2f3a', flex: '0 0 auto' }}>
         {cover ? (
           <img alt="Album cover" src={cover} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -171,6 +174,7 @@ export default function PlayerController({ onOpenDevices }: Props) {
         )}
       </div>
 
+      {/* Title/artist and progress */}
       <div style={{ minWidth: 0, flex: '1 1 auto' }}>
         <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {title || '—'}
@@ -201,6 +205,7 @@ export default function PlayerController({ onOpenDevices }: Props) {
         </div>
       </div>
 
+      {/* Controls */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '0 0 auto' }}>
         {!isSignedIn ? (
           <button onClick={signIn} style={btnStyle('#b7ffbf')}>Sign in to Spotify</button>

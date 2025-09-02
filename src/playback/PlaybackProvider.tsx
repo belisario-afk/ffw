@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
-import { bootstrapAuthFromHash, ensureAuth, getAccessToken } from '../auth/spotifyAuth'
+import { bootstrapAuthFromHash, ensureAuth, getAccessToken, signInWithPopup } from '../auth/spotifyAuth'
 import { loadWebPlaybackSDK } from '../spotify/sdk'
 import { ensurePlayerConnected, setSpotifyTokenProvider } from '../spotify/player'
 import { transferPlaybackToDevice } from '../spotify/connect'
@@ -10,7 +10,10 @@ type PlaybackCtx = {
   deviceId: string | null
   isDeviceReady: boolean
   status: string
-  signIn: () => void
+  // Returns true if a token is available after the call (popup success or already signed in).
+  // If it falls back to full-page redirect, the promise resolves false before navigation.
+  signIn: () => Promise<boolean>
+  // Ensures SDK playback in browser; will sign in first if needed.
   playInBrowser: () => Promise<void>
   transferToBrowser: (opts?: { play?: boolean }) => Promise<void>
 }
@@ -23,7 +26,7 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
   const [isDeviceReady, setIsDeviceReady] = useState(false)
   const [status, setStatus] = useState('')
 
-  // 1) Pick up token from redirect hash or localStorage and expose provider globally
+  // On load: restore token (hash or storage) and expose token provider globally
   useEffect(() => {
     bootstrapAuthFromHash()
     const t = getAccessToken()
@@ -36,7 +39,7 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
-  // 2) Keep window token provider updated if token changes
+  // Keep window token provider updated
   useEffect(() => {
     if (token) {
       try {
@@ -46,16 +49,41 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
     }
   }, [token])
 
-  const signIn = useCallback(() => {
-    setStatus('Redirecting to Spotify…')
-    ensureAuth() // Navigates to Spotify and back; token is restored on return (above)
+  const signIn = useCallback(async (): Promise<boolean> => {
+    setStatus('Signing in…')
+    const existing = getAccessToken()
+    if (existing) {
+      setToken(existing)
+      setStatus('')
+      return true
+    }
+    try {
+      const t = await signInWithPopup()
+      setToken(t)
+      setStatus('')
+      return true
+    } catch (e: any) {
+      // If popup blocked or user closed it, fall back to redirect
+      setStatus('Opening Spotify…')
+      try {
+        ensureAuth() // navigates away; if it doesn’t (rare), return false
+      } catch {}
+      return false
+    }
   }, [])
 
-  // 3) Create/connect player and transfer playback to it (user gesture)
+  // Create/connect player and transfer playback to it
   const playInBrowser = useCallback(async () => {
+    // Ensure token (sign in if needed, via popup when possible)
+    let t = getAccessToken()
+    if (!t) {
+      const ok = await signIn()
+      if (!ok) return // redirected away, or failed
+      t = getAccessToken()
+      if (!t) return
+    }
+
     setStatus('Connecting player...')
-    const t = getAccessToken()
-    if (!t) { setStatus('Sign in first'); return }
     try {
       await loadWebPlaybackSDK()
       const { player, deviceId: did } = await ensurePlayerConnected({ deviceName: 'FFW Visualizer', setInitialVolume: true })
@@ -73,7 +101,7 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       console.error(e)
       setStatus(e?.message || 'Failed to enable browser playback')
     }
-  }, [])
+  }, [signIn])
 
   const transferToBrowser = useCallback(async ({ play = true }: { play?: boolean } = {}) => {
     const t = getAccessToken()

@@ -94,7 +94,7 @@ export default function App() {
         <ThemeManager />
         <AlbumSkinWatcher />
         <Routes>
-          <Route path="/callback" element={<Callback onAuth={() => { /* handled by PlaybackProvider on redirect */ }} />} />
+          <Route path="/callback" element={<Callback onAuth={() => { /* handled by PlaybackProvider (hash) */ }} />} />
           <Route path="/*" element={
             <Suspense fallback={<div className="badge" style={{ position: 'absolute', left: 16, top: 72 }}>Loading scene…</div>}>
               {scene === 'Wireframe House 3D' ? (

@@ -16,12 +16,8 @@ import { detectGPUInfo } from './utils/gpu'
 import { HousePanel, defaultHouseSettings, type HouseSettings } from './ui/HousePanel'
 import { startReactivityOrchestrator } from './audio/ReactivityOrchestrator'
 import { startFallbackTicker } from './audio/FallbackTicker'
-
-// App-wide playback provider + global top bar (Sign in / Play in Browser)
 import { PlaybackProvider } from './playback/PlaybackProvider'
 import GlobalTopBar from './ui/GlobalTopBar'
-
-// Bridge: when we already have a token (your existing auth flow), expose it to the player
 import { setSpotifyTokenProvider } from './spotify/player'
 
 type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
@@ -46,7 +42,6 @@ export default function App() {
   const [theme, setThemeState] = useState<ThemeName>(getTheme())
   const [scene, setScene] = useState<string>(() => {
     const saved = localStorage.getItem('ffw_scene') || 'Wireframe House 3D'
-    // Migrate any old/removed scene names to a valid default
     if (saved === 'Blank' || saved === 'Origami Fold' || saved === 'Wireframe House') return 'Wireframe House 3D'
     return saved
   })
@@ -97,10 +92,10 @@ export default function App() {
     <PlaybackProvider auth={auth}>
       <GlobalTopBar
         auth={auth}
-        onLogin={() => loginWithSpotify().then(a => setAuth(a))}
+        onLogin={() => loginWithSpotify().catch?.(() => {})}
         onLogout={() => { signOut(); setAuth(null) }}
       />
-      <PlayerController auth={auth} />
+      <PlayerController auth={auth} onOpenDevices={() => setPanel('devices')} />
       <div className="app-root">
         <div className="status-bar">
           <span className="badge">{gpu}</span>
@@ -149,7 +144,7 @@ export default function App() {
             )}
 
             <label htmlFor="theme" style={{ fontSize: 11, color: 'var(--muted)' }}>Theme</label>
-            <select id="theme" value={theme} onChange={(e) => onThemeChange(e.currentTarget.value as ThemeName)} title="Theme" aria-label="Theme">
+            <select id="theme" value={theme} onChange={(e) => onThemeChange(e.currentTarget.value as any)} title="Theme" aria-label="Theme">
               <option value="album">Album (auto)</option>
               <option value="neon">Neon Aqua</option>
               <option value="magenta">Magenta</option>

@@ -121,7 +121,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const [bbEditEnabled, setBbEditEnabled] = useState(false)
   const [bbMode, setBbMode] = useState<'move'|'rotate'|'scale'>('move')
   const [bbPlane, setBbPlane] = useState<'XZ'|'XY'>('XZ')
-
   // Mirror billboard UI state into refs for the render loop
   const bbEditRef = useRef(bbEditEnabled)
   const bbModeRef = useRef<'move'|'rotate'|'scale'>(bbMode)
@@ -755,13 +754,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         camera.position.y += (bob - (camera as any).__lastBobY || 0)
         ;(camera as any).__lastBobY = bob
       }
-        function lerpAngle(a: number, b: number, t: number) {
-        const TAU = Math.PI * 2
-        let d = (b - a) % TAU
-        if (d > Math.PI) d -= TAU
-        if (d < -Math.PI) d += TAU
-        return a + d * t
-      }
 
       ;(grid.material as THREE.Material).opacity = 0.05 * (stale ? 0.6 : 1.0)
       controls.update()
@@ -933,7 +925,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       roof.position.set(-L*0.05, H*1.12, 0)
       group.add(roof)
 
-      // Side skirts (thin boxes)
+      // Side skirts
       const skirtL = new THREE.Mesh(new THREE.BoxGeometry(L*0.8, 0.06, 0.05), wire)
       skirtL.position.set(0, 0.1,  W*0.5)
       const skirtR = skirtL.clone()
@@ -1083,10 +1075,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         state.lastPos.copy(state.pos)
         const wheelRot = state.distance / (tireR) * 0.7
         for (const w of wheels) {
-          // their child[0] is tire (x-rotation), child[1] rim; rotate children, not hub
           const tire = w.children[0] as THREE.Mesh
-          tire.rotation.x = wheelRot
           const rim = w.children[1] as THREE.Mesh
+          tire.rotation.x = wheelRot
           rim.rotation.x = wheelRot
         }
 
@@ -1468,3 +1459,12 @@ const chipStyle = (active: boolean): React.CSSProperties => ({
 })
 
 function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
+
+// Robust angle lerp (works if MathUtils.lerpAngle is unavailable)
+function lerpAngle(a: number, b: number, t: number) {
+  const TAU = Math.PI * 2
+  let d = (b - a) % TAU
+  if (d > Math.PI) d -= TAU
+  if (d < -Math.PI) d += TAU
+  return a + d * t
+}

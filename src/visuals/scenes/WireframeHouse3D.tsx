@@ -13,6 +13,11 @@ import { ensurePlayerConnected, hasSpotifyTokenProvider, setSpotifyTokenProvider
 import { fetchLyrics, type SyncedLine } from '../../lyrics/provider'
 import { LyricBillboard } from '../components/LyricBillboard'
 
+// GLB loaders
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
+
 type Props = {
   auth: AuthState | null
   quality: { renderScale: 1 | 1.25 | 1.5 | 1.75 | 2, msaa: 0 | 2 | 4 | 8, bloom: boolean, motionBlur: boolean }
@@ -62,6 +67,13 @@ type LocalCfg = {
 }
 
 const LS_KEY = 'ffw.wire3d.settings.v2'
+
+// Default GLB source (raw GitHub URL for your committed file)
+// You can override at runtime: window.FFW_CAR_GLB_URL = 'https://.../car.glb'
+const DEFAULT_GLB_URL = (window as any)?.FFW_CAR_GLB_URL
+  || 'https://raw.githubusercontent.com/belisario-afk/try240/bf00e4ea26597cb5ba63c88e819a9fb696ada7d6/lamborghini_aventador_svj_sdc__free.glb'
+// Optional local fallback (place in public/assets/car.glb)
+const LOCAL_FALLBACK_GLB_URL = `${import.meta.env.BASE_URL}assets/car.glb`
 
 function defaults(initial?: any): LocalCfg {
   return {
@@ -354,7 +366,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     mosaicGroup.visible = false
     scene.add(mosaicGroup)
 
-    // Wireframe mansion edges
+    // Wireframe mansion edges (kept)
     const mansionPositions = buildMansionEdges()
     const fatGeo = new LineSegmentsGeometry()
     fatGeo.setPositions(mansionPositions)
@@ -588,11 +600,15 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Procedural Aventador wireframe (code-only, reliable thickness with fallback)
-    const aventador = createAventadorWireframeModel({ dims: { L: 4.6, W: 2.04, H: 1.14 }, linePx: 1.35 }, renderer)
-    aventador.group.visible = !!cfgRef.current.fx.wireCar
-    aventador.group.position.y = 0.055
-    scene.add(aventador.group)
+    // GLB car model (replaces wireframe car)
+    const car = createGlbCarModel({
+      url: DEFAULT_GLB_URL,
+      fallbackUrl: LOCAL_FALLBACK_GLB_URL,
+      targetLengthMeters: 4.6,   // approximate Aventador length for auto-scale
+      yGround: 0.055             // sits just above floor
+    })
+    car.group.visible = !!cfgRef.current.fx.wireCar
+    scene.add(car.group)
 
     // Resize
     const updateSizes = () => {
@@ -603,7 +619,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       comp.onResize()
       fatMat.resolution.set(draw.x, draw.y)
       setLinePixels(cfgRef.current.lineWidthPx)
-      aventador.setResolution(draw.x, draw.y)
+      car.setResolution?.(draw.x, draw.y)
     }
     window.addEventListener('resize', updateSizes)
     updateSizes()
@@ -693,11 +709,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       )
       billboard.setVisible(!!cfgC.fx.lyricsMarquee)
 
-      // Update Aventador (album-adaptive color; gentle showcase path)
-      aventador.group.visible = !!cfgC.fx.wireCar
-      if (aventador.group.visible) {
-        aventador.setColor(carColorRef.current)
-        aventador.update(dt, {
+      // Update GLB car (album-adaptive tint; gentle showcase path)
+      car.group.visible = !!cfgC.fx.wireCar
+      if (car.group.visible) {
+        car.setColor?.(carColorRef.current)
+        car.update(dt, {
           t,
           floorHalf: floorSize * 0.5 - 0.6
         })
@@ -772,8 +788,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const elev = cfgC.orbitElev
         const pos = pathPoint(cfgC.path, angleRef.current, radius)
         camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
-        camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
-        controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
+        camera.lookAt(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
+        controls.target.set(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
       } else {
         camera.position.y += (bob - (camera as any).__lastBobY || 0)
         ;(camera as any).__lastBobY = bob
@@ -783,7 +799,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.update()
       comp.composer.render()
 
-      // fallback: if fat lines aren’t drawing, swap to thin (house + car)
+      // fallback: if fat house lines aren’t drawing, swap to thin
       frames++
       if (!fallbackArmed && frames > 12) {
         const dc = (renderer.info.render.calls || 0)
@@ -791,7 +807,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           fallbackArmed = true
           fatLines.visible = false
           thinLines.visible = true
-          aventador.fallbackToThin()
         }
       }
     }
@@ -809,7 +824,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       floorTex?.dispose()
       marqueeTex?.dispose?.()
       billboard.dispose()
-      aventador.dispose()
+      car.dispose()
       scene.traverse(obj => {
         const any = obj as any
         if (any.geometry?.dispose) any.geometry.dispose()
@@ -921,220 +936,151 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
     }
 
-    // Procedural Aventador wireframe builder with fat/thin fallback
-    function createAventadorWireframeModel(
-      opts: { dims: { L:number; W:number; H:number }, linePx: number },
-      renderer: THREE.WebGLRenderer
-    ) {
+    // GLB car loader and driver
+    function createGlbCarModel(opts: {
+      url: string
+      fallbackUrl?: string
+      targetLengthMeters: number
+      yGround: number
+    }) {
       const group = new THREE.Group()
       group.renderOrder = 3
+      group.position.y = opts.yGround
 
-      // Fat lines (Line2)
-      const matFat = new LineMaterial({ color: carColorRef.current.getHex(), transparent: true, opacity: 0.98, depthTest: true })
-      ;(matFat as any).worldUnits = false
-      const geoFat = new LineSegmentsGeometry()
-      const linesFat = new LineSegments2(geoFat, matFat)
-      group.add(linesFat)
+      const holder = new THREE.Group() // transforms on model
+      group.add(holder)
 
-      // Thin fallback (LineBasicMaterial)
-      const geoThin = new THREE.BufferGeometry()
-      const matThin = new THREE.LineBasicMaterial({ color: carColorRef.current.getHex(), transparent: true, opacity: 0.98, depthTest: true })
-      const linesThin = new THREE.LineSegments(geoThin, matThin)
-      linesThin.visible = false
-      group.add(linesThin)
+      // Keep a map of original material colors/emissive to apply tint idempotently
+      const originals = new WeakMap<THREE.Material, { color?: THREE.Color; emissive?: THREE.Color }>()
+      const candidatePaintMats = new Set<THREE.Material>()
 
-      const setResolution = (w: number, h: number) => {
-        matFat.resolution.set(w, h)
-        const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-        const ndcMin = 0.003 // safer minimum thickness
-        const ndc = Math.max(ndcMin, opts.linePx / Math.max(1, draw.y))
-        matFat.linewidth = ndc
-        matFat.needsUpdate = true
-      }
-      {
-        const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
-        setResolution(draw.x, draw.y)
-      }
+      let loaded = false
 
-      const setColor = (c: THREE.Color) => { matFat.color.set(c); matThin.color.set(c) }
-
-      // Build Aventador polylines
-      const positions = (() => {
-        const { L, W } = opts.dims
-        const halfL = L / 2, halfW = W / 2
-        const yBase = 0.12
-        const yWheel = 0.28
-        const rWheel = 0.42
-
-        const pos: number[] = []
-        const V = (x:number,y:number,z:number) => new THREE.Vector3(x,y,z)
-        const seg = (a:THREE.Vector3,b:THREE.Vector3) => { pos.push(a.x,a.y,a.z,b.x,b.y,b.z) }
-        const poly = (pts:THREE.Vector3[], closed=false) => {
-          for (let i=0;i<pts.length-1;i++) seg(pts[i], pts[i+1])
-          if (closed && pts.length>2) seg(pts[pts.length-1], pts[0])
+      const loader = new GLTFLoader()
+      // Optional DRACO
+      try {
+        const dracoPath = (window as any)?.FFW_DRACO_DECODER_PATH
+        if (dracoPath) {
+          const dracoLoader = new DRACOLoader()
+          dracoLoader.setDecoderPath(dracoPath)
+          loader.setDRACOLoader(dracoLoader)
         }
-        const arcXZ = (cx:number, y:number, cz:number, rx:number, rz:number, a0:number, a1:number, steps:number) => {
-          const pts: THREE.Vector3[] = []
-          for (let i=0;i<=steps;i++){
-            const t = THREE.MathUtils.lerp(a0, a1, i/steps)
-            pts.push(V(cx + Math.cos(t)*rx, y, cz + Math.sin(t)*rz))
-          }
-          poly(pts)
-        }
-        const circleYZ = (cx:number, cy:number, cz:number, r:number, steps:number) => {
-          const pts: THREE.Vector3[] = []
-          for (let i=0;i<=steps;i++){
-            const t = (i/steps)*Math.PI*2
-            pts.push(V(cx, cy + Math.cos(t)*r, cz + Math.sin(t)*r))
-          }
-          poly(pts, true)
-        }
-        const spokesYZ = (cx:number, cy:number, cz:number, r:number, count:number) => {
-          for (let i=0;i<count;i++){
-            const t = (i/count)*Math.PI*2
-            const p = V(cx, cy + Math.cos(t)*r, cz + Math.sin(t)*r)
-            seg(V(cx, cy, cz), p)
+      } catch {}
+      // Optional Meshopt
+      try {
+        ;(loader as any).setMeshoptDecoder?.(MeshoptDecoder)
+      } catch {}
+
+      const sourceList = [opts.url, opts.fallbackUrl].filter(Boolean) as string[]
+
+      ;(async () => {
+        for (const src of sourceList) {
+          try {
+            const gltf = await loader.loadAsync(src)
+            prepareModel(gltf.scene)
+            loaded = true
+            break
+          } catch (e) {
+            console.warn('GLB load failed, trying next source:', src, e)
           }
         }
-        const mirrorZ = (fn:(s:number)=>void) => { fn(1); fn(-1) }
-
-        // Top outline
-        {
-          const yTop = 0.62
-          const nose = halfL
-          const tail = -halfL
-          const hips = halfW * 0.98
-          const waist = halfW * 0.72
-          const deck = halfW * 0.90
-          const outlineTop: THREE.Vector3[] = [
-            V( tail, yTop,  hips * 0.96 ),
-            V( tail+0.35, yTop,  deck ),
-            V( -0.10, yTop,  waist ),
-            V( 0.65, yTop,  waist*0.88 ),
-            V( nose*0.55, yTop,  waist*0.55 ),
-            V( nose*0.9, yTop,  waist*0.22 ),
-            V( nose, yTop,  0.0 ),
-            V( nose*0.9, yTop, -waist*0.22 ),
-            V( nose*0.55, yTop,-waist*0.55 ),
-            V( 0.65, yTop, -waist*0.88 ),
-            V( -0.10, yTop, -waist ),
-            V( tail+0.35, yTop, -deck ),
-            V( tail, yTop, -hips * 0.96 ),
-          ]
-          poly(outlineTop, true)
+        if (!loaded) {
+          console.warn('No GLB source could be loaded. Car will be hidden.')
+          group.visible = false
         }
-
-        // Roof and A-pillar creases
-        {
-          const zA = halfW*0.62
-          poly([ V( halfL*0.38, 0.60,  zA), V( halfL*0.05,  0.80,  zA*0.94), V(-halfL*0.15,  0.82,  zA*0.88), V(-halfL*0.40,  0.74,  zA*0.86) ])
-          poly([ V( halfL*0.38, 0.60, -zA), V( halfL*0.05,  0.80, -zA*0.94), V(-halfL*0.15,  0.82, -zA*0.88), V(-halfL*0.40,  0.74, -zA*0.86) ])
-          poly([ V( halfL*0.05, 0.80, 0), V(-halfL*0.15,0.82, 0), V(-halfL*0.40,0.74, 0) ])
-        }
-
-        // Side profile (sill, beltline, intake)
-        const addSide = (s:number) => {
-          poly([
-            V( halfL*0.90, yBase+0.06,  s*halfW*0.82 ),
-            V( halfL*0.35, yBase+0.10,  s*halfW*0.95 ),
-            V( 0.20,       yBase+0.14,  s*halfW*0.96 ),
-            V(-halfL*0.15, yBase+0.16,  s*halfW*0.88 ),
-            V(-halfL*0.45, yBase+0.18,  s*halfW*0.85 ),
-            V(-halfL*0.95, yBase+0.16,  s*halfW*0.80 ),
-          ])
-          poly([
-            V( halfL*0.65, 0.44, s*halfW*0.72 ),
-            V( 0.20,       0.48, s*halfW*0.86 ),
-            V(-0.05,       0.50, s*halfW*0.82 ),
-            V(-halfL*0.40, 0.52, s*halfW*0.74 ),
-            V(-halfL*0.70, 0.50, s*halfW*0.70 ),
-          ])
-          poly([
-            V( 0.15, 0.44, s*halfW*0.86 ),
-            V(-0.05, 0.54, s*halfW*0.96 ),
-            V(-0.25, 0.58, s*halfW*0.90 ),
-            V(-0.45, 0.56, s*halfW*0.82 ),
-          ])
-        }
-        addSide(1); addSide(-1)
-
-        // Front nose V and corner sweeps
-        {
-          const xF = halfL
-          const zIn = halfW*0.72, zOut = halfW*0.95
-          poly([ V(xF, 0.45, 0), V(xF*0.80, 0.50,  zIn) ])
-          poly([ V(xF, 0.45, 0), V(xF*0.80, 0.50, -zIn) ])
-          poly([ V(xF*0.92, 0.22,  zOut), V(xF*0.70, 0.24,  zIn), V(xF*0.55, 0.25,  zIn*0.85) ])
-          poly([ V(xF*0.92, 0.22, -zOut), V(xF*0.70, 0.24, -zIn), V(xF*0.55, 0.25, -zIn*0.85) ])
-        }
-
-        // Rear deck engine "X" brace + lip
-        {
-          const x0 = -halfL*0.20, x1 = -halfL*0.62
-          const z0 = halfW*0.36
-          const y = 0.64
-          seg(V(x0, y,  z0), V(x1, y, -z0))
-          seg(V(x0, y, -z0), V(x1, y,  z0))
-          poly([
-            V(-halfL*0.65, 0.62,  halfW*0.60),
-            V(-halfL*0.85, 0.60,  halfW*0.70),
-            V(-halfL,      0.58,  halfW*0.62),
-          ])
-          poly([
-            V(-halfL*0.65, 0.62, -halfW*0.60),
-            V(-halfL*0.85, 0.60, -halfW*0.70),
-            V(-halfL,      0.58, -halfW*0.62),
-          ])
-        }
-
-        // Spoiler (wing)
-        {
-          const y = 0.72
-          const span = halfW*1.10
-          poly([
-            V(-halfL*0.80, y,  span*0.80),
-            V(-halfL*0.55, y,  span),
-            V(-halfL*0.30, y,  span*0.80),
-          ])
-          poly([
-            V(-halfL*0.80, y, -span*0.80),
-            V(-halfL*0.55, y, -span),
-            V(-halfL*0.30, y, -span*0.80),
-          ])
-          seg(V(-halfL*0.55, y,  span), V(-halfL*0.55, y-0.16,  halfW*0.80))
-          seg(V(-halfL*0.55, y, -span), V(-halfL*0.55, y-0.16, -halfW*0.80))
-        }
-
-        // Wheel arches (elliptical arcs) + wheels
-        const addArchesAndWheels = (s:number) => {
-          const zc = s*halfW*0.82
-          arcXZ( halfL*0.35, yWheel, zc, 0.50, 0.52, Math.PI*0.15, Math.PI*0.85, 18)
-          arcXZ(-halfL*0.28, yWheel, zc, 0.56, 0.58, Math.PI*0.15, Math.PI*0.85, 18)
-          const fcx = halfL*0.35, rcx = -halfL*0.28
-          circleYZ(fcx, yWheel, zc, rWheel, 28); spokesYZ(fcx, yWheel, zc, rWheel*0.92, 10); circleYZ(fcx, yWheel, zc, rWheel*0.30, 16)
-          circleYZ(rcx, yWheel, zc, rWheel, 28); spokesYZ(rcx, yWheel, zc, rWheel*0.92, 10); circleYZ(rcx, yWheel, zc, rWheel*0.30, 16)
-        }
-        addArchesAndWheels(1); addArchesAndWheels(-1)
-
-        // Door polygon hints
-        const addDoor = (s:number) => {
-          poly([
-            V( 0.10, 0.46, s*halfW*0.88 ),
-            V(-0.05, 0.58, s*halfW*0.96 ),
-            V(-0.28, 0.60, s*halfW*0.88 ),
-            V(-0.18, 0.46, s*halfW*0.80 ),
-            V( 0.10, 0.46, s*halfW*0.88 ),
-          ])
-        }
-        addDoor(1); addDoor(-1)
-
-        return new Float32Array(pos)
       })()
 
-      geoFat.setPositions(positions)
-      geoThin.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+      function prepareModel(scene: THREE.Object3D) {
+        // Center, scale to target length, drop to ground
+        const bbox = new THREE.Box3().setFromObject(scene)
+        const size = new THREE.Vector3()
+        bbox.getSize(size)
 
-      // Showcase motion (gentle figure-8)
+        // Auto-scale by X size (length)
+        const lengthX = Math.max(0.001, size.x)
+        const scale = opts.targetLengthMeters / lengthX
+        scene.scale.setScalar(scale)
+
+        // Recompute bounds after scale
+        const bbox2 = new THREE.Box3().setFromObject(scene)
+        const size2 = new THREE.Vector3(); const center2 = new THREE.Vector3()
+        bbox2.getSize(size2); bbox2.getCenter(center2)
+
+        // Move so center XZ is at origin
+        scene.position.x = scene.position.x - center2.x
+        scene.position.z = scene.position.z - center2.z
+        // Lower to ground (yGround handled by parent 'group')
+        scene.position.y = scene.position.y - bbox2.min.y
+
+        // Material prep + candidate paint detection
+        scene.traverse((obj) => {
+          const mesh = obj as THREE.Mesh
+          if (!mesh.isMesh) return
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+          for (const m of mats) {
+            if (!m) continue
+            if (!originals.has(m)) {
+              originals.set(m, {
+                color: (m as any).color ? (m as any).color.clone() : undefined,
+                emissive: (m as any).emissive ? (m as any).emissive.clone() : undefined
+              })
+            }
+            // Heuristic: pick likely body/paint materials by name or attributes
+            const nm = ((m.name || '') + ' ' + (mesh.name || '')).toLowerCase()
+            const nameHit = /paint|carpaint|body|exterior|coat|shell|door|hood|roof|fender/.test(nm)
+            const pbr = (m as any)
+            const hasColor = !!pbr.color
+            const nonGlass = !/glass|window|mirror|windshield|headlight|taillight/.test(nm)
+            const notTire = !/tire|wheel|rim|rubber|brake|caliper/.test(nm)
+            if ((nameHit || (hasColor && nonGlass && notTire)) && pbr instanceof THREE.MeshStandardMaterial) {
+              // Prefer metallic paint-like
+              candidatePaintMats.add(m)
+              // Ensure tone mapping works nicely
+              pbr.toneMapped = true
+            }
+            // Improve visuals
+            if ((m as any).side !== THREE.FrontSide) (m as any).side = THREE.FrontSide
+            if ((m as any).transparent && (m as any).opacity < 0.04) (m as any).opacity = 0.04
+          }
+        })
+
+        holder.add(scene)
+      }
+
+      function setColor(albumColor: THREE.Color) {
+        // Apply tint to candidate car paint; subtle emissive tint to others
+        const temp = new THREE.Color()
+        holder.traverse((obj) => {
+          const mesh = obj as THREE.Mesh
+          if (!mesh.isMesh) return
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+          for (const m of mats) {
+            if (!m) continue
+            const orig = originals.get(m)
+            // Restore from originals each time (idempotent)
+            if (orig?.color && (m as any).color) (m as any).color.copy(orig.color)
+            if (orig?.emissive && (m as any).emissive) (m as any).emissive.copy(orig.emissive)
+
+            const std = m as any
+            if (candidatePaintMats.has(m) && std.color) {
+              // Multiply base color with album color (slightly desaturated for readability)
+              temp.copy(albumColor)
+              const l = 0.2126*temp.r + 0.7152*temp.g + 0.0722*temp.b
+              if (l < 0.3) temp.multiplyScalar(1.18).clampScalar(0,1)
+              // Blend: keep some original paint hue (0.4) and apply album color (0.6)
+              std.color.lerp(temp, 0.6)
+              std.needsUpdate = true
+            } else if (std.emissive) {
+              // Very subtle emissive tint
+              temp.copy(albumColor).multiplyScalar(0.06)
+              std.emissive.lerp(temp, 0.6)
+              std.needsUpdate = true
+            }
+          }
+        })
+      }
+
+      // Gentle showcase motion
       const state = { t: 0 }
       function update(dt: number, env: { t: number; floorHalf: number }) {
         state.t += dt * 0.8
@@ -1149,22 +1095,21 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         group.rotation.y = a * 0.35
       }
 
-      function fallbackToThin() {
-        if (!linesThin.visible) {
-          linesFat.visible = false
-          linesThin.visible = true
-        }
-      }
+      function setResolution() { /* not needed for GLB */ }
 
       function dispose() {
         group.removeFromParent()
-        geoFat.dispose()
-        ;(matFat as any).dispose?.()
-        geoThin.dispose()
-        matThin.dispose()
+        holder.traverse((obj) => {
+          const mesh = obj as THREE.Mesh
+          if (mesh.isMesh) {
+            if (Array.isArray(mesh.material)) mesh.material.forEach(m => (m as any).dispose?.())
+            else (mesh.material as any)?.dispose?.()
+            mesh.geometry?.dispose?.()
+          }
+        })
       }
 
-      return { group, setResolution, update, dispose, setColor, fallbackToThin }
+      return { group, setResolution, update, dispose, setColor }
     }
 
   // Only re-run when renderScale/bloom/accessibility/auth change

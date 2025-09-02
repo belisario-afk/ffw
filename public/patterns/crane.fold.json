@@ -1,0 +1,18 @@
+{
+  "file_spec": "1.1",
+  "file_creator": "ffw",
+  "vertices_coords": [
+    [0,0],[1,0],[1,1],[0,1],
+    [0.5,0.0],[1.0,0.5],[0.5,1.0],[0.0,0.5]
+  ],
+  "edges_vertices": [
+    [0,2],  // diag1
+    [1,3],  // diag2
+    [4,6],  // sink-ish horizontal
+    [7,5],  // wing axis left-right
+    [6,2],  // tail tip approx
+    [0,4]   // base helper
+  ],
+  "edges_assignment": ["V","V","M","M","M","F"],
+  "edges_foldAngle": [180,180,150,110,60,0]
+}

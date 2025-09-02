@@ -3,13 +3,14 @@ import * as THREE from 'three'
 import { createRenderer, createComposer } from '../../three/Renderer'
 import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
 import { getPlaybackState } from '../../spotify/api'
+import { loadFoldPattern, type FoldPatternCreases } from '../origami/fold'
 
 type Props = {
   quality: { renderScale: 1 | 1.25 | 1.5 | 1.75 | 2; bloom: boolean }
   accessibility: { epilepsySafe: boolean; reducedMotion: boolean; highContrast: boolean }
 }
 
-type PatternName = 'Quad Base' | 'Fox Head' | 'Crane Simple'
+type PatternName = 'Quad Base' | 'Fox Head' | 'Crane Simple' | 'FOLD: Fox' | 'FOLD: Crane'
 
 type Cfg = {
   exposure: number
@@ -27,7 +28,7 @@ type Cfg = {
   pattern: PatternName
 }
 
-const LS_KEY = 'ffw.origami.v2'
+const LS_KEY = 'ffw.origami.v3'
 const DEFAULT_CFG: Cfg = {
   exposure: 1.06,
   saturation: 1.08,
@@ -39,7 +40,7 @@ const DEFAULT_CFG: Cfg = {
   autoPlay: true,
   foldSpeed: 0.9,
   foldPause: 0.7,
-  tileIntensity: 0.2,
+  tileIntensity: 0.1, // lower tile mix to avoid perceived “stretch”
   backsideDarken: 0.22,
   pattern: 'Fox Head'
 }
@@ -78,19 +79,14 @@ function makeUniformSetters(matRef: React.MutableRefObject<THREE.ShaderMaterial 
 // Crease system (CPU)
 type Crease = {
   id: string
-  // crease line: point p (in plane), unit dir d (in plane)
-  p: THREE.Vector2
-  d: THREE.Vector2
-  // which side folds (1 means side where perp·(pos-p) > 0; -1 the other side)
-  side: 1 | -1
-  // target angle in radians (positive rotates following right-hand rule around axis (d.x, d.y, 0))
-  angle: number
+  p: THREE.Vector2         // point on crease
+  d: THREE.Vector2         // unit direction of crease in-plane
+  side: 1 | -1             // which side rotates
+  angle: number            // target angle (radians)
 }
 type FoldStep = { creaseId: string; duration: number; pauseAfter: number }
-
 type Pattern = {
-  name: PatternName
-  // square extent (half-size)
+  name: string
   half: number
   creases: Crease[]
   sequence: FoldStep[]
@@ -101,27 +97,17 @@ const PI = Math.PI
 const DEG = (a: number) => (a * PI) / 180
 
 // Prebaked patterns (approximate silhouettes)
-function makePatterns(): Pattern[] {
-  const half = 0.7 // sheet half-size (plane is 1.4)
+function makeBuiltInPatterns(): Pattern[] {
+  const half = 0.7
   const p: Pattern[] = []
 
-  // Quad base (fold right -> top -> diag)
   p.push({
     name: 'Quad Base',
     half,
     creases: [
-      // vertical hinge x=0 (fold right half over)
       { id: 'vert', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(0, 1), side: 1, angle: PI },
-      // horizontal hinge y=0 (fold top half down)
       { id: 'horiz', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(1, 0), side: 1, angle: PI },
-      // diagonal hinge x+y=0 (fold upper-right)
-      {
-        id: 'diag',
-        p: new THREE.Vector2(0, 0),
-        d: new THREE.Vector2(1, 1).normalize(),
-        side: 1,
-        angle: PI
-      }
+      { id: 'diag', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(1, 1).normalize(), side: 1, angle: PI }
     ],
     sequence: [
       { creaseId: 'vert', duration: 1.2, pauseAfter: 0.25 },
@@ -130,19 +116,13 @@ function makePatterns(): Pattern[] {
     ]
   })
 
-  // Fox head (ears + snout). Few folds, strong silhouette.
   p.push({
     name: 'Fox Head',
     half,
     creases: [
-      // Fold to triangle: valley along y = x, move side x>y
       { id: 'tri', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(1, 1).normalize(), side: 1, angle: PI },
-      // Ears: fold two small side triangles back/out (mountain-ish ~60°)
-      // left ear hinge: nearly vertical line near x=-half*0.35
       { id: 'earL', p: new THREE.Vector2(-half * 0.35, 0), d: new THREE.Vector2(0, 1), side: -1, angle: DEG(130) },
-      // right ear hinge: near x=+half*0.35
       { id: 'earR', p: new THREE.Vector2(half * 0.35, 0), d: new THREE.Vector2(0, 1), side: 1, angle: DEG(130) },
-      // Snout pinch: a small fold along y = -half*0.2, horizontal, fold top down 40°
       { id: 'snout', p: new THREE.Vector2(0, -half * 0.2), d: new THREE.Vector2(1, 0), side: 1, angle: DEG(40) }
     ],
     sequence: [
@@ -153,20 +133,15 @@ function makePatterns(): Pattern[] {
     ]
   })
 
-  // Crane simple (approx bird base feel).
   p.push({
     name: 'Crane Simple',
     half,
     creases: [
-      // Pre-fold to square base:
       { id: 'diag1', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(1, 1).normalize(), side: 1, angle: PI },
       { id: 'diag2', p: new THREE.Vector2(0, 0), d: new THREE.Vector2(1, -1).normalize(), side: 1, angle: PI },
-      // Open sink (approx): fold bottom triangle up 150°
       { id: 'sink', p: new THREE.Vector2(0, -half * 0.15), d: new THREE.Vector2(1, 0), side: 1, angle: DEG(150) },
-      // Wings: fold left and right out (mountain) ~110°
       { id: 'wingL', p: new THREE.Vector2(-half * 0.25, 0), d: new THREE.Vector2(0, 1), side: -1, angle: DEG(110) },
       { id: 'wingR', p: new THREE.Vector2(half * 0.25, 0), d: new THREE.Vector2(0, 1), side: 1, angle: DEG(110) },
-      // Tail tip: small fold near top to sharpen
       { id: 'tail', p: new THREE.Vector2(0, half * 0.35), d: new THREE.Vector2(1, 0), side: -1, angle: DEG(60) }
     ],
     sequence: [
@@ -192,11 +167,23 @@ function rotateAroundLine(out: THREE.Vector3, p: THREE.Vector3, q: THREE.Vector3
   const par = new THREE.Vector3().copy(a).multiplyScalar(dotp * (1 - c))
   out.copy(d).multiplyScalar(c).add(cross).add(par).add(q)
 }
+function rotateNormal(out: THREE.Vector3, n: THREE.Vector3, a: THREE.Vector3, ang: number) {
+  const q = new THREE.Quaternion().setFromAxisAngle(a, ang)
+  out.copy(n).applyQuaternion(q)
+}
 
 // Classify side of a 2D line: sign(perp(d) · (x - p))
 function sideOfLine2D(pos: THREE.Vector2, p: THREE.Vector2, d: THREE.Vector2): number {
-  const perp = new THREE.Vector2(-d.y, d.x) // rotate 90°
-  return Math.sign(perp.dot(new THREE.Vector2().subVectors(pos, p))) || 0
+  const perp = new THREE.Vector2(-d.y, d.x)
+  const val = perp.dot(new THREE.Vector2().subVectors(pos, p))
+  if (Math.abs(val) < 1e-5) return 0
+  return Math.sign(val)
+}
+
+// Distance from point to infinite line
+function distToLine2D(pos: THREE.Vector2, p: THREE.Vector2, d: THREE.Vector2): number {
+  const perp = new THREE.Vector2(-d.y, d.x)
+  return Math.abs(perp.dot(new THREE.Vector2().subVectors(pos, p)))
 }
 
 export default function OrigamiFold({ quality, accessibility }: Props) {
@@ -225,9 +212,26 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
   })
   useEffect(() => { try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)) } catch {} }, [cfg])
 
-  // Patterns memo
-  const patterns = useMemo(() => makePatterns(), [])
-  const pattern = useMemo(() => patterns.find(p => p.name === cfg.pattern) || patterns[0], [patterns, cfg.pattern])
+  // Patterns: built-in + optional FOLD
+  const builtIns = useMemo(() => makeBuiltInPatterns(), [])
+  const [foldCreases, setFoldCreases] = useState<FoldPatternCreases | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadFold() {
+      if (cfg.pattern === 'FOLD: Fox') {
+        const c = await loadFoldPattern('/patterns/fox.fold.json').catch(() => null)
+        if (!cancelled) setFoldCreases(c)
+      } else if (cfg.pattern === 'FOLD: Crane') {
+        const c = await loadFoldPattern('/patterns/crane.fold.json').catch(() => null)
+        if (!cancelled) setFoldCreases(c)
+      } else {
+        if (!cancelled) setFoldCreases(null)
+      }
+    }
+    loadFold()
+    return () => { cancelled = true }
+  }, [cfg.pattern])
 
   // HUD auto-hide near top-middle
   useEffect(() => {
@@ -352,34 +356,60 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
       albC3.current.copy(picks[2] || albC2.current)
     }
 
+    // Resolve pattern (built-in or FOLD)
+    function resolvePattern(): Pattern {
+      const bi = builtIns.find(b => b.name === cfg.pattern)
+      if (bi) return bi
+      const half = 0.7
+      if (foldCreases) {
+        const creases: Crease[] = foldCreases.creases.map((c, i) => ({
+          id: c.id || `fold_${i}`,
+          p: new THREE.Vector2(c.p.x, c.p.y),
+          d: new THREE.Vector2(c.d.x, c.d.y).normalize(),
+          side: c.side as 1 | -1,
+          angle: c.angle
+        }))
+        const sequence: FoldStep[] = creases.map((cr, idx) => ({
+          creaseId: cr.id, duration: 0.9, pauseAfter: idx === creases.length - 1 ? 0.8 : 0.2
+        }))
+        return { name: foldCreases.name, half, creases, sequence }
+      }
+      return builtIns[0]
+    }
+
     // Geometry (plane) and CPU folding buffers
-    const segs = 90
+    const pattern = resolvePattern()
+    const segs = 96
     const size = pattern.half * 2
     const plane = new THREE.PlaneGeometry(size, size, segs, segs)
-    plane.rotateX(0) // keep in XY plane
     plane.computeVertexNormals()
 
     // CPU fold buffers
     const posAttr = plane.getAttribute('position') as THREE.BufferAttribute
     const nrmAttr = plane.getAttribute('normal') as THREE.BufferAttribute
-    const uvAttr = plane.getAttribute('uv') as THREE.BufferAttribute
     const vertexCount = posAttr.count
 
     // Original positions/normals (copy for reset each frame)
     const pos0 = new Float32Array(posAttr.array as ArrayLike<number>)
     const nrm0 = new Float32Array(nrmAttr.array as ArrayLike<number>)
 
-    // Precompute side-masks per crease for original 2D coords
+    // Precompute masks per crease for original coords (and pin-lines)
     const masks: Record<string, Uint8Array> = {}
+    const pins: Record<string, Uint8Array> = {}
+    const PIN_EPS = size / segs * 0.9 // pin vertices lying on crease line within epsilon
     for (const cDef of pattern.creases) {
       const m = new Uint8Array(vertexCount)
+      const p = new Uint8Array(vertexCount)
       for (let i = 0; i < vertexCount; i++) {
         const x = pos0[i * 3 + 0], y = pos0[i * 3 + 1]
         const side = sideOfLine2D(new THREE.Vector2(x, y), cDef.p, cDef.d)
         const ok = cDef.side === 1 ? side > 0 : side < 0
         m[i] = ok ? 1 : 0
+        const dline = distToLine2D(new THREE.Vector2(x, y), cDef.p, cDef.d)
+        p[i] = (dline <= PIN_EPS) ? 1 : 0
       }
       masks[cDef.id] = m
+      pins[cDef.id] = p
     }
 
     // Shader (fragment does fresnel/palette; vertex just passes through)
@@ -406,6 +436,9 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
     const mat = new THREE.ShaderMaterial({
       uniforms,
       side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
       vertexShader: `
         varying vec2 vUv;
         varying vec3 vNormal;
@@ -490,40 +523,42 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
     const albumIv = window.setInterval(loadAlbum, 8000)
 
     // Fold timeline state
-    type PhaseState = { idx: number; tIn: number } // current step index and time into it
+    type PhaseState = { idx: number; tIn: number }
     let ph: PhaseState = { idx: 0, tIn: 0 }
 
     // Helpers for fold application
     const vTmp = new THREE.Vector3()
-    const q = new THREE.Vector3()
+    const q3 = new THREE.Vector3()
     const a3 = new THREE.Vector3()
-    const p3 = new THREE.Vector3()
+    const nTmp = new THREE.Vector3()
 
     function resetToFlat() {
-      // copy pos0/nrm0 back
       ;(posAttr.array as Float32Array).set(pos0)
       ;(nrmAttr.array as Float32Array).set(nrm0)
     }
 
     function applyFold(crease: Crease, angle: number) {
-      // rotate vertices on selected side by angle around line (p,d) in 3D
-      q.set(crease.p.x, crease.p.y, 0)
+      q3.set(crease.p.x, crease.p.y, 0)
       a3.set(crease.d.x, crease.d.y, 0).normalize()
       const mask = masks[crease.id]
+      const pin = pins[crease.id]
       const arr = posAttr.array as Float32Array
       const nrm = nrmAttr.array as Float32Array
       for (let i = 0; i < vertexCount; i++) {
-        if (!mask[i]) continue
         const ix = i * 3
-        // position
-        p3.set(arr[ix], arr[ix + 1], arr[ix + 2])
-        rotateAroundLine(vTmp, p3, q, a3, angle)
+        if (pin[i]) {
+          // pin hinge vertices on the line (no movement)
+          continue
+        }
+        if (!mask[i]) continue
+        // position rotation around line
+        vTmp.set(arr[ix], arr[ix + 1], arr[ix + 2])
+        rotateAroundLine(vTmp, vTmp, q3, a3, angle)
         arr[ix] = vTmp.x; arr[ix + 1] = vTmp.y; arr[ix + 2] = vTmp.z
-        // normal: start from current (already transformed by earlier steps)
-        p3.set(nrm[ix], nrm[ix + 1], nrm[ix + 2])
-        // normals rotate the same way (around the same axis/anchor; anchor irrelevant for vectors, but using q yields correct Rodrigues)
-        rotateAroundLine(vTmp, p3, new THREE.Vector3(0,0,0), a3, angle)
-        nrm[ix] = vTmp.x; nrm[ix + 1] = vTmp.y; nrm[ix + 2] = vTmp.z
+        // normal rotation around axis
+        nTmp.set(nrm[ix], nrm[ix + 1], nrm[ix + 2])
+        rotateNormal(nTmp, nTmp, a3, angle)
+        nrm[ix] = nTmp.x; nrm[ix + 1] = nTmp.y; nrm[ix + 2] = nTmp.z
       }
     }
 
@@ -539,7 +574,6 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
       const low = latest?.bands?.low ?? 0.06
       const mid = latest?.bands?.mid ?? 0.06
       const high = latest?.bands?.high ?? 0.06
-      const loud = latest?.loudness ?? 0.12
       const beat = latest?.beat ? 1.0 : 0.0
 
       const safe = (accessibility.epilepsySafe || accessibility.reducedMotion) ? 1.0 : 0.0
@@ -555,61 +589,51 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
       setters.setF('uBackDark', cfg.backsideDarken)
       setters.setF('uTileIntensity', cfg.tileIntensity)
 
-      // drive tile mix subtly with mid after full fold cycle
-      const loopDone = ph.idx >= pattern.sequence.length
-      const desiredTile = loopDone ? 1.0 : 0.0
+      // tile phase only after cycle
       const uTile = (matRef.current.uniforms.uTileMix.value as number) || 0
+      const cycleDone = ph.idx >= resolvePattern().sequence.length
+      const desiredTile = cycleDone ? 1.0 : 0.0
       const k = 1 - Math.pow(0.03, dt)
-      setters.setF('uTileMix', THREE.MathUtils.lerp(uTile, desiredTile * (0.2 + 0.4 * (mid + high)), k))
+      setters.setF('uTileMix', THREE.MathUtils.lerp(uTile, desiredTile * (0.15 + 0.35 * (mid + high)), k))
 
       // Fold simulation
       resetToFlat()
 
+      const patternNow = resolvePattern()
       if (cfg.autoPlay) {
-        // iterate through steps, applying full angles for completed ones and partial for current
         const spd = THREE.MathUtils.lerp(cfg.foldSpeed, Math.min(cfg.foldSpeed, 0.6), safe)
-        ph.tIn += dt * (spd * (1.0 + low * 0.5) + (beat > 0.5 ? 0.15 : 0.0))
+        ph.tIn += dt * (spd * (1.0 + low * 0.5) + (beat > 0.5 ? 0.12 : 0.0))
 
-        let accIdx = 0
-        for (; accIdx < pattern.sequence.length; accIdx++) {
-          const step = pattern.sequence[accIdx]
-          if (accIdx < ph.idx) {
-            // fully applied
-            const crease = pattern.creases.find(c => c.id === step.creaseId)!
+        // apply fully-complete steps
+        for (let i = 0; i < patternNow.sequence.length; i++) {
+          const step = patternNow.sequence[i]
+          const crease = patternNow.creases.find(c => c.id === step.creaseId)!
+          if (i < ph.idx) {
             applyFold(crease, crease.angle)
-            continue
-          }
-          if (accIdx === ph.idx) {
-            const crease = pattern.creases.find(c => c.id === step.creaseId)!
+          } else if (i === ph.idx) {
             const t01 = Math.min(1, ph.tIn / Math.max(0.0001, step.duration))
-            const eased = t01 * t01 * (3 - 2 * t01) // smoothstep ease
+            const eased = t01 * t01 * (3 - 2 * t01)
             applyFold(crease, crease.angle * eased)
-            // not done yet: break to avoid applying following steps
             break
-          }
+          } else break
         }
 
-        // step progression
-        const cur = pattern.sequence[ph.idx]
+        const cur = patternNow.sequence[ph.idx]
         if (cur && ph.tIn >= cur.duration) {
-          // wait pause, then advance
           const over = ph.tIn - cur.duration
           if (over >= cur.pauseAfter) {
             ph.idx++
             ph.tIn = 0
           }
         }
-        // loop
-        if (ph.idx >= pattern.sequence.length && ph.tIn > 2.5) {
+        if (ph.idx >= patternNow.sequence.length && ph.tIn > 2.4) {
           ph = { idx: 0, tIn: 0 }
         }
       } else {
-        // reactive breathing
         const react = Math.min(1, low * 0.9 + mid * 0.3)
-        // apply partial of first 2 steps to keep a shape
-        for (let i = 0; i < Math.min(2, pattern.sequence.length); i++) {
-          const step = pattern.sequence[i]
-          const crease = pattern.creases.find(c => c.id === step.creaseId)!
+        for (let i = 0; i < Math.min(2, patternNow.sequence.length); i++) {
+          const step = patternNow.sequence[i]
+          const crease = patternNow.creases.find(c => c.id === step.creaseId)!
           const factor = i === 0 ? react : react * 0.7
           applyFold(crease, crease.angle * factor)
         }
@@ -673,6 +697,8 @@ export default function OrigamiFold({ quality, accessibility }: Props) {
           <option value="Fox Head">Fox Head</option>
           <option value="Crane Simple">Crane (Simple)</option>
           <option value="Quad Base">Quad Base</option>
+          <option value="FOLD: Fox">FOLD: Fox</option>
+          <option value="FOLD: Crane">FOLD: Crane</option>
         </select>
         <button onClick={() => setPanelOpen(o => !o)} style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #2b2f3a', background: '#0f1218', color: '#cfe7ff', cursor: 'pointer' }}>
           {panelOpen ? 'Close Visual Settings' : 'Visual Settings'}

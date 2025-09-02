@@ -532,9 +532,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           if (synced?.length) {
             const first = synced[0]?.text || line
             await billboard.setLineNow(first)
+            billboard.triggerPop(0.8)
             if (synced[1]?.text) await billboard.prepareNext(synced[1].text)
           } else if (line) {
             await billboard.setLineNow(line)
+            billboard.triggerPop(0.8)
           }
         }
       } catch {}
@@ -659,8 +661,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
               billboard.prepareNext(nextText)
               if (idx === 0 && !text) {
                 billboard.setLineNow(text)
+                billboard.triggerPop(1.0)
               } else {
-                billboard.prepareNext(text).then(() => billboard.beginSwap())
+                billboard.prepareNext(text).then(() => {
+                  billboard.beginSwap()
+                  billboard.triggerPop(1.0)
+                })
               }
               if (marqueeMat && text !== marqueeText) { marqueeText = text; setupMarquee(text, 0.92) }
             }
@@ -684,7 +690,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         }
       }
 
-      // Animate billboard transitions
+      // Animate billboard transitions and pop decay
       billboard.update(dt)
 
       // camera autopilot + bob

@@ -26,7 +26,6 @@ const stateKey = 'ffw_auth_state'
 export function restoreFromStorage(): AuthState | null {
   const raw = localStorage.getItem(storageKey)
   if (!raw) return null
-  // If it's clearly not JSON, clear and exit.
   if (raw.trim().charAt(0) !== '{') {
     try { localStorage.removeItem(storageKey) } catch {}
     return null
@@ -34,7 +33,6 @@ export function restoreFromStorage(): AuthState | null {
   try {
     const s = JSON.parse(raw) as Partial<Stored>
     if (!s || typeof s.access_token !== 'string' || typeof s.refresh_token !== 'string' || typeof s.expires_at !== 'number') {
-      // Shape invalid — clear
       try { localStorage.removeItem(storageKey) } catch {}
       return null
     }
@@ -45,7 +43,6 @@ export function restoreFromStorage(): AuthState | null {
       scope: s.scope || ''
     }
   } catch {
-    // If parsing fails, clear and return null to avoid JSON errors from old/bad values.
     try { localStorage.removeItem(storageKey) } catch {}
     return null
   }
@@ -89,7 +86,7 @@ export function signOut() {
 }
 
 /**
- * Robustly handle Spotify callback parameters (search or hash).
+ * Handle Spotify callback parameters (search or hash) and exchange code for tokens.
  */
 export async function handleAuthCodeCallback(url: string): Promise<AuthState> {
   const u = new URL(url)
@@ -108,11 +105,10 @@ export async function handleAuthCodeCallback(url: string): Promise<AuthState> {
   const state = params.get('state')
   const err = params.get('error')
 
-  if (err) throw new Error(`Spotify auth error: ${err}`)
-  if (!code) throw new Error('No authorization code in callback')
-
+  if (err) throw new Error(err)
+  if (!code) throw new Error('Missing authorization code')
   const expectedState = sessionStorage.getItem(stateKey)
-  if (!expectedState || expectedState !== state) throw new Error('State mismatch')
+  if (!state || state !== expectedState) throw new Error('Invalid auth state')
   const verifier = sessionStorage.getItem(verifierKey)
   if (!verifier) throw new Error('Missing PKCE verifier')
 
@@ -123,62 +119,78 @@ export async function handleAuthCodeCallback(url: string): Promise<AuthState> {
     client_id: CONFIG.clientId,
     code_verifier: verifier
   })
+
   const res = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
+    body: body.toString()
   })
   if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`Token exchange failed: ${res.status} ${text}`)
+    const text = await res.text().catch(() => '')
+    throw new Error(`Token exchange failed: ${text || res.statusText}`)
   }
-  const data = await res.json() as any
-  const auth: AuthState = {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token,
-    expiresAt: Date.now() + (data.expires_in * 1000 - 30_000),
-    scope: data.scope
-  }
-  persistAuth(auth)
-  return auth
+  const json = await res.json()
+  const accessToken = json.access_token as string
+  const refreshToken = json.refresh_token as string
+  const expiresIn = (json.expires_in as number) || 3600
+  const scope = (json.scope as string) || ''
+  if (!accessToken || !refreshToken) throw new Error('Invalid token response')
+
+  const expiresAt = Date.now() + expiresIn * 1000 - 30_000
+
+  const a: AuthState = { accessToken, refreshToken, expiresAt, scope }
+
+  // Cleanup sensitive values after use
+  sessionStorage.removeItem(verifierKey)
+  sessionStorage.removeItem(stateKey)
+
+  return a
 }
 
-let refreshing: Promise<AuthState> | null = null
-
-export async function getAccessToken(): Promise<string | null> {
-  const curr = restoreFromStorage()
-  if (!curr) return null
-  if (Date.now() < curr.expiresAt - 15_000) return curr.accessToken
-  if (!refreshing) refreshing = refreshToken(curr.refreshToken)
-  const next = await refreshing
-  refreshing = null
-  return next.accessToken
-}
-
-export async function refreshToken(refreshTokenStr: string): Promise<AuthState> {
+/**
+ * Refresh the access token using the stored refresh token.
+ */
+export async function refreshAccessToken(prev: AuthState): Promise<AuthState> {
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
-    refresh_token: refreshTokenStr,
+    refresh_token: prev.refreshToken,
     client_id: CONFIG.clientId
   })
+
   const res = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
+    body: body.toString()
   })
   if (!res.ok) {
-    signOut()
-    const text = await res.text()
-    throw new Error(`Refresh failed: ${res.status} ${text}`)
+    const text = await res.text().catch(() => '')
+    throw new Error(`Token refresh failed: ${text || res.statusText}`)
   }
-  const data = await res.json()
-  const prev = restoreFromStorage()
-  const auth: AuthState = {
-    accessToken: data.access_token,
-    refreshToken: prev?.refreshToken || refreshTokenStr,
-    expiresAt: Date.now() + (data.expires_in * 1000 - 30_000),
-    scope: data.scope || prev?.scope || ''
-  }
-  persistAuth(auth)
-  return auth
+  const json = await res.json()
+  const accessToken = (json.access_token as string) || prev.accessToken
+  const refreshToken = (json.refresh_token as string) || prev.refreshToken
+  const expiresIn = (json.expires_in as number) || 3600
+  const scope = (json.scope as string) || prev.scope
+  const expiresAt = Date.now() + expiresIn * 1000 - 30_000
+  return { accessToken, refreshToken, expiresAt, scope }
+}
+
+/**
+ * Compatibility helpers for existing imports in src/spotify/api.ts
+ * - getAccessToken(): returns the current access token if present, otherwise null.
+ * - refreshToken(): refreshes and persists, returning the full updated AuthState.
+ */
+export function getAccessToken(): string | null {
+  const s = restoreFromStorage()
+  if (!s) return null
+  // If token is close to expiring, let callers decide to refresh via refreshToken()
+  return s.accessToken
+}
+
+export async function refreshToken(): Promise<AuthState> {
+  const s = restoreFromStorage()
+  if (!s) throw new Error('No stored auth to refresh')
+  const next = await refreshAccessToken(s)
+  persistAuth(next)
+  return next
 }

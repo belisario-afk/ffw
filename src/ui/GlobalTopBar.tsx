@@ -2,7 +2,7 @@ import React from 'react'
 import { usePlayback } from '../playback/PlaybackProvider'
 
 export default function GlobalTopBar() {
-  const { isSignedIn, status, signInAndPlay } = usePlayback()
+  const { isSignedIn, status, signIn } = usePlayback()
 
   return (
     <div
@@ -22,7 +22,7 @@ export default function GlobalTopBar() {
       }}
     >
       {!isSignedIn && (
-        <button onClick={signInAndPlay} style={btn} aria-label="Log in">
+        <button onClick={signIn} style={btn} aria-label="Log in">
           Log in
         </button>
       )}

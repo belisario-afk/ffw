@@ -7,7 +7,7 @@ type Props = {
 
 /**
 Transport bar with album art and controls.
-- Auth/UI buttons removed per request. Use the single global "Log in" button in the top bar.
+- One global “Log in” button (top bar) handles login + enabling SDK playback.
 - Controls are disabled until logged in.
 */
 
@@ -212,7 +212,7 @@ export default function PlayerController({ onOpenDevices }: Props) {
         </div>
       </div>
 
-      {/* Controls (no auth buttons here) */}
+      {/* Controls */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '0 0 auto' }}>
         <button onClick={doPrev} disabled={busy || !hasToken} style={btnStyle('#cfe7ff')} title="Previous">⏮</button>
         <button onClick={doTogglePlay} disabled={busy || !hasToken} style={btnStyle('#b7ffbf')} title="Play/Pause">
@@ -271,7 +271,7 @@ function btnToggle(active: boolean): React.CSSProperties {
 }
 function humanizeError(e: any): string {
   const msg = (e && (e.message || e.toString?.())) || 'Unexpected error'
-  if (/No access token/i.test(msg)) return 'Not signed in with Spotify'
+  if (/No access token/i.test(msg)) return 'Not logged in to Spotify'
   if (/401/.test(msg)) return 'Spotify session expired — please log in again'
   if (/403/.test(msg)) return 'Spotify refused the action (check Premium / device)'
   if (/404/.test(msg)) return 'No active Spotify device found'

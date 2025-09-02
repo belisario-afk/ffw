@@ -62,54 +62,7 @@ type LocalCfg = {
 }
 
 const LS_KEY = 'ffw.wire3d.settings.v2'
-
-// Place your blueprint image at: public/assets/aventador_blueprint.png
-// Or set a custom URL at runtime: window.FFW_WIRE_BLUEPRINT_URL = '...';
-const DEFAULT_BLUEPRINT_URL: string = `${import.meta.env.BASE_URL}assets/aventador_blueprint.png`
-
-
-function defaults(initial?: any): LocalCfg {
-  return {
-    path: initial?.path ?? 'Circle',
-    orbitSpeed: initial?.orbitSpeed ?? 0.35,
-    orbitRadius: initial?.orbitRadius ?? 9.5,
-    orbitElev: initial?.orbitElev ?? 0.06,
-    camBob: initial?.camBob ?? 0.12,
-    lineWidthPx: initial?.lineWidthPx ?? 1.8,
-    camera: {
-      fov: clamp(initial?.camera?.fov ?? 50, 30, 85),
-      minDistance: clamp(initial?.camera?.minDistance ?? 5, 3, 30),
-      maxDistance: clamp(initial?.camera?.maxDistance ?? 16, 6, 100),
-      minPolarAngle: clamp(initial?.camera?.minPolarAngle ?? (Math.PI * 0.12), 0, Math.PI / 2),
-      maxPolarAngle: clamp(initial?.camera?.maxPolarAngle ?? (Math.PI * 0.85), Math.PI / 4, Math.PI),
-      enablePan: true,
-      enableZoom: true,
-      enableDamping: true,
-      dampingFactor: 0.1,
-      rotateSpeed: 0.6,
-      zoomSpeed: 0.7,
-      panSpeed: 0.6,
-      autoRotate: false,
-      autoRotateSpeed: 0.5,
-      autoPath: true,
-      target: { x: 0, y: 2.2, z: 0 }
-    },
-    cameraPresets: {
-      enabled: true,
-      strength: 0.7
-    },
-    fx: {
-      beams: false,
-      groundRings: false,
-      chimneySmoke: false,
-      starfield: false,
-      bloomBreath: false,
-      lyricsMarquee: true,
-      mosaicFloor: false,
-      wireCar: true
-    }
-  }
-}
+const BP_LS_KEY = 'ffw.aventador.blueprint.dataurl' // stores your uploaded blueprint as a data URL
 
 export default function WireframeHouse3D({ auth, quality, accessibility, settings }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -121,6 +74,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   useEffect(() => { cfgRef.current = cfg }, [cfg])
 
   const [panelOpen, setPanelOpen] = useState(false)
+
+  // Blueprint UI state
+  const [bpStatus, setBpStatus] = useState<'none'|'loading'|'loaded'|'fallback'|'error'>(() => {
+    return localStorage.getItem(BP_LS_KEY) ? 'loaded' : 'none'
+  })
+  const [bpPreview, setBpPreview] = useState<string | null>(() => localStorage.getItem(BP_LS_KEY) || null)
+  const carApiRef = useRef<{ setImageSrc: (src: string) => Promise<void>, clear: () => void } | null>(null)
 
   // Billboard controller UI state (in Settings panel)
   const [bbEditEnabled, setBbEditEnabled] = useState(false)
@@ -217,7 +177,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       let r = 0, gr = 0, b = 0
       for (let i = 0; i < data.length; i += 4) { r += data[i]; gr += data[i+1]; b += data[i+2] }
       const n = data.length / 4
-      return new THREE.Color(r/(255*n), gr/(255*n), b/(255*n))
+      const col = new THREE.Color(r/(255*n), gr/(255*n), b/(255*n))
+      // Boost if too dark
+      const luminance = 0.2126*col.r + 0.7152*col.g + 0.0722*col.b
+      if (luminance < 0.35) col.multiplyScalar(1.25).clampScalar(0,1)
+      return col
     }
     function addMansionWindows(add: (p: THREE.Vector3, out: THREE.Vector3) => void) {
       const storyY = [0.6, 1.7, 2.8]
@@ -266,7 +230,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       motionBlur: false
     })
 
-    // Controls
+    // Controls (never add to scene)
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
@@ -320,10 +284,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     floorMesh.position.y = 0.001
     scene.add(floorMesh)
 
+    // Placeholder on floor tex
     const floorPlaceholder = createDarkPlaceholderTexture()
     floorMat.uniforms.tAlbum.value = floorPlaceholder
 
-    // Mosaic
+    // Mosaic (safe)
     const mosaicGroup = new THREE.Group()
     const tiles: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
     const tileN = 8
@@ -343,7 +308,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     mosaicGroup.visible = false
     scene.add(mosaicGroup)
 
-    // Mansion lines
+    // Wireframe mansion edges
     const mansionPositions = buildMansionEdges()
     const fatGeo = new LineSegmentsGeometry()
     fatGeo.setPositions(mansionPositions)
@@ -369,7 +334,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     thinLines.visible = false
     scene.add(thinLines)
 
-    // Windows
+    // Static windows
     const windowGroup = new THREE.Group()
     {
       const winGeom = new THREE.PlaneGeometry(0.22, 0.16)
@@ -383,7 +348,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       scene.add(windowGroup)
     }
 
-    // Billboard
+    // 3D Lyric Billboard
     const billboard = new LyricBillboard({
       baseColor: 0xffffff,
       outlineColor: accent2.getHex(),
@@ -395,7 +360,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     billboard.group.scale.setScalar(billboardScaleRef.current)
     scene.add(billboard.group)
 
-    // Starfield
+    // Optional starfield
     let starfield: THREE.Points | null = null
     {
       const g = new THREE.BufferGeometry()
@@ -438,7 +403,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       return mat
     })()
 
-    // Marquee
+    // Lyrics marquee (fallback/secondary)
     let marqueeMat: THREE.ShaderMaterial | null = null
     let marqueeTex: THREE.Texture | null = null
     let marqueeText = ''
@@ -534,32 +499,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           floorMat.uniforms.uOpacity.value = clamp(0.9 - (brightness - 0.6) * 0.25, 0.65, 0.9)
 
           const avg = await averageTextureColor(tex).catch(() => new THREE.Color(0x88c8ff))
-          // Nudge color to be brighter against dark floor
-          const hsv = { h: 0, s: 0, v: 0 }
-          avg.getHSV?.(hsv as any) // older three may not have getHSV; fallback below
-          const boosted = avg.clone()
-          try {
-            const c = avg.clone().convertLinearToSRGB()
-            const l = 0.2126*c.r + 0.7152*c.g + 0.0722*c.b
-            const boost = l < 0.35 ? 1.25 : 1.0
-            boosted.multiplyScalar(boost).clampScalar(0, 1)
-          } catch {}
-          carColorRef.current.copy(boosted)
+          carColorRef.current.copy(avg)
 
           floorTex?.dispose(); floorTex = tex
           floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
 
-          if (cfgRef.current.fx.mosaicFloor && tiles.length) {
-            mosaicGroup.visible = true
-            for (const t of tiles) {
-              t.material.map = tex
-              t.material.toneMapped = false
-              t.material.color.setScalar(0.85)
-              t.material.needsUpdate = true
-            }
-          } else {
-            mosaicGroup.visible = false
-          }
+          mosaicGroup.visible = !!cfgRef.current.fx.mosaicFloor
+          if (!mosaicGroup.visible) { /* floor visible */ }
         } else {
           mosaicGroup.visible = false
         }
@@ -592,21 +538,19 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     const albumIv = window.setInterval(loadAlbumCoverAndLyrics, 5000)
     const pbIv = window.setInterval(syncPlaybackClock, 2000)
 
-    // Reactivity (only used for subtle color breathing)
+    // Reactivity (for color breathing only)
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Blueprint-based Aventador wireframe (no drift physics, no underglow)
-    const blueprintUrl: string = (window as any)?.FFW_WIRE_BLUEPRINT_URL || DEFAULT_BLUEPRINT_URL
-    const car = createBlueprintAventador({
-      blueprintUrl,
-      dims: { L: 4.6, W: 2.04, H: 1.14 },
-      linePx: 1.35
-    }, renderer)
+    // Blueprint Aventador wireframe (no drift/underglow)
+    const car = createBlueprintAventador({ dims: { L: 4.6, W: 2.04, H: 1.14 }, linePx: 1.35 }, renderer, (st) => setBpStatus(st))
     car.group.visible = !!cfgRef.current.fx.wireCar
-    // Place the car slightly above album art
     car.group.position.y = 0.055
     scene.add(car.group)
+    carApiRef.current = { setImageSrc: car.setImageSrc, clear: car.clear }
+
+    // If user already uploaded a blueprint, load it
+    if (bpPreview) { car.setImageSrc(bpPreview).catch(() => {}) }
 
     // Resize
     const updateSizes = () => {
@@ -638,7 +582,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const cfgC = cfgRef.current
       const high = latest?.bands.high ?? 0.08
 
-      // Live-apply FOV
+      // Live-apply FOV from slider
       if (camera.fov !== cfgC.camera.fov) {
         camera.fov = cfgC.camera.fov
         camera.updateProjectionMatrix()
@@ -657,7 +601,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.minPolarAngle = cfgC.camera.minPolarAngle
       controls.maxPolarAngle = cfgC.camera.maxPolarAngle
 
-      // Apply billboard controller
+      // Apply billboard controller (reads refs, no scene re-init)
       if (bbEditRef.current) {
         if (bbModeRef.current === 'move') {
           const mv = moveVecRef.current
@@ -695,6 +639,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(high * 0.2, 0, 0.2))
       fatMat.color.set(accent); thinMat.color.set(accent)
 
+      // update billboard colors to match palette
       billboard.setColors(
         accent.clone().multiplyScalar(0.9),
         accent2.clone().multiplyScalar(1.0),
@@ -702,7 +647,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       )
       billboard.setVisible(!!cfgC.fx.lyricsMarquee)
 
-      // Update car (album-adaptive color; gentle rotation path, no drift/underglow)
+      // Update car (album-adaptive color; slow figure-8 showcase)
       car.group.visible = !!cfgC.fx.wireCar
       if (car.group.visible) {
         car.setColor(carColorRef.current)
@@ -760,10 +705,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         }
       }
 
-      // Animate billboard transitions
+      // Animate billboard transitions and pop decay
       billboard.update(dt)
 
-      // camera autopilot + bob (unchanged)
+      // camera autopilot + bob
       const bob = Math.sin(t * 1.4) * cfgC.camBob
       if (cfgC.camera.autoPath && !userInteracting) {
         const baseSpeed = cfgC.orbitSpeed
@@ -772,8 +717,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const elev = cfgC.orbitElev
         const pos = pathPoint(cfgC.path, angleRef.current, radius)
         camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
-        camera.lookAt(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
-        controls.target.set(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
+        camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
+        controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
       } else {
         camera.position.y += (bob - (camera as any).__lastBobY || 0)
         ;(camera as any).__lastBobY = bob
@@ -921,7 +866,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     }
 
     // Blueprint -> 3D wireframe (projected from side/front/top views)
-    function createBlueprintAventador(opts: { blueprintUrl: string; dims: { L:number; W:number; H:number }, linePx: number }, renderer: THREE.WebGLRenderer) {
+    function createBlueprintAventador(
+      opts: { dims: { L:number; W:number; H:number }, linePx: number },
+      renderer: THREE.WebGLRenderer,
+      onStatus: (s: 'none'|'loading'|'loaded'|'fallback'|'error') => void
+    ) {
       const group = new THREE.Group()
       group.renderOrder = 3
 
@@ -930,11 +879,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const carGeo = new LineSegmentsGeometry()
       const carLines = new LineSegments2(carGeo, carMat)
       group.add(carLines)
-
-      const spinner = new THREE.AxesHelper(0.6)
-      spinner.visible = true
-      spinner.position.y = 0.02
-      group.add(spinner)
 
       const setResolution = (w: number, h: number) => {
         carMat.resolution.set(w, h)
@@ -947,51 +891,49 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         setResolution(draw.x, draw.y)
       }
 
-      let built = false
+      function setColor(c: THREE.Color) { carMat.color.set(c) }
 
-      ;(async () => {
+      async function setImageSrc(src: string) {
+        if (!src) { clear(); return }
         try {
-          const tex = await new Promise<HTMLImageElement>((resolve, reject) => {
-            const img = new Image()
-            img.crossOrigin = 'anonymous'
-            img.onload = () => resolve(img)
-            img.onerror = reject
-            img.src = opts.blueprintUrl
-          })
-
-          const positions = await buildFromBlueprint(tex, opts.dims)
+          onStatus('loading')
+          const img = await loadImage(src)
+          const positions = await buildFromBlueprint(img, opts.dims)
           if (positions && positions.length > 0) {
             carGeo.setPositions(positions)
-            built = true
-            spinner.visible = false
+            onStatus('loaded')
+          } else {
+            fallback()
+            onStatus('fallback')
           }
         } catch (e) {
-          console.warn('Blueprint load/build failed, falling back to simple outline:', e)
-          // Fallback: simple top silhouette rectangle
-          const p: number[] = []
-          const { L, W } = opts.dims
-          const y = 0
-          const pts = [
-            [-L/2, y, -W/2], [ L/2, y, -W/2],
-            [ L/2, y,  W/2], [-L/2, y,  W/2],
-            [-L/2, y, -W/2]
-          ]
-          for (let i=0;i<pts.length-1;i++) p.push(...pts[i], ...pts[i+1])
-          carGeo.setPositions(new Float32Array(p))
-          spinner.visible = false
-          built = true
+          console.warn('Blueprint load/build failed:', e)
+          fallback()
+          onStatus('fallback')
         }
-      })()
-
-      function setColor(c: THREE.Color) {
-        carMat.color.set(c)
       }
 
-      // Gentle showcase motion: slow figure-8 above album art, slow yaw
+      function fallback() {
+        const p: number[] = []
+        const { L, W } = opts.dims
+        const y = 0
+        const pts = [
+          [-L/2, y, -W/2], [ L/2, y, -W/2],
+          [ L/2, y,  W/2], [-L/2, y,  W/2],
+          [-L/2, y, -W/2]
+        ]
+        for (let i=0;i<pts.length-1;i++) p.push(...pts[i], ...pts[i+1])
+        carGeo.setPositions(new Float32Array(p))
+      }
+
+      function clear() {
+        onStatus('none')
+        fallback()
+      }
+
       const state = { t: 0 }
       function update(dt: number, env: { t: number; floorHalf: number }) {
         state.t += dt * 0.8
-        // Path
         const R = Math.min(env.floorHalf, 7.0)
         const a = state.t * 0.6
         const s = Math.sin(a), c = Math.cos(a)
@@ -1009,47 +951,44 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         ;(carMat as any).dispose?.()
       }
 
-      return { group, setResolution, update, dispose, setColor }
+      return { group, setResolution, update, dispose, setColor, setImageSrc, clear }
     }
 
     async function buildFromBlueprint(img: HTMLImageElement, dims: { L:number; W:number; H:number }): Promise<Float32Array> {
-      // Split the single image into three regions: side (top third), front (middle third, centered), top (bottom third)
       const iw = img.naturalWidth, ih = img.naturalHeight
       const rowH = ih / 3
 
       const regions = {
-        side: { x: 0, y: 0, w: iw, h: rowH }, // full width top row
-        front: { x: iw * 0.15, y: rowH, w: iw * 0.7, h: rowH }, // centered narrower
-        top: { x: 0, y: rowH * 2, w: iw, h: rowH } // full width bottom row
+        side: { x: 0, y: 0, w: iw, h: rowH },
+        front: { x: iw * 0.15, y: rowH, w: iw * 0.7, h: rowH },
+        top: { x: 0, y: rowH * 2, w: iw, h: rowH }
       }
 
-      // Build masks at manageable resolutions
-      const sideMask = await regionMask(img, regions.side, 160, 64)   // length x height
-      const frontMask = await regionMask(img, regions.front, 128, 84) // width x height
-      const topMask = await regionMask(img, regions.top, 180, 96)     // length x width
+      const sideMask = await regionMask(img, regions.side, 160, 64)
+      const frontMask = await regionMask(img, regions.front, 128, 84)
+      const topMask = await regionMask(img, regions.top, 180, 96)
 
-      // Convert masks to 3D line segments: connect right and down neighbors
       const out: number[] = []
       const { L, W, H } = dims
 
-      // Top view -> lines on y=0 plane (we raise group later)
+      // Top view on y=0
       addGridSegments(topMask, (xIdx, yIdx, w, h) => {
         const nx = xIdx / (w - 1) - 0.5
         const nz = yIdx / (h - 1) - 0.5
         return new THREE.Vector3(nx * L, 0, nz * W)
       }, out)
 
-      // Side view -> duplicate at z = +/- W/2
+      // Side duplicated at z ± W/2
       const mapSide = (xIdx: number, yIdx: number, w: number, h: number, side: number) => {
         const nx = xIdx / (w - 1) - 0.5
-        const ny = 1.0 - yIdx / (h - 1) // up
+        const ny = 1.0 - yIdx / (h - 1)
         const z = side * (W * 0.5)
         return new THREE.Vector3(nx * L, ny * H * 0.95, z)
       }
       addGridSegments(sideMask, (x, y, w, h) => mapSide(x, y, w, h, +1), out)
       addGridSegments(sideMask, (x, y, w, h) => mapSide(x, y, w, h, -1), out)
 
-      // Front view -> duplicate at x = +/- L/2 (front and rear faces)
+      // Front duplicated at x ± L/2
       const mapFront = (xIdx: number, yIdx: number, w: number, h: number, front: number) => {
         const nz = xIdx / (w - 1) - 0.5
         const ny = 1.0 - yIdx / (h - 1)
@@ -1074,12 +1013,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         for (let x=0;x<resX;x++){
           const i = (y * resX + x) * 4
           const R = id.data[i], G = id.data[i+1], B = id.data[i+2]
-          // White lines on black bg: threshold by luminance and require fairly bright
           const lum = (0.2126*R + 0.7152*G + 0.0722*B) / 255
           mask[y*resX + x] = lum > 0.62 ? 1 : 0
         }
       }
-      // Cheap thinning: remove isolated pixels
+      // thinning: drop isolated pixels
       const out = new Uint8Array(mask.length)
       for (let y=1;y<resY-1;y++){
         for (let x=1;x<resX-1;x++){
@@ -1112,6 +1050,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
     }
 
+    function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
+    function loadImage(src: string): Promise<HTMLImageElement> {
+      return new Promise((resolve, reject) => {
+        const img = new Image()
+        img.crossOrigin = 'anonymous'
+        img.onload = () => resolve(img)
+        img.onerror = reject
+        img.src = src
+      })
+    }
+
+  // Only re-run when renderScale/bloom/accessibility/auth change
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
@@ -1254,6 +1204,51 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     )
   }
 
+  const BlueprintCard = () => {
+    const onPick = async (file?: File) => {
+      if (!file) return
+      const dataUrl = await fileToDataURL(file).catch(() => null)
+      if (!dataUrl) return
+      try {
+        localStorage.setItem(BP_LS_KEY, dataUrl)
+      } catch {}
+      setBpPreview(dataUrl)
+      setBpStatus('loading')
+      await carApiRef.current?.setImageSrc(dataUrl)
+    }
+    const onClear = () => {
+      try { localStorage.removeItem(BP_LS_KEY) } catch {}
+      setBpPreview(null)
+      setBpStatus('none')
+      carApiRef.current?.clear()
+    }
+    return (
+      <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
+        <div style={{ fontSize:12, opacity:0.8, marginBottom:8 }}>Blueprint (Aventador wireframe)</div>
+        <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+          <label style={{ display:'inline-flex', alignItems:'center', gap:8, cursor:'pointer' }}>
+            <input
+              type="file"
+              accept="image/*"
+              style={{ display:'none' }}
+              onChange={e => onPick(e.target.files?.[0] || undefined)}
+            />
+            <span style={{ ...btnStyle }}>Upload image</span>
+          </label>
+          <button onClick={onClear} style={btnStyle}>Clear</button>
+          <span style={{ fontSize:12, opacity:0.8 }}>
+            Status: {bpStatus}
+          </span>
+        </div>
+        {bpPreview && (
+          <div style={{ marginTop:8 }}>
+            <img src={bpPreview} alt="Blueprint preview" style={{ width:'100%', height:'auto', borderRadius:6, border:'1px solid #2b2f3a' }} />
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const BillboardControllerCard = () => (
     <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
@@ -1324,6 +1319,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         onToggle={() => setPanelOpen(o => !o)}
         onChange={setCfg}
         extra={<>
+          <BlueprintCard />
           <BillboardControllerCard />
           <EffectsCardToggles cfg={cfg} onChange={setCfg} />
         </>}
@@ -1460,13 +1456,56 @@ const chipStyle = (active: boolean): React.CSSProperties => ({
   cursor:'pointer'
 })
 
-function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
-
-// Robust angle lerp (not used heavily here but kept for reference)
-function lerpAngle(a: number, b: number, t: number) {
-  const TAU = Math.PI * 2
-  let d = (b - a) % TAU
-  if (d > Math.PI) d -= TAU
-  if (d < -Math.PI) d += TAU
-  return a + d * t
+function defaults(initial?: any): LocalCfg {
+  return {
+    path: initial?.path ?? 'Circle',
+    orbitSpeed: initial?.orbitSpeed ?? 0.35,
+    orbitRadius: initial?.orbitRadius ?? 9.5,
+    orbitElev: initial?.orbitElev ?? 0.06,
+    camBob: initial?.camBob ?? 0.12,
+    lineWidthPx: initial?.lineWidthPx ?? 1.8,
+    camera: {
+      fov: clamp(initial?.camera?.fov ?? 50, 30, 85),
+      minDistance: clamp(initial?.camera?.minDistance ?? 5, 3, 30),
+      maxDistance: clamp(initial?.camera?.maxDistance ?? 16, 6, 100),
+      minPolarAngle: clamp(initial?.camera?.minPolarAngle ?? (Math.PI * 0.12), 0, Math.PI / 2),
+      maxPolarAngle: clamp(initial?.camera?.maxPolarAngle ?? (Math.PI * 0.85), Math.PI / 4, Math.PI),
+      enablePan: true,
+      enableZoom: true,
+      enableDamping: true,
+      dampingFactor: 0.1,
+      rotateSpeed: 0.6,
+      zoomSpeed: 0.7,
+      panSpeed: 0.6,
+      autoRotate: false,
+      autoRotateSpeed: 0.5,
+      autoPath: true,
+      target: { x: 0, y: 2.2, z: 0 }
+    },
+    cameraPresets: {
+      enabled: true,
+      strength: 0.7
+    },
+    fx: {
+      beams: false,
+      groundRings: false,
+      chimneySmoke: false,
+      starfield: false,
+      bloomBreath: false,
+      lyricsMarquee: true,
+      mosaicFloor: false,
+      wireCar: true
+    }
+  }
 }
+
+function fileToDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }

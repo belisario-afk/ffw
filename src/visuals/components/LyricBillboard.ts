@@ -170,99 +170,107 @@ export class LyricBillboard {
   // Internal helpers
 
   private async createLayer(textStr: string): Promise<Layer> {
-  const group = new THREE.Group()
+    const group = new THREE.Group()
 
-  const base = new Text()
-  base.text = textStr || ''
-  base.font = this.font
-  base.fontSize = this.fontSize
-  base.anchorX = 'center'
-  base.anchorY = 'middle'
-  base.color = this.baseColor.getHex()
-  base.outlineColor = this.outlineColor.getHex()
-  base.outlineWidth = 0.005
-  base.outlineBlur = 0.002
-  base.maxWidth = 6
-  base.overflowWrap = 'break-word'
-  base.depthOffset = -1
-  base.frustumCulled = true
-  base.renderOrder = 3
-  base.material.transparent = true
-  base.material.depthWrite = false
+    const base = new Text()
+    base.text = textStr || ''
+    base.font = this.font
+    base.fontSize = this.fontSize
+    base.anchorX = 'center'
+    base.anchorY = 'middle'
+    base.color = this.baseColor.getHex()
+    base.outlineColor = this.outlineColor.getHex()
+    base.outlineWidth = 0.005
+    base.outlineBlur = 0.002
+    base.maxWidth = 6
+    base.overflowWrap = 'break-word'
+    base.depthOffset = -1
+    base.frustumCulled = true
+    base.renderOrder = 3
+    base.material.transparent = true
+    base.material.depthWrite = false
 
-  const hi = new Text()
-  hi.text = textStr || ''
-  hi.font = this.font
-  hi.fontSize = this.fontSize
-  hi.anchorX = 'center'
-  hi.anchorY = 'middle'
-  hi.color = this.highlightColor.getHex()
-  hi.outlineColor = this.highlightColor.clone().multiplyScalar(1.05).getHex()
-  hi.outlineWidth = 0.008
-  hi.outlineBlur = 0.004
-  hi.maxWidth = 6
-  hi.overflowWrap = 'break-word'
-  hi.depthOffset = 0
-  hi.frustumCulled = true
-  hi.renderOrder = 4
-  hi.material.transparent = true
-  hi.material.depthWrite = false
+    const hi = new Text()
+    hi.text = textStr || ''
+    hi.font = this.font
+    hi.fontSize = this.fontSize
+    hi.anchorX = 'center'
+    hi.anchorY = 'middle'
+    hi.color = this.highlightColor.getHex()
+    hi.outlineColor = this.highlightColor.clone().multiplyScalar(1.05).getHex()
+    hi.outlineWidth = 0.008
+    hi.outlineBlur = 0.004
+    hi.maxWidth = 6
+    hi.overflowWrap = 'break-word'
+    hi.depthOffset = 0
+    hi.frustumCulled = true
+    hi.renderOrder = 4
+    hi.material.transparent = true
+    hi.material.depthWrite = false
 
-  // Ensure geometries are built to get bounds
-  await new Promise<void>(res => base.sync(() => res()))
-  await new Promise<void>(res => hi.sync(() => res()))
+    // Ensure geometries are built to get bounds
+    await new Promise<void>(res => base.sync(() => res()))
+    await new Promise<void>(res => hi.sync(() => res()))
 
-  const bounds = getBounds(base)
-  const centerX = (bounds.minX + bounds.maxX) * 0.5
+    const bounds = getBounds(base)
+    const centerX = (bounds.minX + bounds.maxX) * 0.5
 
-  // Start with zero-width highlight
-  hi.clipRect = [bounds.minX, bounds.minY, bounds.minX, bounds.maxY]
+    // Start with zero-width highlight
+    hi.clipRect = [bounds.minX, bounds.minY, bounds.minX, bounds.maxY]
 
-  // Underline (grows with progress). Keep it invisible until progress > 0.
-  const underlineGeom = new THREE.PlaneGeometry(bounds.width, 0.012, 1, 1)
-  const underlineMat = new THREE.MeshBasicMaterial({
-    color: 0xffffff, // set below
-    transparent: true,
-    opacity: 0.85,
-    depthWrite: false,
-    toneMapped: false
-  })
-  const underline = new THREE.Mesh(underlineGeom, underlineMat)
-  underline.renderOrder = 2
-  underline.position.y = bounds.minY - 0.06
-  underline.scale.x = 0
-  underline.visible = false
+    // Underline (grows with progress). Keep it invisible until progress > 0.
+    const underlineGeom = new THREE.PlaneGeometry(bounds.width, 0.012, 1, 1)
+    const underlineMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff, // set below
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+      toneMapped: false
+    })
+    const underline = new THREE.Mesh(underlineGeom, underlineMat)
+    underline.renderOrder = 2
+    underline.position.y = bounds.minY - 0.06
+    underline.scale.x = 0
+    underline.visible = false
 
-  group.add(base)
-  group.add(hi)
-  group.add(underline)
+    group.add(base)
+    group.add(hi)
+    group.add(underline)
 
-  const layer: Layer = { group, base, hi, bounds, underline, centerX, opacity: 1 }
-  this.applyColors(layer)
-  this.applyOpacity(layer)
-  return layer
-}
+    const layer: Layer = { group, base, hi, bounds, underline, centerX, opacity: 1 }
+    this.applyColors(layer)
+    this.applyOpacity(layer)
+    return layer
+  }
 
-private applyColors(layer: Layer) {
-  layer.base.color = this.baseColor.getHex()
-  layer.base.outlineColor = this.outlineColor.getHex()
-  layer.hi.color = this.highlightColor.getHex()
-  layer.hi.outlineColor = this.highlightColor.clone().multiplyScalar(1.05).getHex()
-  // IMPORTANT: use .set() on MeshBasicMaterial.color
-  layer.underline.material.color.set(this.highlightColor)
-  layer.base.needsUpdate = true
-  layer.hi.needsUpdate = true
-}
+  private applyColors(layer: Layer) {
+    layer.base.color = this.baseColor.getHex()
+    layer.base.outlineColor = this.outlineColor.getHex()
+    layer.hi.color = this.highlightColor.getHex()
+    layer.hi.outlineColor = this.highlightColor.clone().multiplyScalar(1.05).getHex()
+    layer.underline.material.color.set(this.highlightColor)
+    layer.base.needsUpdate = true
+    layer.hi.needsUpdate = true
+  }
 
-private updateUnderline(layer: Layer, prog: number) {
-  const p = THREE.MathUtils.clamp(prog, 0, 1)
-  const w = layer.bounds.width
-  const widthNow = Math.max(0.0001, w * p)
-  const targetCenterX = layer.bounds.minX + widthNow * 0.5
-  layer.underline.scale.x = p
-  layer.underline.position.x = targetCenterX - layer.centerX
-  layer.underline.visible = p > 0.001
-}
+  private applyOpacity(layer: Layer) {
+    const o = THREE.MathUtils.clamp(layer.opacity, 0, 1)
+    ;(layer.base.material as any).opacity = o * 0.9
+    ;(layer.hi.material as any).opacity = o
+    layer.underline.material.opacity = o
+    layer.base.needsUpdate = true
+    layer.hi.needsUpdate = true
+  }
+
+  private updateUnderline(layer: Layer, prog: number) {
+    const p = THREE.MathUtils.clamp(prog, 0, 1)
+    const w = layer.bounds.width
+    const widthNow = Math.max(0.0001, w * p)
+    const targetCenterX = layer.bounds.minX + widthNow * 0.5
+    layer.underline.scale.x = p
+    layer.underline.position.x = targetCenterX - layer.centerX
+    layer.underline.visible = p > 0.001
+  }
 
   private disposeLayer(layer: Layer | null) {
     if (!layer) return

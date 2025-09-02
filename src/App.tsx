@@ -1,5 +1,5 @@
 import React, { Suspense, useEffect, useState } from 'react'
-import { Route, Routes, useNavigate } from 'react-router-dom'
+import { Route, Routes } from 'react-router-dom'
 import Callback from './auth/Callback'
 import PlayerController from './controllers/PlayerController'
 const WireframeHouse3D = React.lazy(() => import('./visuals/scenes/WireframeHouse3D'))
@@ -12,13 +12,12 @@ import { ThemeManager, setTheme, getTheme, ThemeName, setAlbumSkinEnabled, isAlb
 import AlbumSkinWatcher from './ui/AlbumSkinWatcher'
 import { getFPS } from './utils/fps'
 import { detectGPUInfo } from './utils/gpu'
-import { HousePanel, defaultHouseSettings, type HouseSettings } from './ui/HousePanel'
 import { startReactivityOrchestrator } from './audio/ReactivityOrchestrator'
 import { startFallbackTicker } from './audio/FallbackTicker'
 import { PlaybackProvider } from './playback/PlaybackProvider'
 import GlobalTopBar from './ui/GlobalTopBar'
 
-type Panel = 'quality' | 'vj' | 'devices' | 'scene' | null
+type Panel = 'quality' | 'vj' | 'devices' | null
 
 export default function App() {
   const [panel, setPanel] = useState<Panel>(null)
@@ -42,16 +41,6 @@ export default function App() {
     if (saved === 'Blank' || saved === 'Origami Fold' || saved === 'Wireframe House') return 'Wireframe House 3D'
     return saved
   })
-  const [houseSettings, setHouseSettings] = useState<HouseSettings>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem('ffw_house_settings') || '{}')
-      return { ...defaultHouseSettings, ...saved }
-    } catch {
-      return defaultHouseSettings
-    }
-  })
-
-  const navigate = useNavigate()
 
   useEffect(() => {
     detectGPUInfo().then(setGpu)
@@ -105,7 +94,6 @@ export default function App() {
                     reducedMotion: accessibility.reducedMotion,
                     highContrast: accessibility.highContrast
                   }}
-                  settings={houseSettings}
                 />
               ) : (
                 <PsyKaleidoTunnel
@@ -119,17 +107,13 @@ export default function App() {
 
         <div className="cyber-panel" aria-hidden={false}>
           <strong>FFW</strong> — <span style={{ color: 'var(--accent)' }}>Cyber</span> Visualizer
-          <span style={{ marginLeft: 8, color: 'var(--muted)' }}>(Q Quality • V VJ • D Devices • S Scene)</span>
+          <span style={{ marginLeft: 8, color: 'var(--muted)' }}>(Q Quality • V VJ • D Devices)</span>
           <div style={{ display: 'inline-flex', gap: 8, marginLeft: 10, alignItems: 'center' }}>
             <label htmlFor="scene" style={{ fontSize: 11, color: 'var(--muted)' }}>Scene</label>
             <select id="scene" value={scene} onChange={(e) => onSceneChange(e.currentTarget.value)} title="Scene selector" aria-label="Scene selector">
               <option value="Wireframe House 3D">Wireframe House 3D (Three)</option>
               <option value="Psychedelic Tunnel">Psychedelic Kaleido Tunnel</option>
             </select>
-
-            {scene === 'Wireframe House 3D' && (
-              <button className="btn" onClick={() => setPanel('scene')} title="Scene settings" aria-label="Scene settings">⚙️</button>
-            )}
 
             <label htmlFor="theme" style={{ fontSize: 11, color: 'var(--muted)' }}>Theme</label>
             <select id="theme" value={theme} onChange={(e) => onThemeChange(e.currentTarget.value as any)} title="Theme" aria-label="Theme">
@@ -167,12 +151,6 @@ export default function App() {
         </Popup>
         <Popup open={panel === 'devices'} onClose={() => setPanel(null)} title="Spotify Devices">
           <DevicePicker />
-        </Popup>
-        <Popup open={panel === 'scene'} onClose={() => setPanel(null)} title="House Settings">
-          <HousePanel value={houseSettings} onChange={(v) => {
-            setHouseSettings(v)
-            try { localStorage.setItem('ffw_house_settings', JSON.stringify(v)) } catch {}
-          }} />
         </Popup>
       </div>
     </PlaybackProvider>

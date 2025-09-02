@@ -121,7 +121,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const [bbEditEnabled, setBbEditEnabled] = useState(false)
   const [bbMode, setBbMode] = useState<'move'|'rotate'|'scale'>('move')
   const [bbPlane, setBbPlane] = useState<'XZ'|'XY'>('XZ')
-  // Mirror billboard UI state into refs for the render loop
   const bbEditRef = useRef(bbEditEnabled)
   const bbModeRef = useRef<'move'|'rotate'|'scale'>(bbMode)
   const bbPlaneRef = useRef<'XZ'|'XY'>(bbPlane)
@@ -150,7 +149,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     if (token) { try { setSpotifyTokenProvider(async () => token) } catch {} }
   }, [auth])
 
-  // Connect Spotify player if available
   useEffect(() => {
     if (hasSpotifyTokenProvider()) {
       ensurePlayerConnected({ deviceName: 'FFw visualizer', setInitialVolume: true })
@@ -566,10 +564,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Supercar (wireframe) drifting over album cover
-    const car = createSuperCar()
-    car.group.visible = !!cfgRef.current.fx.wireCar
-    scene.add(car.group)
+    // Aventador wireframe with advanced drift dynamics
+    const aventador = createAventadorWireframe()
+    aventador.group.visible = !!cfgRef.current.fx.wireCar
+    scene.add(aventador.group)
 
     // Resize
     const updateSizes = () => {
@@ -669,14 +667,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       )
       billboard.setVisible(!!cfgC.fx.lyricsMarquee)
 
-      // Drive supercar drift
-      car.group.visible = !!cfgC.fx.wireCar
-      if (car.group.visible) {
-        car.update(dt, {
+      // Drive Aventador drift
+      aventador.group.visible = !!cfgC.fx.wireCar
+      if (aventador.group.visible) {
+        aventador.update(dt, {
           t,
+          bands: { low, mid, high },
           loud,
           beat: !!latest?.beat,
-          high,
           floorHalf: floorSize * 0.5 - 0.8,
           accent,
           accent2
@@ -784,7 +782,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       floorTex?.dispose()
       marqueeTex?.dispose?.()
       billboard.dispose()
-      car.dispose()
+      aventador.dispose()
       scene.traverse(obj => {
         const any = obj as any
         if (any.geometry?.dispose) any.geometry.dispose()
@@ -896,199 +894,300 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
     }
 
-    // Supercar: model + drift dynamics
-    function createSuperCar() {
+    // Aventador wireframe model + advanced drift (bicycle model)
+    function createAventadorWireframe() {
       const group = new THREE.Group()
       group.position.set(0, 0.06, 0)
       group.renderOrder = 3
 
-      // Materials
-      const wire = new THREE.MeshBasicMaterial({ color: 0x77d0ff, wireframe: true, transparent: true, opacity: 0.95, depthWrite: false })
-      const wire2 = new THREE.MeshBasicMaterial({ color: 0xa7b8ff, wireframe: true, transparent: true, opacity: 0.85, depthWrite: false })
-      const glowAdd = new THREE.MeshBasicMaterial({ color: 0x9fdcff, transparent: true, opacity: 0.2, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false })
-      const blackSoft = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.14, depthWrite: false })
+      // Materials (wireframe meshes for clean edges + add glow planes)
+      const wireMain = new THREE.MeshBasicMaterial({ color: 0x77d0ff, wireframe: true, transparent: true, opacity: 0.9, depthWrite: false })
+      const wireSec = new THREE.MeshBasicMaterial({ color: 0xa7b8ff, wireframe: true, transparent: true, opacity: 0.85, depthWrite: false })
+      const addGlow = new THREE.MeshBasicMaterial({ color: 0x9fdcff, transparent: true, opacity: 0.2, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false })
+      const addRed = new THREE.MeshBasicMaterial({ color: 0xff3355, transparent: true, opacity: 0.3, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false })
+      const softShadow = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.14, depthWrite: false })
 
-      // Proportions (low & wide)
-      const W = 2.0, H = 0.36, L = 3.4
-      const chassis = new THREE.Mesh(new THREE.BoxGeometry(L, H, W*0.9), wire)
-      chassis.position.y = H*0.5
-      group.add(chassis)
-
-      // Hood wedge
-      const hood = new THREE.Mesh(new THREE.BoxGeometry(L*0.55, H*0.28, W*0.88), wire)
-      hood.position.set(L*0.08, H*0.86, 0)
-      hood.rotation.x = -0.12
-      group.add(hood)
-
-      // Roof low
-      const roof = new THREE.Mesh(new THREE.BoxGeometry(L*0.42, H*0.26, W*0.78), wire2)
-      roof.position.set(-L*0.05, H*1.12, 0)
-      group.add(roof)
-
-      // Side skirts
-      const skirtL = new THREE.Mesh(new THREE.BoxGeometry(L*0.8, 0.06, 0.05), wire)
-      skirtL.position.set(0, 0.1,  W*0.5)
-      const skirtR = skirtL.clone()
-      skirtR.position.z = -W*0.5
-      group.add(skirtL, skirtR)
-
-      // Front splitter
-      const splitter = new THREE.Mesh(new THREE.BoxGeometry(L*0.45, 0.04, W*1.0), wire)
-      splitter.position.set(L*0.52, 0.12, 0)
-      group.add(splitter)
-
-      // Spoiler
-      const spoilerBase = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.2, W*0.9), wire)
-      spoilerBase.position.set(-L*0.6, 0.38, 0)
-      const spoilerWing = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.05, W*1.1), wire2)
-      spoilerWing.position.set(-L*0.6, 0.56, 0)
-      group.add(spoilerBase, spoilerWing)
-
-      // Wheels (front steerable)
-      const tireR = 0.34, tireT = 0.09
-      const tireGeom = new THREE.TorusGeometry(tireR, tireT, 8, 18)
-      const rimGeom = new THREE.TorusGeometry(tireR*0.62, tireT*0.36, 6, 16)
-      const wheelPositions: [number, number][] = [
-        [ L*0.52,  W*0.42],
-        [ L*0.52, -W*0.42],
-        [-L*0.52,  W*0.42],
-        [-L*0.52, -W*0.42],
-      ]
-      const wheels: THREE.Group[] = []
-      const frontWheels: THREE.Group[] = []
-      for (let i=0;i<4;i++) {
-        const isFront = i < 2
-        const hub = new THREE.Group()
-        const tire = new THREE.Mesh(tireGeom, wire)
-        tire.rotation.y = Math.PI / 2
-        const rim = new THREE.Mesh(rimGeom, wire2)
-        rim.rotation.y = Math.PI / 2
-        const y = 0.18
-        hub.position.set(wheelPositions[i][0], y, wheelPositions[i][1])
-        hub.add(tire, rim)
-        group.add(hub)
-        wheels.push(hub)
-        if (isFront) frontWheels.push(hub)
+      // Helper to skew a box a bit for wedge shapes
+      const skewBox = (w:number,h:number,d:number, skewX=0, skewY=0, skewZ=0) => {
+        const g = new THREE.BoxGeometry(w,h,d,1,1,1)
+        const pos = g.getAttribute('position') as THREE.BufferAttribute
+        for (let i=0;i<pos.count;i++){
+          const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i)
+          pos.setXYZ(i, x + y*skewX + z*skewX*0.2, y + x*skewY*0.2 + z*skewY, z + x*skewZ*0.2 + y*skewZ*0.2)
+        }
+        pos.needsUpdate = true
+        g.computeVertexNormals()
+        return g
       }
 
-      // Headlights and tail lights (glow planes)
-      const headL = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 0.08), glowAdd)
+      // Scale approximates Aventador proportions (meters-ish)
+      const L = 4.8, W = 2.03, H = 1.14
+
+      // Main body wedge (low front, higher rear)
+      const body = new THREE.Mesh(skewBox(L*0.92, H*0.36, W*0.92, -0.08, 0.02, 0), wireMain)
+      body.position.set(0, 0.22, 0)
+      group.add(body)
+
+      // Nose wedge
+      const nose = new THREE.Mesh(skewBox(L*0.34, H*0.22, W*0.88, -0.22, 0.0, 0), wireMain)
+      nose.position.set(L*0.25, 0.17, 0)
+      group.add(nose)
+
+      // Cabin (trapezoid)
+      const cabin = new THREE.Mesh(skewBox(L*0.38, H*0.32, W*0.74, 0.05, 0.0, 0), wireSec)
+      cabin.position.set(-L*0.04, 0.5, 0)
+      group.add(cabin)
+
+      // Rear deck
+      const rear = new THREE.Mesh(skewBox(L*0.36, H*0.22, W*0.9, 0.06, 0, 0), wireMain)
+      rear.position.set(-L*0.34, 0.36, 0)
+      group.add(rear)
+
+      // Side intakes (triangular prisms via skewed thin boxes)
+      const intakeL = new THREE.Mesh(skewBox(L*0.28, H*0.2, 0.06, 0.05, 0, 0), wireMain)
+      intakeL.position.set(-L*0.05, 0.28,  W*0.48)
+      const intakeR = intakeL.clone()
+      intakeR.position.z = -W*0.48
+      group.add(intakeL, intakeR)
+
+      // Front splitter
+      const splitter = new THREE.Mesh(new THREE.BoxGeometry(L*0.34, 0.04, W*0.98), wireMain)
+      splitter.position.set(L*0.35, 0.12, 0)
+      group.add(splitter)
+
+      // Roof line
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(L*0.24, H*0.08, W*0.6), wireSec)
+      roof.position.set(-L*0.06, 0.78, 0)
+      group.add(roof)
+
+      // Wheel arches (torus segments)
+      const archRad = 0.52, archTube = 0.1
+      const archGeom = new THREE.TorusGeometry(archRad, archTube, 8, 20, Math.PI)
+      const archFL = new THREE.Mesh(archGeom, wireSec)
+      archFL.rotation.set(Math.PI/2, Math.PI/2, 0)
+      archFL.position.set(L*0.22, archRad*0.7,  W*0.42)
+      const archFR = archFL.clone(); archFR.position.z = -W*0.42
+      const archRL = archFL.clone(); archRL.position.x = -L*0.22
+      const archRR = archFR.clone(); archRR.position.x = -L*0.22
+      group.add(archFL, archFR, archRL, archRR)
+
+      // Wheels (torus + rim)
+      const tireR = 0.42, tireT = 0.12
+      const tireGeom = new THREE.TorusGeometry(tireR, tireT, 10, 20)
+      const rimGeom = new THREE.TorusGeometry(tireR*0.62, tireT*0.38, 8, 18)
+      const wheelHubs: THREE.Group[] = []
+      const frontHubs: THREE.Group[] = []
+      const hubPositions: [number, number][] = [
+        [ L*0.34,  W*0.42],
+        [ L*0.34, -W*0.42],
+        [-L*0.34,  W*0.42],
+        [-L*0.34, -W*0.42],
+      ]
+      for (let i=0;i<4;i++){
+        const hub = new THREE.Group()
+        const tire = new THREE.Mesh(tireGeom, wireMain)
+        tire.rotation.y = Math.PI/2
+        const rim = new THREE.Mesh(rimGeom, wireSec)
+        rim.rotation.y = Math.PI/2
+        hub.position.set(hubPositions[i][0], 0.28, hubPositions[i][1])
+        hub.add(tire, rim)
+        group.add(hub)
+        wheelHubs.push(hub)
+        if (i < 2) frontHubs.push(hub)
+      }
+
+      // Lights
+      const headL = new THREE.Mesh(new THREE.PlaneGeometry(0.26, 0.12), addGlow)
       const headR = headL.clone()
-      headL.position.set(L*0.9, 0.38,  W*0.35)
-      headR.position.set(L*0.9, 0.38, -W*0.35)
+      headL.position.set(L*0.6, 0.42,  W*0.36)
+      headR.position.set(L*0.6, 0.42, -W*0.36)
       headL.lookAt(headL.position.clone().add(new THREE.Vector3(1,0,-0.2)))
       headR.lookAt(headR.position.clone().add(new THREE.Vector3(1,0, 0.2)))
       group.add(headL, headR)
 
-      const tailL = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 0.08), new THREE.MeshBasicMaterial({ color: 0xff3355, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }))
+      const tailL = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.12), addRed)
       const tailR = tailL.clone()
-      tailL.position.set(-L*0.95, 0.38,  W*0.35)
-      tailR.position.set(-L*0.95, 0.38, -W*0.35)
+      tailL.position.set(-L*0.62, 0.42,  W*0.36)
+      tailR.position.set(-L*0.62, 0.42, -W*0.36)
       tailL.lookAt(tailL.position.clone().add(new THREE.Vector3(-1,0,-0.2)))
       tailR.lookAt(tailR.position.clone().add(new THREE.Vector3(-1,0, 0.2)))
       group.add(tailL, tailR)
 
       // Under-glow + shadow
-      const glow = new THREE.Mesh(new THREE.CircleGeometry(1.6, 26), new THREE.MeshBasicMaterial({ color: 0x90d7ff, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }))
+      const glow = new THREE.Mesh(new THREE.CircleGeometry(1.8, 28), addGlow.clone())
       glow.rotation.x = -Math.PI/2
       glow.position.y = 0.002
       group.add(glow)
-      const shadow = new THREE.Mesh(new THREE.CircleGeometry(1.2, 20), blackSoft)
+      const shadow = new THREE.Mesh(new THREE.CircleGeometry(1.4, 22), softShadow)
       shadow.rotation.x = -Math.PI/2
       shadow.position.y = 0.001
       group.add(shadow)
 
-      // Kinematics state
+      // Exhaust flame quads (appear on beats or high throttle)
+      const flameMat = new THREE.MeshBasicMaterial({ color: 0xffa040, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false })
+      const flameL = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22), flameMat.clone())
+      const flameR = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22), flameMat.clone())
+      flameL.position.set(-L*0.7, 0.3,  0.18)
+      flameR.position.set(-L*0.7, 0.3, -0.18)
+      group.add(flameL, flameR)
+
+      // Vehicle dynamics (bicycle model)
+      const m = 1600 // kg
+      const Iz = 3000 // yaw inertia
+      const lf = 1.6, lr = 1.6 // distances to axles
+      let Cf = 90000, Cr = 95000 // cornering stiffness (will scale with audio)
+      const Fmax = 6000 // drive force scale
+      const Bmax = 9000 // brake force
+      const drag = 0.6, rr = 40 // drag and rolling resistance
+      const Lwb = lf + lr
+
       const state = {
-        pos: new THREE.Vector3(0, 0.06, 0),
-        vel: new THREE.Vector3(0, 0, 0),
-        lastPos: new THREE.Vector3(0, 0.06, 0),
+        x: 0, z: 0, y: 0.06,
         yaw: 0,
-        slip: 0,
-        steer: 0,
-        distance: 0,
-        t: 0
+        vx: 3.0, vy: 0.0, r: 0.0, // forward speed, lateral speed, yaw rate
+        sDist: 0.0,
+        steer: 0.0
       }
+
       const tmp = {
+        // target/path
         p0: new THREE.Vector3(),
         p1: new THREE.Vector3(),
-        forward: new THREE.Vector3(),
-        velDir: new THREE.Vector3(),
-        side: new THREE.Vector3()
+        tForward: new THREE.Vector3(),
+        // helpers
+        worldForward: new THREE.Vector3(),
+        worldRight: new THREE.Vector3(),
+        carVel: new THREE.Vector3(),
       }
 
-      function update(dt: number, env: { t: number; loud: number; beat: boolean; high: number; floorHalf: number; accent: THREE.Color; accent2: THREE.Color }) {
-        // Palette sync
-        ;(wire.color as THREE.Color).copy(env.accent)
-        ;(wire2.color as THREE.Color).copy(env.accent2)
+      function purePursuitSteer(target: THREE.Vector3, lookahead: number) {
+        // Compute steering to reach a target point (in world)
+        const dx = target.x - state.x
+        const dz = target.z - state.z
+        const sinYaw = Math.sin(state.yaw), cosYaw = Math.cos(state.yaw)
+        // transform target to car coordinates
+        const xCar =  cosYaw * dx + sinYaw * dz
+        const zCar = -sinYaw * dx + cosYaw * dz
+        if (lookahead < 0.001) return 0
+        const curvature = (2 * xCar) / (lookahead*lookahead)
+        return THREE.MathUtils.clamp(Math.atan(curvature * Lwb), -0.6, 0.6)
+      }
 
-        // Speed profile: base + loudness, beat kick
-        const targetSpeed = 4.2 + env.loud * 6.0
-        const speed = env.beat ? targetSpeed * 1.08 : targetSpeed
-
-        // Parameter along lemniscate path drives target direction
-        state.t += dt * 0.5
-        const R = 6.4
-        const a0 = state.t * 0.9
-        const a1 = a0 + 0.012
+      function desiredPathPoint(tParam: number) {
+        const R = 6.6
+        const a0 = tParam
+        const a1 = a0 + 0.02
         tmp.p0.copy(pathPoint('Lemniscate', a0, R))
         tmp.p1.copy(pathPoint('Lemniscate', a1, R))
-        tmp.forward.subVectors(tmp.p1, tmp.p0).normalize()
+        tmp.tForward.subVectors(tmp.p1, tmp.p0).normalize()
+        return tmp.p0
+      }
 
-        // Desired velocity along path with slight audio wiggle
-        const wiggle = (Math.sin(env.t * 1.7) * 0.3 + Math.cos(env.t * 2.3) * 0.2) * (0.25 + env.high * 0.5)
-        const desired = tmp.forward.clone().multiplyScalar(speed).add(new THREE.Vector3(0,0,0))
-        // Simple velocity steering (approach desired vel)
-        const accel = desired.clone().sub(state.vel).multiplyScalar(1.8) // responsiveness
-        state.vel.add(accel.multiplyScalar(dt))
-        // Integrate position in XZ
-        state.pos.add(state.vel.clone().multiplyScalar(dt))
-        state.pos.y = 0.06 + Math.sin(env.t * 3.2) * 0.01
+      function update(dt: number, env: {
+        t: number
+        bands: { low:number, mid:number, high:number }
+        loud: number
+        beat: boolean
+        floorHalf: number
+        accent: THREE.Color
+        accent2: THREE.Color
+      }) {
+        // Palette sync
+        ;(wireMain.color as THREE.Color).copy(env.accent)
+        ;(wireSec.color as THREE.Color).copy(env.accent2)
+        ;(addGlow.color as THREE.Color).copy(env.accent.clone().multiplyScalar(1.0))
+
+        // Audio -> grip/speed
+        const mu = 0.9 - 0.25 * THREE.MathUtils.clamp(env.high, 0, 1) // less grip on highs => more drift
+        Cf = 90000 * mu
+        Cr = 95000 * mu
+        const vTarget = 6.0 + 10.0 * THREE.MathUtils.clamp(env.loud, 0, 1) + (env.beat ? 1.0 : 0)
+
+        // Path following target point (advance with time proportional to speed)
+        const tParam = env.t * 0.5 + (state.vx * 0.08)
+        const targetPt = desiredPathPoint(tParam + 0.18 * (0.6 + env.loud)) // look forward along path
+        const lookahead = THREE.MathUtils.clamp(1.4 + state.vx * 0.4, 2.0, 6.0)
+        const steerCmd = purePursuitSteer(targetPt, lookahead)
+        state.steer += (steerCmd - state.steer) * Math.min(1, dt * 8.0)
+
+        // Longitudinal control
+        const speedErr = vTarget - Math.max(0.1, state.vx)
+        const throttle = THREE.MathUtils.clamp(0.3 + speedErr * 0.20, 0, 1)
+        const brake = speedErr < -0.2 ? THREE.MathUtils.clamp((-speedErr) * 0.15, 0, 1) : 0
+
+        // Tire slip angles
+        const eps = 1e-3
+        const alphaF = Math.atan2(state.vy + lf * state.r, Math.max(eps, state.vx)) - state.steer
+        const alphaR = Math.atan2(state.vy - lr * state.r, Math.max(eps, state.vx))
+
+        // Lateral forces (linear region, mildly clamped)
+        let Fyf = -Cf * alphaF
+        let Fyr = -Cr * alphaR
+        const FyMax = mu * m * 9.81 * 0.6
+        Fyf = THREE.MathUtils.clamp(Fyf, -FyMax, FyMax)
+        Fyr = THREE.MathUtils.clamp(Fyr, -FyMax, FyMax)
+
+        // Longitudinal force
+        const Fx = throttle * Fmax - brake * Bmax * Math.sign(state.vx)
+
+        // Dynamics (planar)
+        const ax = (Fx - Fyf * Math.sin(state.steer)) / m + state.vy * state.r - (drag * state.vx + rr * Math.sign(state.vx)) / m
+        const ay = (Fyf * Math.cos(state.steer) + Fyr) / m - state.vx * state.r
+        const rDot = (lf * Fyf * Math.cos(state.steer) - lr * Fyr) / Iz
+
+        state.vx += ax * dt
+        state.vy += ay * dt
+        state.r += rDot * dt
+        state.vx = THREE.MathUtils.clamp(state.vx, -20, 45)
+
+        // Integrate position in world
+        const cosY = Math.cos(state.yaw), sinY = Math.sin(state.yaw)
+        const dx = (state.vx * cosY - state.vy * sinY) * dt
+        const dz = (state.vx * sinY + state.vy * cosY) * dt
+        state.x += dx
+        state.z += dz
+        state.yaw = lerpAngle(state.yaw, state.yaw + state.r * dt, 1.0)
+        state.y = 0.06 + Math.sin(env.t * 3.2) * 0.01
+
         // Bounds on album floor
-        state.pos.x = THREE.MathUtils.clamp(state.pos.x, -env.floorHalf, env.floorHalf)
-        state.pos.z = THREE.MathUtils.clamp(state.pos.z, -env.floorHalf, env.floorHalf)
+        state.x = THREE.MathUtils.clamp(state.x, -env.floorHalf, env.floorHalf)
+        state.z = THREE.MathUtils.clamp(state.z, -env.floorHalf, env.floorHalf)
 
-        // Slip is lateral velocity vs forward direction with easing
-        tmp.velDir.copy(state.vel).setY(0)
-        const vLen = tmp.velDir.length() + 1e-6
-        tmp.velDir.normalize()
-        const fwd2D = tmp.forward.clone().setY(0).normalize()
-        const cross = fwd2D.x * tmp.velDir.z - fwd2D.z * tmp.velDir.x // signed lateral
-        const targetSlip = THREE.MathUtils.clamp(cross * (0.9 + env.high * 0.8) + wiggle * 0.2, -0.9, 0.9)
-        state.slip += (targetSlip - state.slip) * Math.min(1, dt * 3.2)
+        // Pose group
+        group.position.set(state.x, state.y, state.z)
+        const bank = THREE.MathUtils.clamp(-alphaR * 0.6, -0.5, 0.5)
+        const pitch = THREE.MathUtils.clamp(-ax * 0.02, -0.08, 0.08)
+        group.rotation.set(pitch, state.yaw, bank)
 
-        // Yaw aims partly at velocity direction (drift), partly at path forward
-        const yawVel = Math.atan2(tmp.velDir.z, tmp.velDir.x)
-        const yawFwd = Math.atan2(fwd2D.z, fwd2D.x)
-        const driftMix = 0.65 + (0.2 * (0.3 + Math.abs(state.slip))) // more slip -> more velocity-following
-        let yawTarget = lerpAngle(yawFwd, yawVel, THREE.MathUtils.clamp(driftMix, 0, 1))
-        state.yaw = lerpAngle(state.yaw, yawTarget, Math.min(1, dt * 6.0))
+        // Front wheels steer
+        for (const fw of frontHubs) fw.rotation.y = state.steer
 
-        // Steer front wheels counter to slip (counter-steer) within limits
-        const steerTarget = THREE.MathUtils.clamp(-state.slip * 0.8, -0.5, 0.5)
-        state.steer += (steerTarget - state.steer) * Math.min(1, dt * 10.0)
-        for (const fw of frontWheels) fw.rotation.y = state.steer
-
-        // Wheel rolling based on distance traveled
-        const stepDist = state.pos.distanceTo(state.lastPos)
-        state.distance += stepDist
-        state.lastPos.copy(state.pos)
-        const wheelRot = state.distance / (tireR) * 0.7
-        for (const w of wheels) {
-          const tire = w.children[0] as THREE.Mesh
-          const rim = w.children[1] as THREE.Mesh
-          tire.rotation.x = wheelRot
-          rim.rotation.x = wheelRot
+        // Wheel spin (based on forward speed)
+        state.sDist += Math.hypot(dx, dz)
+        const wRot = state.sDist / (tireR) * 0.7
+        for (const hub of wheelHubs) {
+          const tire = hub.children[0] as THREE.Mesh
+          const rim = hub.children[1] as THREE.Mesh
+          tire.rotation.x = wRot
+          rim.rotation.x = wRot
         }
 
-        // Pose car
-        group.position.copy(state.pos)
-        const bank = THREE.MathUtils.clamp(-state.slip * 0.35, -0.45, 0.45)
-        group.rotation.set(0, state.yaw, bank)
-
-        // Audio glow
-        ;(glow.material as THREE.MeshBasicMaterial).opacity = THREE.MathUtils.clamp(0.12 + (vLen/8) * 0.25 + (env.beat ? 0.1 : 0) + env.loud * 0.2, 0.08, 0.5)
+        // Lights / glow based on input and audio
+        const moving = Math.abs(state.vx) + Math.abs(state.vy)
+        ;(glow.material as THREE.MeshBasicMaterial).opacity = THREE.MathUtils.clamp(0.12 + moving * 0.015 + env.loud * 0.2 + (env.beat ? 0.12 : 0), 0.08, 0.55)
         ;(glow.material as THREE.MeshBasicMaterial).color.copy(env.accent.clone().multiplyScalar(1.0))
+        ;(tailL.material as THREE.MeshBasicMaterial).opacity = brake > 0 ? 0.6 : 0.28
+        ;(tailR.material as THREE.MeshBasicMaterial).opacity = brake > 0 ? 0.6 : 0.28
+
+        // Flames on beat or heavy throttle with slip
+        const slipMag = Math.abs(alphaR) + Math.abs(alphaF)
+        const flameOn = env.beat || (throttle > 0.75 && slipMag > 0.12)
+        const flameOpacity = flameOn ? THREE.MathUtils.clamp(0.15 + env.loud * 0.4, 0.0, 0.75) : 0.0
+        ;(flameL.material as THREE.MeshBasicMaterial).opacity = flameOpacity
+        ;(flameR.material as THREE.MeshBasicMaterial).opacity = flameOpacity
+        // face flames backward
+        flameL.lookAt(flameL.position.clone().add(new THREE.Vector3(-1, 0, 0)))
+        flameR.lookAt(flameR.position.clone().add(new THREE.Vector3(-1, 0, 0)))
       }
 
       function dispose() {
@@ -1109,6 +1208,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
       return { group, update, dispose }
     }
+
   // Only re-run when renderScale/bloom/accessibility/auth change
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
@@ -1348,7 +1448,7 @@ function EffectsCardToggles({ cfg, onChange }: { cfg: LocalCfg; onChange: (updat
           <input type="checkbox" checked={cfg.fx.lyricsMarquee} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, lyricsMarquee: e.target.checked } }))}/>
         </label>
         <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-          <span>Wireframe car</span>
+          <span>Wireframe car (Aventador)</span>
           <input type="checkbox" checked={cfg.fx.wireCar} onChange={e => onChange(prev => ({ ...prev, fx: { ...prev.fx, wireCar: e.target.checked } }))}/>
         </label>
       </div>

@@ -755,6 +755,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         camera.position.y += (bob - (camera as any).__lastBobY || 0)
         ;(camera as any).__lastBobY = bob
       }
+        function lerpAngle(a: number, b: number, t: number) {
+        const TAU = Math.PI * 2
+        let d = (b - a) % TAU
+        if (d > Math.PI) d -= TAU
+        if (d < -Math.PI) d += TAU
+        return a + d * t
+      }
 
       ;(grid.material as THREE.Material).opacity = 0.05 * (stale ? 0.6 : 1.0)
       controls.update()
@@ -1032,8 +1039,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const R = 6.4
         const a0 = state.t * 0.9
         const a1 = a0 + 0.012
-        tmp.p0.setFromVector3(pathPoint('Lemniscate', a0, R))
-        tmp.p1.setFromVector3(pathPoint('Lemniscate', a1, R))
+        tmp.p0.copy(pathPoint('Lemniscate', a0, R))
+        tmp.p1.copy(pathPoint('Lemniscate', a1, R))
         tmp.forward.subVectors(tmp.p1, tmp.p0).normalize()
 
         // Desired velocity along path with slight audio wiggle
@@ -1062,8 +1069,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const yawVel = Math.atan2(tmp.velDir.z, tmp.velDir.x)
         const yawFwd = Math.atan2(fwd2D.z, fwd2D.x)
         const driftMix = 0.65 + (0.2 * (0.3 + Math.abs(state.slip))) // more slip -> more velocity-following
-        let yawTarget = THREE.MathUtils.lerpAngle(yawFwd, yawVel, THREE.MathUtils.clamp(driftMix, 0, 1))
-        state.yaw = THREE.MathUtils.lerpAngle(state.yaw, yawTarget, Math.min(1, dt * 6.0))
+        let yawTarget = lerpAngle(yawFwd, yawVel, THREE.MathUtils.clamp(driftMix, 0, 1))
+        state.yaw = lerpAngle(state.yaw, yawTarget, Math.min(1, dt * 6.0))
 
         // Steer front wheels counter to slip (counter-steer) within limits
         const steerTarget = THREE.MathUtils.clamp(-state.slip * 0.8, -0.5, 0.5)

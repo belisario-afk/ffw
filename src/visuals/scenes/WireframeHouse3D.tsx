@@ -63,6 +63,10 @@ type LocalCfg = {
 
 const LS_KEY = 'ffw.wire3d.settings.v2'
 
+// Place your blueprint image at: public/assets/aventador_blueprint.png
+// Or set a custom URL at runtime: window.FFW_WIRE_BLUEPRINT_URL = '...';
+const DEFAULT_BLUEPRINT_URL = '/assets/aventador_blueprint.png'
+
 function defaults(initial?: any): LocalCfg {
   return {
     path: initial?.path ?? 'Circle',
@@ -144,6 +148,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   const pbClock = useRef<{ playing: boolean; startedAt: number; offsetMs: number }>({ playing: false, startedAt: 0, offsetMs: 0 })
   const lastVisualMsRef = useRef<number>(0)
 
+  // Car color adapts to album art
+  const carColorRef = useRef<THREE.Color>(new THREE.Color(0x88c8ff))
+
   useEffect(() => {
     const token = (auth as any)?.accessToken
     if (token) { try { setSpotifyTokenProvider(async () => token) } catch {} }
@@ -199,6 +206,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       for (let i = 0; i < data.length; i += 4) { const r = data[i], gr = data[i + 1], b = data[i + 2]; sum += (0.2126*r + 0.7152*gr + 0.0722*b) / 255 }
       return sum / (w * h)
     }
+    async function averageTextureColor(tex: THREE.Texture): Promise<THREE.Color> {
+      const img = tex.image as HTMLImageElement | HTMLCanvasElement | ImageBitmap
+      const w = 32, h = 32
+      const c = document.createElement('canvas'); c.width = w; c.height = h
+      const g = c.getContext('2d'); if (!g) return new THREE.Color(0x88c8ff)
+      try { g.drawImage(img as any, 0, 0, w, h) } catch { return new THREE.Color(0x88c8ff) }
+      const data = g.getImageData(0, 0, w, h).data
+      let r = 0, gr = 0, b = 0
+      for (let i = 0; i < data.length; i += 4) { r += data[i]; gr += data[i+1]; b += data[i+2] }
+      const n = data.length / 4
+      return new THREE.Color(r/(255*n), gr/(255*n), b/(255*n))
+    }
     function addMansionWindows(add: (p: THREE.Vector3, out: THREE.Vector3) => void) {
       const storyY = [0.6, 1.7, 2.8]
       const CF = { minX:-2.0, maxX:2.0, minZ:-1.2, maxZ:1.2 }
@@ -246,7 +265,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       motionBlur: false
     })
 
-    // Controls (never add to scene)
+    // Controls
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
     controls.dampingFactor = 0.1
@@ -300,11 +319,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     floorMesh.position.y = 0.001
     scene.add(floorMesh)
 
-    // Placeholder on floor tex
     const floorPlaceholder = createDarkPlaceholderTexture()
     floorMat.uniforms.tAlbum.value = floorPlaceholder
 
-    // Mosaic (safe)
+    // Mosaic
     const mosaicGroup = new THREE.Group()
     const tiles: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
     const tileN = 8
@@ -324,7 +342,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     mosaicGroup.visible = false
     scene.add(mosaicGroup)
 
-    // Wireframe mansion edges
+    // Mansion lines
     const mansionPositions = buildMansionEdges()
     const fatGeo = new LineSegmentsGeometry()
     fatGeo.setPositions(mansionPositions)
@@ -350,7 +368,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     thinLines.visible = false
     scene.add(thinLines)
 
-    // Static windows
+    // Windows
     const windowGroup = new THREE.Group()
     {
       const winGeom = new THREE.PlaneGeometry(0.22, 0.16)
@@ -364,7 +382,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       scene.add(windowGroup)
     }
 
-    // 3D Lyric Billboard
+    // Billboard
     const billboard = new LyricBillboard({
       baseColor: 0xffffff,
       outlineColor: accent2.getHex(),
@@ -376,7 +394,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     billboard.group.scale.setScalar(billboardScaleRef.current)
     scene.add(billboard.group)
 
-    // Optional starfield
+    // Starfield
     let starfield: THREE.Points | null = null
     {
       const g = new THREE.BufferGeometry()
@@ -419,7 +437,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       return mat
     })()
 
-    // Lyrics marquee (fallback/secondary)
+    // Marquee
     let marqueeMat: THREE.ShaderMaterial | null = null
     let marqueeTex: THREE.Texture | null = null
     let marqueeText = ''
@@ -514,6 +532,19 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           floorMat.uniforms.uDim.value = clamp(1.02 - brightness * 0.45, 0.6, 0.92)
           floorMat.uniforms.uOpacity.value = clamp(0.9 - (brightness - 0.6) * 0.25, 0.65, 0.9)
 
+          const avg = await averageTextureColor(tex).catch(() => new THREE.Color(0x88c8ff))
+          // Nudge color to be brighter against dark floor
+          const hsv = { h: 0, s: 0, v: 0 }
+          avg.getHSV?.(hsv as any) // older three may not have getHSV; fallback below
+          const boosted = avg.clone()
+          try {
+            const c = avg.clone().convertLinearToSRGB()
+            const l = 0.2126*c.r + 0.7152*c.g + 0.0722*c.b
+            const boost = l < 0.35 ? 1.25 : 1.0
+            boosted.multiplyScalar(boost).clampScalar(0, 1)
+          } catch {}
+          carColorRef.current.copy(boosted)
+
           floorTex?.dispose(); floorTex = tex
           floorMat.uniforms.tAlbum.value = tex; floorMat.needsUpdate = true
 
@@ -560,14 +591,21 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     const albumIv = window.setInterval(loadAlbumCoverAndLyrics, 5000)
     const pbIv = window.setInterval(syncPlaybackClock, 2000)
 
-    // Reactivity
+    // Reactivity (only used for subtle color breathing)
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Aventador wireframe with advanced drift dynamics
-    const aventador = createAventadorWireframe()
-    aventador.group.visible = !!cfgRef.current.fx.wireCar
-    scene.add(aventador.group)
+    // Blueprint-based Aventador wireframe (no drift physics, no underglow)
+    const blueprintUrl: string = (window as any)?.FFW_WIRE_BLUEPRINT_URL || DEFAULT_BLUEPRINT_URL
+    const car = createBlueprintAventador({
+      blueprintUrl,
+      dims: { L: 4.6, W: 2.04, H: 1.14 },
+      linePx: 1.35
+    }, renderer)
+    car.group.visible = !!cfgRef.current.fx.wireCar
+    // Place the car slightly above album art
+    car.group.position.y = 0.055
+    scene.add(car.group)
 
     // Resize
     const updateSizes = () => {
@@ -578,6 +616,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       comp.onResize()
       fatMat.resolution.set(draw.x, draw.y)
       setLinePixels(cfgRef.current.lineWidthPx)
+      car.setResolution(draw.x, draw.y)
     }
     window.addEventListener('resize', updateSizes)
     updateSizes()
@@ -596,13 +635,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const stale = !latest || (now - (latest.t || 0)) > 240
 
       const cfgC = cfgRef.current
-
-      const low = latest?.bands.low ?? 0.08
-      const mid = latest?.bands.mid ?? 0.08
       const high = latest?.bands.high ?? 0.08
-      const loud = latest?.loudness ?? 0.15
 
-      // Live-apply FOV from slider
+      // Live-apply FOV
       if (camera.fov !== cfgC.camera.fov) {
         camera.fov = cfgC.camera.fov
         camera.updateProjectionMatrix()
@@ -621,7 +656,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       controls.minPolarAngle = cfgC.camera.minPolarAngle
       controls.maxPolarAngle = cfgC.camera.maxPolarAngle
 
-      // Apply billboard controller (reads refs, no scene re-init)
+      // Apply billboard controller
       if (bbEditRef.current) {
         if (bbModeRef.current === 'move') {
           const mv = moveVecRef.current
@@ -656,10 +691,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
       // colors
       accent.copy(baseAccent).lerp(baseAccent2, THREE.MathUtils.clamp(high * 0.25, 0, 0.25))
-      accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(mid * 0.2, 0, 0.2))
+      accent2.copy(baseAccent2).lerp(baseAccent, THREE.MathUtils.clamp(high * 0.2, 0, 0.2))
       fatMat.color.set(accent); thinMat.color.set(accent)
 
-      // update billboard colors to match palette
       billboard.setColors(
         accent.clone().multiplyScalar(0.9),
         accent2.clone().multiplyScalar(1.0),
@@ -667,27 +701,19 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       )
       billboard.setVisible(!!cfgC.fx.lyricsMarquee)
 
-      // Drive Aventador drift
-      aventador.group.visible = !!cfgC.fx.wireCar
-      if (aventador.group.visible) {
-        aventador.update(dt, {
+      // Update car (album-adaptive color; gentle rotation path, no drift/underglow)
+      car.group.visible = !!cfgC.fx.wireCar
+      if (car.group.visible) {
+        car.setColor(carColorRef.current)
+        car.update(dt, {
           t,
-          bands: { low, mid, high },
-          loud,
-          beat: !!latest?.beat,
-          floorHalf: floorSize * 0.5 - 0.8,
-          accent,
-          accent2
+          floorHalf: floorSize * 0.5 - 0.6
         })
       }
 
-      // lines
-      const px = cfgC.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
-      setLinePixels(px)
-
       // fog
       ;(fogMat as any).uniforms.uTime.value = t
-      ;(fogMat as any).uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
+      ;(fogMat as any).uniforms.uIntensity.value = accessibility.epilepsySafe ? 0.24 : 0.32
       ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
 
       // starfield visibility
@@ -733,21 +759,20 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         }
       }
 
-      // Animate billboard transitions and pop decay
+      // Animate billboard transitions
       billboard.update(dt)
 
-      // camera autopilot + bob
+      // camera autopilot + bob (unchanged)
       const bob = Math.sin(t * 1.4) * cfgC.camBob
       if (cfgC.camera.autoPath && !userInteracting) {
         const baseSpeed = cfgC.orbitSpeed
-        const audioBoost = 0.4 * (low + mid + high)
-        angleRef.current += dt * (baseSpeed + audioBoost)
+        angleRef.current += dt * baseSpeed
         const radius = THREE.MathUtils.clamp(cfgC.orbitRadius, 6.0, 12.0)
         const elev = cfgC.orbitElev
         const pos = pathPoint(cfgC.path, angleRef.current, radius)
         camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
-        camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
-        controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
+        camera.lookAt(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
+        controls.target.set(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
       } else {
         camera.position.y += (bob - (camera as any).__lastBobY || 0)
         ;(camera as any).__lastBobY = bob
@@ -782,7 +807,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       floorTex?.dispose()
       marqueeTex?.dispose?.()
       billboard.dispose()
-      aventador.dispose()
+      car.dispose()
       scene.traverse(obj => {
         const any = obj as any
         if (any.geometry?.dispose) any.geometry.dispose()
@@ -894,313 +919,198 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
     }
 
-    // Aventador wireframe model + advanced drift (bicycle model)
-    function createAventadorWireframe() {
+    // Blueprint -> 3D wireframe (projected from side/front/top views)
+    function createBlueprintAventador(opts: { blueprintUrl: string; dims: { L:number; W:number; H:number }, linePx: number }, renderer: THREE.WebGLRenderer) {
       const group = new THREE.Group()
-      group.position.set(0, 0.06, 0)
       group.renderOrder = 3
 
-      // Materials (wireframe meshes for clean edges + add glow planes)
-      const wireMain = new THREE.MeshBasicMaterial({ color: 0x77d0ff, wireframe: true, transparent: true, opacity: 0.9, depthWrite: false })
-      const wireSec = new THREE.MeshBasicMaterial({ color: 0xa7b8ff, wireframe: true, transparent: true, opacity: 0.85, depthWrite: false })
-      const addGlow = new THREE.MeshBasicMaterial({ color: 0x9fdcff, transparent: true, opacity: 0.2, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false })
-      const addRed = new THREE.MeshBasicMaterial({ color: 0xff3355, transparent: true, opacity: 0.3, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false })
-      const softShadow = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.14, depthWrite: false })
+      const carMat = new LineMaterial({ color: carColorRef.current.getHex(), transparent: true, opacity: 0.95, depthTest: true })
+      ;(carMat as any).worldUnits = false
+      const carGeo = new LineSegmentsGeometry()
+      const carLines = new LineSegments2(carGeo, carMat)
+      group.add(carLines)
 
-      // Helper to skew a box a bit for wedge shapes
-      const skewBox = (w:number,h:number,d:number, skewX=0, skewY=0, skewZ=0) => {
-        const g = new THREE.BoxGeometry(w,h,d,1,1,1)
-        const pos = g.getAttribute('position') as THREE.BufferAttribute
-        for (let i=0;i<pos.count;i++){
-          const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i)
-          pos.setXYZ(i, x + y*skewX + z*skewX*0.2, y + x*skewY*0.2 + z*skewY, z + x*skewZ*0.2 + y*skewZ*0.2)
+      const spinner = new THREE.AxesHelper(0.6)
+      spinner.visible = true
+      spinner.position.y = 0.02
+      group.add(spinner)
+
+      const setResolution = (w: number, h: number) => {
+        carMat.resolution.set(w, h)
+        const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
+        carMat.linewidth = Math.max(0.001, opts.linePx / Math.max(1, draw.y))
+        carMat.needsUpdate = true
+      }
+      {
+        const draw = renderer.getDrawingBufferSize(new THREE.Vector2())
+        setResolution(draw.x, draw.y)
+      }
+
+      let built = false
+
+      ;(async () => {
+        try {
+          const tex = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const img = new Image()
+            img.crossOrigin = 'anonymous'
+            img.onload = () => resolve(img)
+            img.onerror = reject
+            img.src = opts.blueprintUrl
+          })
+
+          const positions = await buildFromBlueprint(tex, opts.dims)
+          if (positions && positions.length > 0) {
+            carGeo.setPositions(positions)
+            built = true
+            spinner.visible = false
+          }
+        } catch (e) {
+          console.warn('Blueprint load/build failed, falling back to simple outline:', e)
+          // Fallback: simple top silhouette rectangle
+          const p: number[] = []
+          const { L, W } = opts.dims
+          const y = 0
+          const pts = [
+            [-L/2, y, -W/2], [ L/2, y, -W/2],
+            [ L/2, y,  W/2], [-L/2, y,  W/2],
+            [-L/2, y, -W/2]
+          ]
+          for (let i=0;i<pts.length-1;i++) p.push(...pts[i], ...pts[i+1])
+          carGeo.setPositions(new Float32Array(p))
+          spinner.visible = false
+          built = true
         }
-        pos.needsUpdate = true
-        g.computeVertexNormals()
-        return g
+      })()
+
+      function setColor(c: THREE.Color) {
+        carMat.color.set(c)
       }
 
-      // Scale approximates Aventador proportions (meters-ish)
-      const L = 4.8, W = 2.03, H = 1.14
-
-      // Main body wedge (low front, higher rear)
-      const body = new THREE.Mesh(skewBox(L*0.92, H*0.36, W*0.92, -0.08, 0.02, 0), wireMain)
-      body.position.set(0, 0.22, 0)
-      group.add(body)
-
-      // Nose wedge
-      const nose = new THREE.Mesh(skewBox(L*0.34, H*0.22, W*0.88, -0.22, 0.0, 0), wireMain)
-      nose.position.set(L*0.25, 0.17, 0)
-      group.add(nose)
-
-      // Cabin (trapezoid)
-      const cabin = new THREE.Mesh(skewBox(L*0.38, H*0.32, W*0.74, 0.05, 0.0, 0), wireSec)
-      cabin.position.set(-L*0.04, 0.5, 0)
-      group.add(cabin)
-
-      // Rear deck
-      const rear = new THREE.Mesh(skewBox(L*0.36, H*0.22, W*0.9, 0.06, 0, 0), wireMain)
-      rear.position.set(-L*0.34, 0.36, 0)
-      group.add(rear)
-
-      // Side intakes
-      const intakeL = new THREE.Mesh(skewBox(L*0.28, H*0.2, 0.06, 0.05, 0, 0), wireMain)
-      intakeL.position.set(-L*0.05, 0.28,  W*0.48)
-      const intakeR = intakeL.clone()
-      intakeR.position.z = -W*0.48
-      group.add(intakeL, intakeR)
-
-      // Front splitter
-      const splitter = new THREE.Mesh(new THREE.BoxGeometry(L*0.34, 0.04, W*0.98), wireMain)
-      splitter.position.set(L*0.35, 0.12, 0)
-      group.add(splitter)
-
-      // Roof line
-      const roof = new THREE.Mesh(new THREE.BoxGeometry(L*0.24, H*0.08, W*0.6), wireSec)
-      roof.position.set(-L*0.06, 0.78, 0)
-      group.add(roof)
-
-      // Wheel arches (torus segments)
-      const archRad = 0.52, archTube = 0.1
-      const archGeom = new THREE.TorusGeometry(archRad, archTube, 8, 20, Math.PI)
-      const archFL = new THREE.Mesh(archGeom, wireSec)
-      archFL.rotation.set(Math.PI/2, Math.PI/2, 0)
-      archFL.position.set(L*0.22, archRad*0.7,  W*0.42)
-      const archFR = archFL.clone(); archFR.position.z = -W*0.42
-      const archRL = archFL.clone(); archRL.position.x = -L*0.22
-      const archRR = archFR.clone(); archRR.position.x = -L*0.22
-      group.add(archFL, archFR, archRL, archRR)
-
-      // Wheels (torus + rim)
-      const tireR = 0.42, tireT = 0.12
-      const tireGeom = new THREE.TorusGeometry(tireR, tireT, 10, 20)
-      const rimGeom = new THREE.TorusGeometry(tireR*0.62, tireT*0.38, 8, 18)
-      const wheelHubs: THREE.Group[] = []
-      const frontHubs: THREE.Group[] = []
-      const hubPositions: [number, number][] = [
-        [ L*0.34,  W*0.42],
-        [ L*0.34, -W*0.42],
-        [-L*0.34,  W*0.42],
-        [-L*0.34, -W*0.42],
-      ]
-      for (let i=0;i<4;i++){
-        const hub = new THREE.Group()
-        const tire = new THREE.Mesh(tireGeom, wireMain)
-        tire.rotation.y = Math.PI/2
-        const rim = new THREE.Mesh(rimGeom, wireSec)
-        rim.rotation.y = Math.PI/2
-        hub.position.set(hubPositions[i][0], 0.28, hubPositions[i][1])
-        hub.add(tire, rim)
-        group.add(hub)
-        wheelHubs.push(hub)
-        if (i < 2) frontHubs.push(hub)
-      }
-
-      // Lights
-      const headL = new THREE.Mesh(new THREE.PlaneGeometry(0.26, 0.12), addGlow)
-      const headR = headL.clone()
-      headL.position.set(L*0.6, 0.42,  W*0.36)
-      headR.position.set(L*0.6, 0.42, -W*0.36)
-      headL.lookAt(headL.position.clone().add(new THREE.Vector3(1,0,-0.2)))
-      headR.lookAt(headR.position.clone().add(new THREE.Vector3(1,0, 0.2)))
-      group.add(headL, headR)
-
-      const tailL = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.12), addRed)
-      const tailR = tailL.clone()
-      tailL.position.set(-L*0.62, 0.42,  W*0.36)
-      tailR.position.set(-L*0.62, 0.42, -W*0.36)
-      tailL.lookAt(tailL.position.clone().add(new THREE.Vector3(-1,0,-0.2)))
-      tailR.lookAt(tailR.position.clone().add(new THREE.Vector3(-1,0, 0.2)))
-      group.add(tailL, tailR)
-
-      // Under-glow + shadow
-      const glow = new THREE.Mesh(new THREE.CircleGeometry(1.8, 28), addGlow.clone())
-      glow.rotation.x = -Math.PI/2
-      glow.position.y = 0.002
-      group.add(glow)
-      const shadow = new THREE.Mesh(new THREE.CircleGeometry(1.4, 22), softShadow)
-      shadow.rotation.x = -Math.PI/2
-      shadow.position.y = 0.001
-      group.add(shadow)
-
-      // Exhaust flame quads (appear on beats or high throttle)
-      const flameMat = new THREE.MeshBasicMaterial({ color: 0xffa040, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false })
-      const flameL = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22), flameMat.clone())
-      const flameR = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22), flameMat.clone())
-      flameL.position.set(-L*0.7, 0.3,  0.18)
-      flameR.position.set(-L*0.7, 0.3, -0.18)
-      group.add(flameL, flameR)
-
-      // Vehicle dynamics (bicycle model)
-      const m = 1600
-      const Iz = 3000
-      const lf = 1.6, lr = 1.6
-      let Cf = 90000, Cr = 95000
-      const Fmax = 6000
-      const Bmax = 9000
-      const drag = 0.6, rr = 40
-      const Lwb = lf + lr
-
-      const state = {
-        x: 0, z: 0, y: 0.06,
-        yaw: 0,
-        vx: 3.0, vy: 0.0, r: 0.0,
-        sDist: 0.0,
-        steer: 0.0
-      }
-
-      const tmp = {
-        p0: new THREE.Vector3(),
-        p1: new THREE.Vector3(),
-        tForward: new THREE.Vector3(),
-      }
-
-      function purePursuitSteer(target: THREE.Vector3, lookahead: number) {
-        const dx = target.x - state.x
-        const dz = target.z - state.z
-        const sinYaw = Math.sin(state.yaw), cosYaw = Math.cos(state.yaw)
-        const xCar =  cosYaw * dx + sinYaw * dz
-        const zCar = -sinYaw * dx + cosYaw * dz
-        if (lookahead < 0.001) return 0
-        const curvature = (2 * xCar) / (lookahead*lookahead)
-        return THREE.MathUtils.clamp(Math.atan(curvature * Lwb), -0.6, 0.6)
-      }
-
-      function desiredPathPoint(tParam: number) {
-        const R = 6.6
-        const a0 = tParam
-        const a1 = a0 + 0.02
-        tmp.p0.copy(pathPoint('Lemniscate', a0, R))
-        tmp.p1.copy(pathPoint('Lemniscate', a1, R))
-        tmp.tForward.subVectors(tmp.p1, tmp.p0).normalize()
-        return tmp.p0
-      }
-
-      function update(dt: number, env: {
-        t: number
-        bands: { low:number, mid:number, high:number }
-        loud: number
-        beat: boolean
-        floorHalf: number
-        accent: THREE.Color
-        accent2: THREE.Color
-      }) {
-        // Palette sync
-        wireMain.color.copy(env.accent)
-        wireSec.color.copy(env.accent2)
-
-        // Audio -> grip/speed (FIX: use env.bands.high, not env.high)
-        const high = THREE.MathUtils.clamp(env.bands?.high ?? 0, 0, 1)
-        const mu = 0.9 - 0.25 * high
-        Cf = 90000 * mu
-        Cr = 95000 * mu
-        const vTarget = 6.0 + 10.0 * THREE.MathUtils.clamp(env.loud, 0, 1) + (env.beat ? 1.0 : 0)
-
-        // Path following target point
-        const tParam = env.t * 0.5 + (state.vx * 0.08)
-        const targetPt = desiredPathPoint(tParam + 0.18 * (0.6 + THREE.MathUtils.clamp(env.loud, 0, 1)))
-        const lookahead = THREE.MathUtils.clamp(1.4 + state.vx * 0.4, 2.0, 6.0)
-        const steerCmd = purePursuitSteer(targetPt, lookahead)
-        state.steer += (steerCmd - state.steer) * Math.min(1, dt * 8.0)
-
-        // Longitudinal control
-        const speedErr = vTarget - Math.max(0.1, state.vx)
-        const throttle = THREE.MathUtils.clamp(0.3 + speedErr * 0.20, 0, 1)
-        const brake = speedErr < -0.2 ? THREE.MathUtils.clamp((-speedErr) * 0.15, 0, 1) : 0
-
-        // Tire slip angles
-        const eps = 1e-3
-        const alphaF = Math.atan2(state.vy + lf * state.r, Math.max(eps, state.vx)) - state.steer
-        const alphaR = Math.atan2(state.vy - lr * state.r, Math.max(eps, state.vx))
-
-        // Lateral forces
-        const FyMax = mu * m * 9.81 * 0.6
-        let Fyf = THREE.MathUtils.clamp(-Cf * alphaF, -FyMax, FyMax)
-        let Fyr = THREE.MathUtils.clamp(-Cr * alphaR, -FyMax, FyMax)
-
-        // Longitudinal force
-        const Fx = throttle * Fmax - brake * Bmax * Math.sign(state.vx)
-
-        // Dynamics (planar)
-        let ax = (Fx - Fyf * Math.sin(state.steer)) / m + state.vy * state.r - (drag * state.vx + rr * Math.sign(state.vx)) / m
-        let ay = (Fyf * Math.cos(state.steer) + Fyr) / m - state.vx * state.r
-        let rDot = (lf * Fyf * Math.cos(state.steer) - lr * Fyr) / Iz
-        ax = finite(ax); ay = finite(ay); rDot = finite(rDot)
-
-        state.vx = finite(state.vx + ax * dt, 0)
-        state.vy = finite(state.vy + ay * dt, 0)
-        state.r  = finite(state.r  + rDot * dt, 0)
-        state.vx = THREE.MathUtils.clamp(state.vx, -20, 45)
-
-        // Integrate position in world
-        const cosY = Math.cos(state.yaw), sinY = Math.sin(state.yaw)
-        const dx = finite((state.vx * cosY - state.vy * sinY) * dt)
-        const dz = finite((state.vx * sinY + state.vy * cosY) * dt)
-        state.x = finite(state.x + dx)
-        state.z = finite(state.z + dz)
-        state.yaw = lerpAngle(state.yaw, state.yaw + state.r * dt, 1.0)
-        state.y = 0.06 + Math.sin(env.t * 3.2) * 0.01
-
-        // Bounds on album floor
-        state.x = THREE.MathUtils.clamp(state.x, -env.floorHalf, env.floorHalf)
-        state.z = THREE.MathUtils.clamp(state.z, -env.floorHalf, env.floorHalf)
-
-        // Pose group
-        group.position.set(state.x, state.y, state.z)
-        const bank = THREE.MathUtils.clamp(-alphaR * 0.6, -0.5, 0.5)
-        const pitch = THREE.MathUtils.clamp(-ax * 0.02, -0.08, 0.08)
-        group.rotation.set(pitch, state.yaw, bank)
-
-        // Front wheels steer
-        for (const fw of frontHubs) fw.rotation.y = state.steer
-
-        // Wheel spin (based on forward distance)
-        state.sDist += Math.hypot(dx, dz)
-        const wRot = state.sDist / (tireR) * 0.7
-        for (const hub of wheelHubs) {
-          const tire = hub.children[0] as THREE.Mesh
-          const rim = hub.children[1] as THREE.Mesh
-          tire.rotation.x = wRot
-          rim.rotation.x = wRot
-        }
-
-        // Lights / glow
-        const moving = Math.abs(state.vx) + Math.abs(state.vy)
-        ;(glow.material as THREE.MeshBasicMaterial).opacity = THREE.MathUtils.clamp(0.12 + moving * 0.015 + THREE.MathUtils.clamp(env.loud,0,1) * 0.2 + (env.beat ? 0.12 : 0), 0.08, 0.55)
-        ;(glow.material as THREE.MeshBasicMaterial).color.copy(env.accent.clone().multiplyScalar(1.0))
-        ;(tailL.material as THREE.MeshBasicMaterial).opacity = brake > 0 ? 0.6 : 0.28
-        ;(tailR.material as THREE.MeshBasicMaterial).opacity = brake > 0 ? 0.6 : 0.28
-
-        // Flames on beat or heavy throttle with slip
-        const slipMag = Math.abs(alphaR) + Math.abs(alphaF)
-        const flameOn = env.beat || (throttle > 0.75 && slipMag > 0.12)
-        const flameOpacity = flameOn ? THREE.MathUtils.clamp(0.15 + THREE.MathUtils.clamp(env.loud,0,1) * 0.4, 0.0, 0.75) : 0.0
-        ;(flameL.material as THREE.MeshBasicMaterial).opacity = flameOpacity
-        ;(flameR.material as THREE.MeshBasicMaterial).opacity = flameOpacity
-        flameL.lookAt(flameL.position.clone().add(new THREE.Vector3(-1, 0, 0)))
-        flameR.lookAt(flameR.position.clone().add(new THREE.Vector3(-1, 0, 0)))
+      // Gentle showcase motion: slow figure-8 above album art, slow yaw
+      const state = { t: 0 }
+      function update(dt: number, env: { t: number; floorHalf: number }) {
+        state.t += dt * 0.8
+        // Path
+        const R = Math.min(env.floorHalf, 7.0)
+        const a = state.t * 0.6
+        const s = Math.sin(a), c = Math.cos(a)
+        const denom = 1 + s*s
+        const x = (R * c) / denom
+        const z = (R * s * c) / denom
+        group.position.x = THREE.MathUtils.clamp(x, -env.floorHalf, env.floorHalf)
+        group.position.z = THREE.MathUtils.clamp(z, -env.floorHalf, env.floorHalf)
+        group.rotation.y = a * 0.35
       }
 
       function dispose() {
         group.removeFromParent()
-        const disposables: (THREE.Object3D | THREE.Material | THREE.BufferGeometry)[] = []
-        group.traverse(obj => {
-          const mesh = obj as THREE.Mesh
-          if (mesh.isMesh) {
-            if (mesh.geometry) disposables.push(mesh.geometry)
-            if (mesh.material) {
-              if (Array.isArray(mesh.material)) disposables.push(...mesh.material)
-              else disposables.push(mesh.material)
-            }
-          }
-        })
-        disposables.forEach(d => (d as any).dispose?.())
+        carGeo.dispose()
+        ;(carMat as any).dispose?.()
       }
 
-      return { group, update, dispose }
+      return { group, setResolution, update, dispose, setColor }
     }
 
-  // Only re-run when renderScale/bloom/accessibility/auth change
+    async function buildFromBlueprint(img: HTMLImageElement, dims: { L:number; W:number; H:number }): Promise<Float32Array> {
+      // Split the single image into three regions: side (top third), front (middle third, centered), top (bottom third)
+      const iw = img.naturalWidth, ih = img.naturalHeight
+      const rowH = ih / 3
+
+      const regions = {
+        side: { x: 0, y: 0, w: iw, h: rowH }, // full width top row
+        front: { x: iw * 0.15, y: rowH, w: iw * 0.7, h: rowH }, // centered narrower
+        top: { x: 0, y: rowH * 2, w: iw, h: rowH } // full width bottom row
+      }
+
+      // Build masks at manageable resolutions
+      const sideMask = await regionMask(img, regions.side, 160, 64)   // length x height
+      const frontMask = await regionMask(img, regions.front, 128, 84) // width x height
+      const topMask = await regionMask(img, regions.top, 180, 96)     // length x width
+
+      // Convert masks to 3D line segments: connect right and down neighbors
+      const out: number[] = []
+      const { L, W, H } = dims
+
+      // Top view -> lines on y=0 plane (we raise group later)
+      addGridSegments(topMask, (xIdx, yIdx, w, h) => {
+        const nx = xIdx / (w - 1) - 0.5
+        const nz = yIdx / (h - 1) - 0.5
+        return new THREE.Vector3(nx * L, 0, nz * W)
+      }, out)
+
+      // Side view -> duplicate at z = +/- W/2
+      const mapSide = (xIdx: number, yIdx: number, w: number, h: number, side: number) => {
+        const nx = xIdx / (w - 1) - 0.5
+        const ny = 1.0 - yIdx / (h - 1) // up
+        const z = side * (W * 0.5)
+        return new THREE.Vector3(nx * L, ny * H * 0.95, z)
+      }
+      addGridSegments(sideMask, (x, y, w, h) => mapSide(x, y, w, h, +1), out)
+      addGridSegments(sideMask, (x, y, w, h) => mapSide(x, y, w, h, -1), out)
+
+      // Front view -> duplicate at x = +/- L/2 (front and rear faces)
+      const mapFront = (xIdx: number, yIdx: number, w: number, h: number, front: number) => {
+        const nz = xIdx / (w - 1) - 0.5
+        const ny = 1.0 - yIdx / (h - 1)
+        const x = front * (L * 0.5)
+        return new THREE.Vector3(x, ny * H * 0.95, nz * W)
+      }
+      addGridSegments(frontMask, (x, y, w, h) => mapFront(x, y, w, h, +1), out)
+      addGridSegments(frontMask, (x, y, w, h) => mapFront(x, y, w, h, -1), out)
+
+      return new Float32Array(out)
+    }
+
+    async function regionMask(img: HTMLImageElement, r: {x:number;y:number;w:number;h:number}, resX: number, resY: number): Promise<{ w:number; h:number; data: Uint8Array }> {
+      const c = document.createElement('canvas')
+      c.width = resX; c.height = resY
+      const g = c.getContext('2d', { willReadFrequently: true })!
+      g.imageSmoothingEnabled = true
+      g.drawImage(img, r.x, r.y, r.w, r.h, 0, 0, resX, resY)
+      const id = g.getImageData(0, 0, resX, resY)
+      const mask = new Uint8Array(resX * resY)
+      for (let y=0;y<resY;y++){
+        for (let x=0;x<resX;x++){
+          const i = (y * resX + x) * 4
+          const R = id.data[i], G = id.data[i+1], B = id.data[i+2]
+          // White lines on black bg: threshold by luminance and require fairly bright
+          const lum = (0.2126*R + 0.7152*G + 0.0722*B) / 255
+          mask[y*resX + x] = lum > 0.62 ? 1 : 0
+        }
+      }
+      // Cheap thinning: remove isolated pixels
+      const out = new Uint8Array(mask.length)
+      for (let y=1;y<resY-1;y++){
+        for (let x=1;x<resX-1;x++){
+          const idx = y*resX+x
+          if (!mask[idx]) { out[idx]=0; continue }
+          let n=0
+          n += mask[idx-1] + mask[idx+1] + mask[idx-resX] + mask[idx+resX]
+          n += mask[idx-resX-1] + mask[idx-resX+1] + mask[idx+resX-1] + mask[idx+resX+1]
+          out[idx] = n >= 2 ? 1 : 0
+        }
+      }
+      return { w: resX, h: resY, data: out }
+    }
+
+    function addGridSegments(mask: { w:number; h:number; data: Uint8Array }, map: (x:number,y:number,w:number,h:number)=>THREE.Vector3, out: number[]) {
+      const w = mask.w, h = mask.h, data = mask.data
+      for (let y=0;y<h;y++){
+        for (let x=0;x<w;x++){
+          const i = y*w + x
+          if (!data[i]) continue
+          if (x+1 < w && data[i+1]) {
+            const a = map(x, y, w, h), b = map(x+1, y, w, h)
+            out.push(a.x, a.y, a.z, b.x, b.y, b.z)
+          }
+          if (y+1 < h && data[i+w]) {
+            const a = map(x, y, w, h), b = map(x, y+1, w, h)
+            out.push(a.x, a.y, a.z, b.x, b.y, b.z)
+          }
+        }
+      }
+    }
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quality.renderScale, quality.bloom, accessibility.epilepsySafe, auth])
 
@@ -1551,16 +1461,11 @@ const chipStyle = (active: boolean): React.CSSProperties => ({
 
 function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
 
-// Robust angle lerp (works if MathUtils.lerpAngle is unavailable)
+// Robust angle lerp (not used heavily here but kept for reference)
 function lerpAngle(a: number, b: number, t: number) {
   const TAU = Math.PI * 2
   let d = (b - a) % TAU
   if (d > Math.PI) d -= TAU
   if (d < -Math.PI) d += TAU
   return a + d * t
-}
-
-// Guard against NaN/Infinity
-function finite(n: number, fallback = 0) {
-  return Number.isFinite(n) ? n : fallback
 }

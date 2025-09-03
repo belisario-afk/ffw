@@ -67,10 +67,10 @@ type LocalCfg = {
   car: {
     scale: number
     yOffset: number
-    pathRadius: number
     turntable: boolean
     outline: boolean
     flipForward: boolean
+    // Effects
     smokeEnabled: boolean
     smokeDensity: number
     smokeTintAlbum: boolean
@@ -83,15 +83,20 @@ type LocalCfg = {
     lightsTailIntensity: number
     lightsBrakeBoost: number
     wheelSpinEnabled: boolean
+    // New path/steer/lights options
+    pathSpeed: number
+    pathMargin: number
+    maxSteerDeg: number
+    steerResponse: number
+    headlightSources: boolean
   }
 }
 
 const LS_KEY = 'ffw.wire3d.settings.v2'
 
-// Default GLB source (raw GitHub URL for your committed file)
+// Default GLB source
 const DEFAULT_GLB_URL = (window as any)?.FFW_CAR_GLB_URL
   || 'https://raw.githubusercontent.com/belisario-afk/try240/bf00e4ea26597cb5ba63c88e819a9fb696ada7d6/lamborghini_aventador_svj_sdc__free.glb'
-// Optional local fallback (place in public/assets/car.glb)
 const LOCAL_FALLBACK_GLB_URL = `${import.meta.env.BASE_URL}assets/car.glb`
 
 function defaults(initial?: any): LocalCfg {
@@ -137,7 +142,6 @@ function defaults(initial?: any): LocalCfg {
     car: {
       scale: 0.72,
       yOffset: 0.0,
-      pathRadius: 11.0,
       turntable: false,
       outline: false,
       flipForward: false,
@@ -152,13 +156,17 @@ function defaults(initial?: any): LocalCfg {
       lightsTailEnabled: true,
       lightsTailIntensity: 0.75,
       lightsBrakeBoost: 1.4,
-      wheelSpinEnabled: true
+      wheelSpinEnabled: true,
+      pathSpeed: 4.0,
+      pathMargin: 2.0,
+      maxSteerDeg: 28,
+      steerResponse: 0.9,
+      headlightSources: true
     }
   }
 }
 
 function mergeWithDefaults(saved: any, base: LocalCfg): LocalCfg {
-  // Deep-ish merge to backfill missing nested props
   return {
     ...base,
     ...saved,
@@ -184,7 +192,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   const [panelOpen, setPanelOpen] = useState(false)
 
-  // Billboard controller UI state (in Settings panel)
+  // Billboard controller UI
   const [bbEditEnabled, setBbEditEnabled] = useState(false)
   const [bbMode, setBbMode] = useState<'move'|'rotate'|'scale'>('move')
   const [bbPlane, setBbPlane] = useState<'XZ'|'XY'>('XZ')
@@ -195,7 +203,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
   useEffect(() => { bbModeRef.current = bbMode }, [bbMode])
   useEffect(() => { bbPlaneRef.current = bbPlane }, [bbPlane])
 
-  // Billboard transforms (controlled by UI)
+  // Billboard transforms
   const moveVecRef = useRef<{x:number,y:number}>({ x: 0, y: 0 })
   const moveAxis3Ref = useRef<number>(0)
   const rotateVecRef = useRef<{x:number,y:number}>({ x: 0, y: 0 })
@@ -244,7 +252,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
   useEffect(() => {
     try {
-      // Always save a fully backfilled config so next boot is safe
       const base = defaults(settings)
       const merged = mergeWithDefaults(cfg, base)
       localStorage.setItem(LS_KEY, JSON.stringify(merged))
@@ -356,7 +363,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     controls.maxPolarAngle = Math.PI * 0.85
     controls.target.set(cfgRef.current.camera.target.x, cfgRef.current.camera.target.y, cfgRef.current.camera.target.z)
 
-    // Expose for "Frame car" action
     ;(window as any).__FFW_camera = camera
     ;(window as any).__FFW_controls = controls
 
@@ -667,10 +673,15 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // Mansion safe rectangle (avoid penetration)
+    // Mansion safe rectangle
     const safeRect = { minX: -5.0, maxX: 5.0, minZ: -2.4, maxZ: 2.4 }
 
-    // GLB car model (with outline + forward detection + effects)
+    // Build perimeter loop (rounded rectangle) around mansion
+    let loop = buildPerimeterLoop(safeRect, cfgRef.current.car.pathMargin)
+    let lastMargin = cfgRef.current.car.pathMargin
+    const loopRef = { current: loop }
+
+    // GLB car model (with pivots/steer, effects)
     const car = createGlbCarModel({
       url: DEFAULT_GLB_URL,
       fallbackUrl: LOCAL_FALLBACK_GLB_URL,
@@ -695,7 +706,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         lightsTailEnabled: cfgRef.current.car.lightsTailEnabled,
         lightsTailIntensity: cfgRef.current.car.lightsTailIntensity,
         lightsBrakeBoost: cfgRef.current.car.lightsBrakeBoost,
-        wheelSpinEnabled: cfgRef.current.car.wheelSpinEnabled
+        wheelSpinEnabled: cfgRef.current.car.wheelSpinEnabled,
+        headlightSources: cfgRef.current.car.headlightSources
       }),
     })
     car.group.visible = !!cfgRef.current.fx.wireCar
@@ -737,6 +749,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       if (camera.fov !== cfgC.camera.fov) {
         camera.fov = cfgC.camera.fov
         camera.updateProjectionMatrix()
+      }
+
+      // Rebuild loop if margin changed
+      if (cfgC.car.pathMargin !== lastMargin) {
+        loop = buildPerimeterLoop(safeRect, cfgC.car.pathMargin)
+        loopRef.current = loop
+        lastMargin = cfgC.car.pathMargin
       }
 
       controls.enableDamping = cfgC.camera.enableDamping
@@ -800,16 +819,16 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       car.group.visible = !!cfgC.fx.wireCar
       if (car.group.visible) {
         car.setColor?.(carColorRef.current)
-        const radius = Math.min(cfgC.car.pathRadius, (floorSize * 0.5 - 0.6))
         car.update(dt, {
-          t,
-          radius,
           turntable: cfgC.car.turntable,
           flipForward: cfgC.car.flipForward,
           scale: cfgC.car.scale,
           yOffset: cfgC.car.yOffset,
           albumColor: carColorRef.current,
-          safeRect
+          loop: loopRef.current,
+          speed: cfgC.car.pathSpeed,
+          maxSteerRad: (cfgC.car.maxSteerDeg || 25) * Math.PI / 180,
+          steerResp: Math.max(0.05, cfgC.car.steerResponse)
         })
         car.setOutlineVisible(cfgC.car.outline)
       }
@@ -885,7 +904,8 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
         controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
       } else {
-        camera.position.y += (bob - (camera as any).__lastBobY || 0)
+        const lastBob = (camera as any).__lastBobY || 0
+        camera.position.y += (bob - lastBob)
         ;(camera as any).__lastBobY = bob
       }
 
@@ -1032,7 +1052,69 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
     }
 
-    // GLB car loader and driver + outline + front/back detection + motion + effects
+    // Perimeter loop builder
+    function buildPerimeterLoop(rect: {minX:number,maxX:number,minZ:number,maxZ:number}, margin: number) {
+      const minX = rect.minX - margin
+      const maxX = rect.maxX + margin
+      const minZ = rect.minZ - margin
+      const maxZ = rect.maxZ + margin
+      const width = maxX - minX
+      const height = maxZ - minZ
+      let r = Math.min(margin, 0.5 * Math.min(width, height) - 1e-3)
+      if (r < 0) r = 0
+      const Lx = Math.max(0, width - 2*r)
+      const Lz = Math.max(0, height - 2*r)
+
+      type Seg =
+        | { type:'line', len:number, p0:THREE.Vector2, dir:THREE.Vector2 }
+        | { type:'arc', len:number, c:THREE.Vector2, r:number, a0:number, a1:number }
+      const segs: Seg[] = []
+
+      // Top straight (left->right)
+      segs.push({ type:'line', len:Lx, p0:new THREE.Vector2(minX + r, minZ), dir:new THREE.Vector2(1,0) })
+      // Top-right arc -90 -> 0
+      segs.push({ type:'arc', len: (Math.PI/2)*r, c: new THREE.Vector2(maxX - r, minZ + r), r, a0: -Math.PI/2, a1: 0 })
+      // Right straight (top->bottom)
+      segs.push({ type:'line', len:Lz, p0:new THREE.Vector2(maxX, minZ + r), dir:new THREE.Vector2(0,1) })
+      // Bottom-right arc 0 -> +90
+      segs.push({ type:'arc', len: (Math.PI/2)*r, c: new THREE.Vector2(maxX - r, maxZ - r), r, a0: 0, a1: Math.PI/2 })
+      // Bottom straight (right->left)
+      segs.push({ type:'line', len:Lx, p0:new THREE.Vector2(maxX - r, maxZ), dir:new THREE.Vector2(-1,0) })
+      // Bottom-left arc +90 -> +180
+      segs.push({ type:'arc', len: (Math.PI/2)*r, c: new THREE.Vector2(minX + r, maxZ - r), r, a0: Math.PI/2, a1: Math.PI })
+      // Left straight (bottom->top)
+      segs.push({ type:'line', len:Lz, p0:new THREE.Vector2(minX, maxZ - r), dir:new THREE.Vector2(0,-1) })
+      // Top-left arc +180 -> +270
+      segs.push({ type:'arc', len: (Math.PI/2)*r, c: new THREE.Vector2(minX + r, minZ + r), r, a0: Math.PI, a1: 3*Math.PI/2 })
+
+      const cum: number[] = []
+      let total = 0
+      for (const s of segs) { total += s.len; cum.push(total) }
+
+      function sample(s: number) {
+        let u = ((s % total) + total) % total
+        let idx = 0
+        while (idx < segs.length && u > cum[idx]) idx++
+        const prevCum = idx === 0 ? 0 : cum[idx - 1]
+        const seg = segs[idx]
+        const local = u - prevCum
+        if (seg.type === 'line') {
+          const pos = new THREE.Vector2().copy(seg.p0).add(seg.dir.clone().multiplyScalar(local))
+          const tan = seg.dir.clone()
+          return { x: pos.x, z: pos.y, tx: tan.x, tz: tan.y }
+        } else {
+          const t = local / Math.max(1e-6, seg.len)
+          const a = THREE.MathUtils.lerp(seg.a0, seg.a1, t)
+          const pos = new THREE.Vector2(seg.c.x + seg.r * Math.cos(a), seg.c.y + seg.r * Math.sin(a))
+          const tan = new THREE.Vector2(-Math.sin(a), Math.cos(a))
+          return { x: pos.x, z: pos.y, tx: tan.x, tz: tan.y }
+        }
+      }
+
+      return { length: total, sample }
+    }
+
+    // GLB car loader and driver + outline + front/back detection + motion + effects + proper wheel pivots/steer
     function createGlbCarModel(opts: {
       url: string
       fallbackUrl?: string
@@ -1046,6 +1128,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         lightsHeadEnabled: boolean; lightsHeadIntensity: number;
         lightsTailEnabled: boolean; lightsTailIntensity: number; lightsBrakeBoost: number;
         wheelSpinEnabled: boolean;
+        headlightSources: boolean;
       }
     }) {
       const group = new THREE.Group()
@@ -1062,13 +1145,26 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const taillightMats: THREE.Material[] = []
       const edgeLines: THREE.LineSegments[] = []
 
-      // Wheels detection
-      type WheelInfo = { node: THREE.Object3D, radius: number, isRear: boolean, isLeft: boolean }
-      const wheels: WheelInfo[] = []
+      // Wheels detection + pivots
+      type Wheel = {
+        meshNode: THREE.Object3D
+        steerPivot: THREE.Group
+        spinPivot: THREE.Group
+        radius: number
+        axleAxis: 'x'|'y'|'z'
+        isRear: boolean
+        isFront: boolean
+        isLeft: boolean
+        centerLocal: THREE.Vector3
+        spinAngle: number
+        steerAngle: number
+      }
+      const wheels: Wheel[] = []
 
       // Lights objects
       const headLights: THREE.SpotLight[] = []
       const tailLights: THREE.PointLight[] = []
+      const headlightQuads: THREE.Mesh[] = []
 
       // Smoke system (sprites, pooled)
       const smoke = createSmokeSystem()
@@ -1084,8 +1180,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const prevWorldPos = new THREE.Vector3()
       group.getWorldPosition(prevWorldPos)
       let prevSpeed = 0
-
-      const tmpCur = new THREE.Vector3()
+      let sParam = 0 // loop arc-length parameter
 
       const loader = new GLTFLoader()
       try {
@@ -1136,8 +1231,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         scene.position.z = -center2.z
         scene.position.y = -bbox2.min.y
 
-        // Detect materials and wheels
+        // Detect materials and wheel meshes
         const wheelRegex = /(wheel|rim|tyre|tire)/i
+        const wheelCandidates: { node: THREE.Object3D, centerW: THREE.Vector3, sizeLocal: THREE.Vector3 }[] = []
+
         scene.traverse((obj) => {
           const mesh = obj as THREE.Mesh
           if ((mesh as any).isMesh) {
@@ -1181,50 +1278,88 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
           // Wheels by node name and approximate radius
           if (wheelRegex.test(obj.name)) {
-            const box = new THREE.Box3().setFromObject(obj)
-            const size = new THREE.Vector3(); const center = new THREE.Vector3()
-            box.getSize(size); box.getCenter(center)
-            const radius = Math.max(size.y, size.z) * 0.5
-            wheels.push({ node: obj, radius: Math.max(0.01, radius), isRear: false, isLeft: center.z < 0 })
+            const boxW = new THREE.Box3().setFromObject(obj)
+            const centerW = boxW.getCenter(new THREE.Vector3())
+            let sizeLocal = new THREE.Vector3(0.3,0.3,0.3)
+            if ((obj as any).isMesh && (obj as THREE.Mesh).geometry) {
+              const g = (obj as THREE.Mesh).geometry
+              g.computeBoundingBox()
+              const bb = g.boundingBox
+              if (bb) { sizeLocal = bb.getSize(new THREE.Vector3()) }
+            } else {
+              const bb = new THREE.Box3().setFromObject(obj)
+              sizeLocal = bb.getSize(new THREE.Vector3())
+            }
+            wheelCandidates.push({ node: obj, centerW, sizeLocal })
           }
         })
 
-        // If wheel detection failed, try to infer four farthest circular-ish nodes by size
-        if (wheels.length < 2) {
-          const candidates: { node: THREE.Object3D, radius: number, center: THREE.Vector3 }[] = []
-          scene.traverse((o) => {
-            const mesh = o as any
-            if (!mesh.isMesh) return
-            const box = new THREE.Box3().setFromObject(mesh)
-            const size = new THREE.Vector3(); const center = new THREE.Vector3()
-            box.getSize(size); box.getCenter(center)
-            const roundness = Math.abs(size.y - size.z) / Math.max(1e-3, (size.y + size.z))
-            if (roundness < 0.35 && size.y > 0.05 && size.z > 0.05) {
-              candidates.push({ node: mesh, radius: Math.max(0.02, Math.max(size.y, size.z) * 0.5), center })
-            }
-          })
-          candidates.sort((a,b) => Math.abs(b.center.z) - Math.abs(a.center.z))
-          for (let i=0; i<Math.min(4, candidates.length); i++) {
-            const c = candidates[i]
-            wheels.push({ node: c.node, radius: c.radius, isRear: false, isLeft: c.center.z < 0 })
-          }
-        }
-
         forwardSign = detectForwardSign(scene)
 
-        // Assign rear wheels by x-extremes (rear cluster opposite to forward)
+        // Build wheel pivots at true centers
+        for (const wc of wheelCandidates) {
+          const centerLocal = holder.worldToLocal(wc.centerW.clone())
+          const steerPivot = new THREE.Group()
+          steerPivot.position.copy(centerLocal)
+          const spinPivot = new THREE.Group()
+          steerPivot.add(spinPivot)
+          holder.add(steerPivot)
+          // Attach original node under spinPivot while preserving world transform
+          spinPivot.attach(wc.node)
+          const sx = Math.abs(wc.sizeLocal.x), sy = Math.abs(wc.sizeLocal.y), sz = Math.abs(wc.sizeLocal.z)
+          const dims = [{k:'x',v:sx},{k:'y',v:sy},{k:'z',v:sz}].sort((a,b)=>a.v-b.v)
+          const axleAxis = dims[0].k as 'x'|'y'|'z'
+          const rollingRadius = Math.max(dims[1].v, dims[2].v) * 0.5
+          const isLeft = centerLocal.z < 0
+          wheels.push({
+            meshNode: wc.node,
+            steerPivot,
+            spinPivot,
+            radius: Math.max(0.05, rollingRadius),
+            axleAxis,
+            isRear: false,
+            isFront: false,
+            isLeft,
+            centerLocal,
+            spinAngle: 0,
+            steerAngle: 0
+          })
+        }
+
+        // Mark front/rear by x extremes
         if (wheels.length) {
-          const xs = wheels.map(w => new THREE.Box3().setFromObject(w.node).getCenter(new THREE.Vector3()).x)
+          const xs = wheels.map(w => w.centerLocal.x)
           const maxX = Math.max(...xs), minX = Math.min(...xs)
           const frontIsPosX = (forwardSign === 1)
+          const frontX = frontIsPosX ? maxX : minX
           const rearX = frontIsPosX ? minX : maxX
-          wheels.forEach((w, i) => { w.isRear = Math.abs(xs[i] - rearX) < Math.abs(xs[i] - (frontIsPosX ? maxX : minX)) })
+          wheels.forEach((w, i) => {
+            const x = xs[i]
+            w.isFront = Math.abs(x - frontX) < Math.abs(x - rearX)
+            w.isRear = !w.isFront
+          })
         }
 
         // Add light objects near lamp areas (fallback to bbox extremes)
         addLights(scene, bbox2)
+        // Add headlight source quads if needed (created hidden by default)
+        if (headlightMats.length === 0) addHeadlightSourceQuads()
 
         holder.add(scene)
+      }
+
+      function addHeadlightSourceQuads() {
+        if (!headLights.length) return
+        const geo = new THREE.PlaneGeometry(0.12, 0.06)
+        for (const s of headLights) {
+          const m = new THREE.MeshBasicMaterial({ color: 0xcfe8ff, transparent: true, opacity: 0.9, depthWrite: false, toneMapped: true })
+          const quad = new THREE.Mesh(geo, m)
+          quad.position.copy(s.position)
+          quad.lookAt(new THREE.Vector3().copy(s.target.position))
+          quad.visible = false
+          holder.add(quad)
+          headlightQuads.push(quad)
+        }
       }
 
       function addLights(sceneRoot: THREE.Object3D, bbox: THREE.Box3) {
@@ -1234,15 +1369,21 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const halfZ = Math.max(Math.abs(bbox.max.z), Math.abs(bbox.min.z)) * 0.6
 
         for (const z of [-1, 1]) {
-          const s = new THREE.SpotLight(0xcfe8ff, 0, 10, Math.PI/6, 0.35, 1.2)
+          const s = new THREE.SpotLight(0xcfe8ff as any, 0, 16, Math.PI/6, 0.35, 1.2)
+          // TS workaround: cast through any to avoid literal parsing issues in some toolchains
+        }
+        // Re-create with proper color:
+        headLights.length = 0
+        for (const z of [-1, 1]) {
+          const s = new THREE.SpotLight(0xcfe8ff, 0, 16, Math.PI/6, 0.35, 1.2)
           s.position.set(frontX + 0.15 * forwardSign, midY, z * halfZ)
-          s.target.position.set(frontX + 4 * forwardSign, midY-0.15, z * halfZ * 0.95)
+          s.target.position.set(frontX + 4 * forwardSign, midY-0.12, z * halfZ * 0.95)
           holder.add(s); holder.add(s.target)
           s.visible = false
           headLights.push(s)
         }
         for (const z of [-1, 1]) {
-          const p = new THREE.PointLight(0xff2a2a, 0, 4, 1.5)
+          const p = new THREE.PointLight(0xff2a2a, 0, 5, 1.5)
           p.position.set(rearX - 0.05 * forwardSign, midY * 0.85, z * halfZ)
           holder.add(p)
           p.visible = false
@@ -1317,107 +1458,93 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         for (const e of edgeLines) e.visible = v
       }
 
-      // Smooth avoidance helpers
-      function repelFromRect(x: number, z: number, rect: {minX:number,maxX:number,minZ:number,maxZ:number}, margin = 0.7, strength = 1.0) {
-        const rx0 = rect.minX - margin, rx1 = rect.maxX + margin
-        const rz0 = rect.minZ - margin, rz1 = rect.maxZ + margin
-        const nx = THREE.MathUtils.clamp(x, rx0, rx1)
-        const nz = THREE.MathUtils.clamp(z, rz0, rz1)
-        const dx = x - nx, dz = z - nz
-        const dist = Math.hypot(dx, dz)
-        if (dist === 0) {
-          // When exactly on (or deeply inside) the inflated rectangle, push out toward nearest edge
-          const left = Math.abs(x - rx0), right = Math.abs(x - rx1), front = Math.abs(z - rz0), back = Math.abs(z - rz1)
-          let vx = 0, vz = 0
-          const m = Math.min(left, right, front, back)
-          if (m === left) vx = -1
-          else if (m === right) vx = 1
-          else if (m === front) vz = -1
-          else vz = 1
-          const amt = strength * margin * 0.6
-          return { x: x + vx * amt, z: z + vz * amt }
-        } else if (dist < margin) {
-          const k = strength * (1 - dist / margin) * margin
-          const nxv = dx / dist, nzv = dz / dist
-          return { x: x + nxv * k, z: z + nzv * k }
-        }
-        return { x, z }
-      }
+      // State for steering smoothing
+      let steerAngleCurr = 0
 
-      // Pathing with mansion avoidance + effects
-      const state = { t: 0, phase: 0 }
       function update(dt: number, env: {
-        t: number; radius: number; turntable: boolean; flipForward: boolean; scale: number; yOffset: number;
-        albumColor: THREE.Color; safeRect: { minX:number; maxX:number; minZ:number; maxZ:number }
+        turntable: boolean; flipForward: boolean; scale: number; yOffset: number;
+        albumColor: THREE.Color; loop: { length:number; sample:(s:number)=>{x:number,z:number,tx:number,tz:number} };
+        speed: number; maxSteerRad: number; steerResp: number
       }) {
         applyUserScale(env.scale)
         group.position.y = opts.baseY + env.yOffset
 
-        // Live effects & lights toggling
         const fx = opts.getEffects()
-        for (const s of headLights) { s.intensity = fx.lightsHeadEnabled ? fx.lightsHeadIntensity : 0; s.visible = fx.lightsHeadEnabled }
-        for (const p of tailLights) { p.intensity = fx.lightsTailEnabled ? fx.lightsTailIntensity : 0; p.visible = fx.lightsTailEnabled }
 
-        state.t += dt * 0.8
-        state.phase += dt * 0.6
+        // Lights visibility and intensities
+        const headOn = fx.lightsHeadEnabled
+        const tailOn = fx.lightsTailEnabled
+        for (const s of headLights) { s.intensity = headOn ? fx.lightsHeadIntensity : 0; s.visible = headOn }
+        for (const p of tailLights) { p.intensity = tailOn ? fx.lightsTailIntensity : 0; p.visible = tailOn }
+        const showQuads = fx.headlightSources && headlightMats.length === 0 && headOn
+        for (const q of headlightQuads) q.visible = showQuads
 
         if (env.turntable) {
-          const a = state.phase
+          const a = (performance.now() * 0.001)
           group.position.x = 0
           group.position.z = 0
-          holder.rotation.y = (a * 0.6 + (env.flipForward ? Math.PI : 0))
-          if (fx.wheelSpinEnabled && wheels.length) {
-            const w = 1.4
-            for (const wh of wheels) (wh.node.rotation as any).z = ((wh.node.rotation as any).z || 0) - w * dt
+          let yaw = (a * 0.6 + (env.flipForward ? Math.PI : 0))
+          holder.rotation.y = yaw
+          // front wheels steer to zero smoothly
+          steerAngleCurr += (0 - steerAngleCurr) * Math.min(1, env.steerResp * dt * 5)
+          for (const w of wheels) {
+            if (w.isFront) w.steerPivot.rotation.y = steerAngleCurr
+            if (fx.wheelSpinEnabled) {
+              const dAng = (1.2 / Math.max(0.05, w.radius)) * dt
+              rotateAroundAxis(w.spinPivot, w.axleAxis, -dAng)
+            }
           }
           smoke.setEnabled(false)
           skid.setEnabled(false)
+          prevSpeed = 0
           return
         }
 
-        // Base lemniscate (figure-8)
-        const R = env.radius
-        const a = state.phase
-        const s = Math.sin(a), c = Math.cos(a), denom = 1 + s*s
-        const baseX = (R * c) / denom
-        const baseZ = (R * s * c) / denom
+        // Advance along loop by arc-length speed
+        sParam = (sParam + Math.max(0, env.speed) * dt) % env.loop.length
 
-        // Smooth avoidance: gently repel from an inflated rectangle
-        const repelled = repelFromRect(baseX, baseZ, env.safeRect, 0.9, 1.25)
+        // Sample current and look-ahead
+        const lookAhead = 0.5 // meters
+        const cur = env.loop.sample(sParam)
+        const nxt = env.loop.sample(sParam + lookAhead)
 
-        // For orientation, compute a nearby point along the curve and repel it the same way
-        const eps = 0.015
-        const s2 = Math.sin(a + eps), c2 = Math.cos(a + eps), d2 = 1 + s2*s2
-        const nx = (R * c2) / d2
-        const nz = (R * s2 * c2) / d2
-        const repelledNext = repelFromRect(nx, nz, env.safeRect, 0.9, 1.25)
-
+        // Set position
         const prev = prevWorldPos.clone()
-        group.position.x = repelled.x
-        group.position.z = repelled.z
+        group.position.x = cur.x
+        group.position.z = cur.z
+
+        // Tangent heading
+        const tanHeading = Math.atan2(cur.tz, cur.tx)
+        let yaw = holder.rotation.y
+        let targetYaw = tanHeading + (forwardSign === 1 ? 0 : Math.PI)
+        if (env.flipForward) targetYaw += Math.PI
+        const yawDiff = wrapAngle(targetYaw - yaw)
+        yaw += THREE.MathUtils.clamp(yawDiff, -dt*2.5, dt*2.5)
+        holder.rotation.y = yaw
+
+        // Steering: angle is difference between desired heading and car yaw, clamped to max
+        let steerTarget = wrapAngle(tanHeading - yaw)
+        steerTarget = THREE.MathUtils.clamp(steerTarget, -env.maxSteerRad, env.maxSteerRad)
+        steerAngleCurr += (steerTarget - steerAngleCurr) * Math.min(1, env.steerResp * dt * 8)
+
+        // Apply steering to front wheels, zero for rear
+        for (const w of wheels) {
+          if (w.isFront) w.steerPivot.rotation.y = steerAngleCurr
+          else w.steerPivot.rotation.y = 0
+        }
 
         // Velocity & speed from world delta
-        const vel = tmpCur.subVectors(group.position, prev)
+        const vel = new THREE.Vector3().subVectors(group.position, prev)
         const speed = vel.length() / Math.max(1e-6, dt)
         prevWorldPos.copy(group.position)
 
-        // Facing from tangent of repelled path
-        let yaw = holder.rotation.y
-        const tx = repelledNext.x - repelled.x
-        const tz = repelledNext.z - repelled.z
-        if (tx*tx + tz*tz > 1e-8) {
-          yaw = Math.atan2(tz, tx) + (forwardSign === 1 ? 0 : Math.PI)
-          if (env.flipForward) yaw += Math.PI
-        }
-        holder.rotation.y = THREE.MathUtils.lerp(holder.rotation.y, yaw, 0.25)
-
-        // Wheel spin
+        // Wheel roll: omega = v / r, sign from forward direction
         if (fx.wheelSpinEnabled && wheels.length) {
           const fwd = new THREE.Vector3(1,0,0).applyQuaternion(holder.quaternion)
           const vSign = Math.sign(fwd.dot(vel)) || 1
-          for (const wh of wheels) {
-            const w = (speed * vSign) / Math.max(0.05, wh.radius)
-            ;(wh.node.rotation as any).z = ((wh.node.rotation as any).z || 0) - w * dt
+          for (const w of wheels) {
+            const wAng = (speed * vSign) / Math.max(0.05, w.radius)
+            rotateAroundAxis(w.spinPivot, w.axleAxis, -wAng * dt)
           }
         }
 
@@ -1427,10 +1554,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         prevSpeed = speed
 
         // Lights brake boost
-        if (fx.lightsTailEnabled) {
-          const boost = fx.lightsBrakeBoost
+        if (tailOn) {
+          const boost = opts.getEffects().lightsBrakeBoost
           const add = THREE.MathUtils.clamp(decel * 0.06, 0, 1.0) * boost
-          for (const p of tailLights) p.intensity = fx.lightsTailIntensity + add
+          for (const p of tailLights) p.intensity = opts.getEffects().lightsTailIntensity + add
           for (const m of taillightMats) {
             const orig = originals.get(m)
             const std = m as any
@@ -1443,28 +1570,28 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
         // Smoke & skid (rear wheels)
         const rearWheels = wheels.filter(w => w.isRear)
-        const emitSmoke = fx.smokeEnabled && (speed > 1.0 || decel > 0.5)
-        const makeSkid = fx.skidEnabled && (decel > 0.8 || speed > 1.2)
+        const emitSmoke = opts.getEffects().smokeEnabled && (speed > 1.0 || decel > 0.5)
+        const makeSkid = opts.getEffects().skidEnabled && (decel > 0.8 || speed > 1.2)
         const albumCol = opts.getAlbumColor()
 
         if (emitSmoke && rearWheels.length) {
           smoke.setEnabled(true)
-          smoke.setColor(fx.smokeTintAlbum ? albumCol : new THREE.Color(0xededed))
-          const rate = THREE.MathUtils.clamp(fx.smokeDensity * (0.3 + speed * 0.03 + decel * 0.08), 0, 6)
+          smoke.setColor(opts.getEffects().smokeTintAlbum ? albumCol : new THREE.Color(0xededed))
+          const rate = THREE.MathUtils.clamp(opts.getEffects().smokeDensity * (0.3 + speed * 0.03 + decel * 0.08), 0, 6)
           for (const rw of rearWheels) {
-            const wp = rw.node.getWorldPosition(new THREE.Vector3())
+            const wp = rw.spinPivot.getWorldPosition(new THREE.Vector3())
             smoke.emit(wp, new THREE.Vector3(vel.x, 0, vel.z), rate, dt)
           }
         } else {
           smoke.setEnabled(false)
         }
 
-        if (fx.skidEnabled && rearWheels.length) {
+        if (opts.getEffects().skidEnabled && rearWheels.length) {
           skid.setEnabled(true)
-          skid.setOpacity(THREE.MathUtils.clamp(fx.skidOpacity, 0, 1))
-          skid.setMaxSegments(fx.skidSegments)
+          skid.setOpacity(THREE.MathUtils.clamp(opts.getEffects().skidOpacity, 0, 1))
+          skid.setMaxSegments(opts.getEffects().skidSegments)
           for (const rw of rearWheels) {
-            const wp = rw.node.getWorldPosition(new THREE.Vector3())
+            const wp = rw.spinPivot.getWorldPosition(new THREE.Vector3())
             wp.y = 0.0012
             const width = Math.min(0.22, Math.max(0.08, rw.radius * 0.35))
             const side = new THREE.Vector3(0,0,1).applyQuaternion(holder.quaternion).setY(0).normalize().multiplyScalar(rw.isLeft ? -width : width)
@@ -1510,6 +1637,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         skid.dispose()
         for (const s of headLights) { s.dispose(); s.target?.removeFromParent?.(); s.removeFromParent() }
         for (const p of tailLights) { p.dispose(); p.removeFromParent() }
+        for (const q of headlightQuads) { (q.material as THREE.Material).dispose(); q.geometry.dispose(); q.removeFromParent() }
+      }
+
+      function rotateAroundAxis(obj: THREE.Object3D, axis: 'x'|'y'|'z', delta: number) {
+        if (axis === 'x') obj.rotation.x += delta
+        else if (axis === 'y') obj.rotation.y += delta
+        else obj.rotation.z += delta
       }
 
       return { group, update, dispose, setColor, setOutlineVisible, frameToView }
@@ -1630,11 +1764,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         return rec
       }
 
-      function addSegment(key: 'RL'|'RR', pL: THREE.Vector3, pR: THREE.Vector3, active: 0|1) {
+      function addSegment(key: 'RL'|'RR', pL: THREE.Vector3, pR: THREE.Vector3, _active: 0|1) {
         const s = ensureStrip(key)
         s.pointsL.push(pL.clone())
         s.pointsR.push(pR.clone())
-        s.activeMask.push(!!active)
+        s.activeMask.push(!!_active)
         while (s.pointsL.length > s.maxSegs) { s.pointsL.shift(); s.pointsR.shift(); s.activeMask.shift() }
         rebuildStrip(s)
       }
@@ -1947,11 +2081,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
             <input type="range" min={-0.2} max={0.5} step={0.01} value={c.yOffset}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, yOffset: +e.target.value } }))} />
           </label>
-          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Showcase radius: {c.pathRadius.toFixed(1)} m</span>
-            <input type="range" min={6} max={15} step={0.1} value={c.pathRadius}
-              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, pathRadius: +e.target.value } }))} />
-          </label>
+
           <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:10, alignItems:'center' }}>
             <span>Turntable mode</span>
             <input type="checkbox" checked={c.turntable}
@@ -1966,6 +2096,30 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
 
           <div style={{ height:1, background:'rgba(255,255,255,0.06)', margin:'2px 0' }} />
 
+          <div style={{ fontSize:12, opacity:0.8 }}>Path & Steering</div>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Speed: {c.pathSpeed.toFixed(2)} m/s</span>
+            <input type="range" min={0.5} max={10} step={0.05} value={c.pathSpeed}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, pathSpeed: +e.target.value } }))} />
+          </label>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Perimeter margin: {c.pathMargin.toFixed(2)} m</span>
+            <input type="range" min={0.8} max={3.5} step={0.05} value={c.pathMargin}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, pathMargin: +e.target.value } }))} />
+          </label>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Max steer: {c.maxSteerDeg.toFixed(0)}°</span>
+            <input type="range" min={8} max={40} step={1} value={c.maxSteerDeg}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, maxSteerDeg: +e.target.value } }))} />
+          </label>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Steer response: {c.steerResponse.toFixed(2)}</span>
+            <input type="range" min={0.1} max={2.0} step={0.01} value={c.steerResponse}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, steerResponse: +e.target.value } }))} />
+          </label>
+
+          <div style={{ height:1, background:'rgba(255,255,255,0.06)', margin:'2px 0' }} />
+
           <div style={{ fontSize:12, opacity:0.8 }}>Lights</div>
           <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:10, alignItems:'center' }}>
             <span>Headlights</span>
@@ -1974,9 +2128,14 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           </div>
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
             <span>Headlight intensity: {c.lightsHeadIntensity.toFixed(2)}</span>
-            <input type="range" min={0} max={2} step={0.01} value={c.lightsHeadIntensity}
+            <input type="range" min={0} max={2.5} step={0.01} value={c.lightsHeadIntensity}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, lightsHeadIntensity: +e.target.value } }))} />
           </label>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:10, alignItems:'center' }}>
+            <span>Headlight glow sources</span>
+            <input type="checkbox" checked={c.headlightSources}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, headlightSources: e.target.checked } }))} />
+          </div>
           <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:10, alignItems:'center' }}>
             <span>Taillights</span>
             <input type="checkbox" checked={c.lightsTailEnabled}
@@ -1984,7 +2143,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           </div>
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
             <span>Taillight intensity: {c.lightsTailIntensity.toFixed(2)}</span>
-            <input type="range" min={0} max={2} step={0.01} value={c.lightsTailIntensity}
+            <input type="range" min={0} max={2.5} step={0.01} value={c.lightsTailIntensity}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, lightsTailIntensity: +e.target.value } }))} />
           </label>
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
@@ -2183,8 +2342,11 @@ const chipStyle = (active: boolean): React.CSSProperties => ({
 })
 
 function clamp(x: number, a: number, b: number) { return Math.max(a, Math.min(b, x)) }
-
-// Clamp a THREE.Color's components to [0,1]
+function wrapAngle(a: number) {
+  while (a > Math.PI) a -= 2*Math.PI
+  while (a < -Math.PI) a += 2*Math.PI
+  return a
+}
 function clampColor01(col: THREE.Color) {
   col.r = Math.max(0, Math.min(1, col.r))
   col.g = Math.max(0, Math.min(1, col.g))

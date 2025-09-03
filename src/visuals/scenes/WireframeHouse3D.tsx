@@ -71,6 +71,19 @@ type LocalCfg = {
     turntable: boolean
     outline: boolean
     flipForward: boolean
+    // New effects:
+    smokeEnabled: boolean
+    smokeDensity: number
+    smokeTintAlbum: boolean
+    skidEnabled: boolean
+    skidOpacity: number
+    skidSegments: number
+    lightsHeadEnabled: boolean
+    lightsHeadIntensity: number
+    lightsTailEnabled: boolean
+    lightsTailIntensity: number
+    lightsBrakeBoost: number
+    wheelSpinEnabled: boolean
   }
 }
 
@@ -123,12 +136,24 @@ function defaults(initial?: any): LocalCfg {
       wireCar: true
     },
     car: {
-      scale: 0.75,
+      scale: 0.72,
       yOffset: 0.0,
-      pathRadius: 10.5,
+      pathRadius: 11.0,
       turntable: false,
       outline: false,
-      flipForward: false
+      flipForward: false,
+      smokeEnabled: true,
+      smokeDensity: 0.75,
+      smokeTintAlbum: true,
+      skidEnabled: true,
+      skidOpacity: 0.38,
+      skidSegments: 140,
+      lightsHeadEnabled: true,
+      lightsHeadIntensity: 0.9,
+      lightsTailEnabled: true,
+      lightsTailIntensity: 0.75,
+      lightsBrakeBoost: 1.4,
+      wheelSpinEnabled: true
     }
   }
 }
@@ -620,7 +645,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
     let latest: ReactiveFrame | null = null
     const offFrame = reactivityBus.on('frame', f => { latest = f })
 
-    // GLB car model (with outline + forward detection)
+    // Mansion safe rectangle (avoid penetration)
+    const safeRect = { minX: -5.0, maxX: 5.0, minZ: -2.4, maxZ: 2.4 }
+
+    // GLB car model (with outline + forward detection + effects)
     const car = createGlbCarModel({
       url: DEFAULT_GLB_URL,
       fallbackUrl: LOCAL_FALLBACK_GLB_URL,
@@ -632,7 +660,21 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         yOffset: cfgRef.current.car.yOffset,
         outline: cfgRef.current.car.outline,
         flipForward: cfgRef.current.car.flipForward
-      })
+      }),
+      getEffects: () => ({
+        smokeEnabled: cfgRef.current.car.smokeEnabled,
+        smokeDensity: cfgRef.current.car.smokeDensity,
+        smokeTintAlbum: cfgRef.current.car.smokeTintAlbum,
+        skidEnabled: cfgRef.current.car.skidEnabled,
+        skidOpacity: cfgRef.current.car.skidOpacity,
+        skidSegments: cfgRef.current.car.skidSegments,
+        lightsHeadEnabled: cfgRef.current.car.lightsHeadEnabled,
+        lightsHeadIntensity: cfgRef.current.car.lightsHeadIntensity,
+        lightsTailEnabled: cfgRef.current.car.lightsTailEnabled,
+        lightsTailIntensity: cfgRef.current.car.lightsTailIntensity,
+        lightsBrakeBoost: cfgRef.current.car.lightsBrakeBoost,
+        wheelSpinEnabled: cfgRef.current.car.wheelSpinEnabled
+      }),
     })
     car.group.visible = !!cfgRef.current.fx.wireCar
     scene.add(car.group)
@@ -732,7 +774,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       )
       billboard.setVisible(!!cfgC.fx.lyricsMarquee)
 
-      // Car
+      // Car update
       car.group.visible = !!cfgC.fx.wireCar
       if (car.group.visible) {
         car.setColor?.(carColorRef.current)
@@ -743,7 +785,9 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           turntable: cfgC.car.turntable,
           flipForward: cfgC.car.flipForward,
           scale: cfgC.car.scale,
-          yOffset: cfgC.car.yOffset
+          yOffset: cfgC.car.yOffset,
+          albumColor: carColorRef.current,
+          safeRect
         })
         car.setOutlineVisible(cfgC.car.outline)
       }
@@ -752,7 +796,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const px = cfgC.lineWidthPx * (1.0 + 0.08 * (latest?.beat ? 1 : 0) + 0.05 * high)
       setLinePixels(px)
 
-      // fog (fix lerp typo)
+      // fog
       ;(fogMat as any).uniforms.uTime.value = t
       ;(fogMat as any).uniforms.uIntensity.value = THREE.MathUtils.clamp(0.08 + loud * 0.5 + (latest?.beat ? 0.15 : 0), 0, accessibility.epilepsySafe ? 0.35 : 0.5)
       ;((fogMat as any).uniforms.uColor.value as THREE.Color).copy(new THREE.Color().copy(accent2).lerp(accent, 0.5))
@@ -812,10 +856,10 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const baseSpeed = cfgC.orbitSpeed
         const audioBoost = 0.4 * (low + mid + high)
         angleRef.current += dt * (baseSpeed + audioBoost)
-        const radius = THREE.MathUtils.clamp(cfgC.orbitRadius, 6.0, 12.0)
+        const radiusC = THREE.MathUtils.clamp(cfgC.orbitRadius, 6.0, 12.0)
         const elev = cfgC.orbitElev
-        const pos = pathPoint(cfgC.path, angleRef.current, radius)
-        camera.position.set(pos.x, Math.sin(elev) * (radius * 0.55) + 2.4 + bob, pos.z)
+        const pos = pathPoint(cfgC.path, angleRef.current, radiusC)
+        camera.position.set(pos.x, Math.sin(elev) * (radiusC * 0.55) + 2.4 + bob, pos.z)
         camera.lookAt(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
         controls.target.set(cfgC.camera.target.x, cfgC.camera.target.y, cfgC.camera.target.z)
       } else {
@@ -966,7 +1010,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
     }
 
-    // GLB car loader and driver + outline + front/back detection + face motion direction
+    // GLB car loader and driver + outline + front/back detection + motion + effects
     function createGlbCarModel(opts: {
       url: string
       fallbackUrl?: string
@@ -974,6 +1018,13 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       baseY: number
       getAlbumColor: () => THREE.Color
       getControls: () => { scale: number; yOffset: number; outline: boolean; flipForward: boolean }
+      getEffects: () => {
+        smokeEnabled: boolean; smokeDensity: number; smokeTintAlbum: boolean;
+        skidEnabled: boolean; skidOpacity: number; skidSegments: number;
+        lightsHeadEnabled: boolean; lightsHeadIntensity: number;
+        lightsTailEnabled: boolean; lightsTailIntensity: number; lightsBrakeBoost: number;
+        wheelSpinEnabled: boolean;
+      }
     }) {
       const group = new THREE.Group()
       group.renderOrder = 3
@@ -982,15 +1033,39 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       const holder = new THREE.Group()
       group.add(holder)
 
+      // Materials + candidates
       const originals = new WeakMap<THREE.Material, { color?: THREE.Color; emissive?: THREE.Color }>()
       const candidatePaintMats = new Set<THREE.Material>()
+      const headlightMats: THREE.Material[] = []
+      const taillightMats: THREE.Material[] = []
       const edgeLines: THREE.LineSegments[] = []
 
+      // Wheels detection
+      type WheelInfo = { node: THREE.Object3D, radius: number, isRear: boolean, isLeft: boolean }
+      const wheels: WheelInfo[] = []
+
+      // Lights objects
+      const headLights: THREE.SpotLight[] = []
+      const tailLights: THREE.PointLight[] = []
+
+      // Smoke system (sprites, pooled)
+      const smoke = createSmokeSystem()
+      group.add(smoke.group)
+
+      // Skid marks
+      const skid = createSkidSystem()
+      group.add(skid.group)
+
+      // Direction + movement
       let forwardSign: 1 | -1 = 1
       let baseScale = 1
-
       const prevWorldPos = new THREE.Vector3()
       group.getWorldPosition(prevWorldPos)
+      let prevSpeed = 0
+
+      // For wheel spin:
+      const tmpPrev = new THREE.Vector3()
+      const tmpCur = new THREE.Vector3()
 
       const loader = new GLTFLoader()
       try {
@@ -1041,51 +1116,130 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         scene.position.z = -center2.z
         scene.position.y = -bbox2.min.y
 
+        // Detect materials and wheels
+        const wheelRegex = /(wheel|rim|tyre|tire)/i
         scene.traverse((obj) => {
           const mesh = obj as THREE.Mesh
-          if (!mesh.isMesh) return
-          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
-          for (const m of mats) {
-            if (!m) continue
-            if (!originals.has(m)) {
-              originals.set(m, {
-                color: (m as any).color ? (m as any).color.clone() : undefined,
-                emissive: (m as any).emissive ? (m as any).emissive.clone() : undefined
-              })
+          if ((mesh as any).isMesh) {
+            const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+            for (const m of mats) {
+              if (!m) continue
+              if (!originals.has(m)) {
+                originals.set(m, {
+                  color: (m as any).color ? (m as any).color.clone() : undefined,
+                  emissive: (m as any).emissive ? (m as any).emissive.clone() : undefined
+                })
+              }
+              const nm = ((m.name || '') + ' ' + (mesh.name || '')).toLowerCase()
+              const isHead = /head ?light|daytime|fog/i.test(nm)
+              const isTail = /tail ?light|brake|rear ?light/i.test(nm)
+              const nameHit = /paint|carpaint|body|exterior|coat|shell|door|hood|roof|fender/.test(nm)
+              const nonGlass = !/glass|window|mirror|windshield|headlight glass|taillight glass/i.test(nm)
+              const notTire = !/tire|tyre|wheel|rim|rubber|brake|caliper/.test(nm)
+              const std = (m as any)
+              if ((nameHit || (std?.color && nonGlass && notTire)) && std instanceof THREE.MeshStandardMaterial) {
+                candidatePaintMats.add(m)
+                std.toneMapped = true
+                std.depthWrite = true
+              }
+              if (isHead) headlightMats.push(m)
+              if (isTail) taillightMats.push(m)
+              if ((m as any).side !== THREE.FrontSide) (m as any).side = THREE.FrontSide
+              if ((m as any).transparent && (m as any).opacity < 0.04) (m as any).opacity = 0.04
             }
-            const nm = ((m.name || '') + ' ' + (mesh.name || '')).toLowerCase()
-            const nameHit = /paint|carpaint|body|exterior|coat|shell|door|hood|roof|fender/.test(nm)
-            const nonGlass = !/glass|window|mirror|windshield|headlight|taillight|lamp/.test(nm)
-            const notTire = !/tire|tyre|wheel|rim|rubber|brake|caliper/.test(nm)
-            const std = (m as any)
-            if ((nameHit || (std?.color && nonGlass && notTire)) && std instanceof THREE.MeshStandardMaterial) {
-              candidatePaintMats.add(m)
-              std.toneMapped = true
-              std.depthWrite = true
-            }
-            if ((m as any).side !== THREE.FrontSide) (m as any).side = THREE.FrontSide
-            if ((m as any).transparent && (m as any).opacity < 0.04) (m as any).opacity = 0.04
+
+            // Outline edges
+            try {
+              const eg = new THREE.EdgesGeometry(mesh.geometry, 30)
+              const emat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthWrite: false, depthTest: true, toneMapped: true })
+              const edges = new THREE.LineSegments(eg, emat)
+              edges.name = `edges_of_${mesh.name || 'mesh'}`
+              mesh.add(edges)
+              edgeLines.push(edges)
+            } catch {}
           }
 
-          try {
-            const eg = new THREE.EdgesGeometry((obj as any).geometry, 30)
-            const emat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthWrite: false, depthTest: true, toneMapped: true })
-            const edges = new THREE.LineSegments(eg, emat)
-            edges.name = `edges_of_${obj.name || 'mesh'}`
-            mesh.add(edges)
-            edgeLines.push(edges)
-          } catch {}
+          // Wheels by node name and approximate radius
+          if (wheelRegex.test(obj.name)) {
+            const box = new THREE.Box3().setFromObject(obj)
+            const size = new THREE.Vector3(); const center = new THREE.Vector3()
+            box.getSize(size); box.getCenter(center)
+            const radius = Math.max(size.y, size.z) * 0.5
+            wheels.push({ node: obj, radius: Math.max(0.01, radius), isRear: false, isLeft: center.z < 0 })
+          }
         })
+
+        // If wheel detection failed, try to infer four farthest circular-ish nodes by size
+        if (wheels.length < 2) {
+          const candidates: { node: THREE.Object3D, radius: number, center: THREE.Vector3 }[] = []
+          scene.traverse((o) => {
+            const mesh = o as any
+            if (!mesh.isMesh) return
+            const box = new THREE.Box3().setFromObject(mesh)
+            const size = new THREE.Vector3(); const center = new THREE.Vector3()
+            box.getSize(size); box.getCenter(center)
+            const roundness = Math.abs(size.y - size.z) / Math.max(1e-3, (size.y + size.z))
+            if (roundness < 0.35 && size.y > 0.05 && size.z > 0.05) {
+              candidates.push({ node: mesh, radius: Math.max(0.02, Math.max(size.y, size.z) * 0.5), center })
+            }
+          })
+          candidates.sort((a,b) => Math.abs(b.center.z) - Math.abs(a.center.z))
+          for (let i=0; i<Math.min(4, candidates.length); i++) {
+            const c = candidates[i]
+            wheels.push({ node: c.node, radius: c.radius, isRear: false, isLeft: c.center.z < 0 })
+          }
+        }
 
         forwardSign = detectForwardSign(scene)
 
+        // Assign rear wheels by x-extremes (rear cluster opposite to forward)
+        if (wheels.length) {
+          const xs = wheels.map(w => new THREE.Box3().setFromObject(w.node).getCenter(new THREE.Vector3()).x)
+          const avgX = xs.reduce((a,b)=>a+b,0) / xs.length
+          const maxX = Math.max(...xs), minX = Math.min(...xs)
+          const frontIsPosX = (forwardSign === 1)
+          const rearX = frontIsPosX ? minX : maxX
+          wheels.forEach((w, i) => {
+            w.isRear = Math.abs(xs[i] - rearX) < Math.abs(xs[i] - (frontIsPosX ? maxX : minX))
+          })
+        }
+
+        // Add light objects near lamp areas (fallback to bbox extremes)
+        addLights(scene, bbox2)
+
         holder.add(scene)
+      }
+
+      function addLights(sceneRoot: THREE.Object3D, bbox: THREE.Box3) {
+        // Front: near +X if forwardSign=1 else -X
+        const frontX = forwardSign === 1 ? bbox.max.x : bbox.min.x
+        const rearX  = forwardSign === 1 ? bbox.min.x : bbox.max.x
+        const midY = (bbox.max.y + bbox.min.y) * 0.55
+        const halfZ = Math.max(Math.abs(bbox.max.z), Math.abs(bbox.min.z)) * 0.6
+
+        // Headlights
+        for (const z of [-1, 1]) {
+          const s = new THREE.SpotLight(0xcfe8ff, 0, 10, Math.PI/6, 0.35, 1.2)
+          s.position.set(frontX + 0.15 * forwardSign, midY, z * halfZ)
+          s.target.position.set(frontX + 4 * forwardSign, midY-0.15, z * halfZ * 0.95)
+          holder.add(s); holder.add(s.target)
+          s.visible = false
+          headLights.push(s)
+        }
+        // Taillights
+        for (const z of [-1, 1]) {
+          const p = new THREE.PointLight(0xff2a2a, 0, 4, 1.5)
+          p.position.set(rearX - 0.05 * forwardSign, midY * 0.85, z * halfZ)
+          holder.add(p)
+          p.visible = false
+          tailLights.push(p)
+        }
       }
 
       function detectForwardSign(root: THREE.Object3D): 1 | -1 {
         const fronts: number[] = []
         const rears: number[] = []
-        const wheels: number[] = []
+        const wheelsX: number[] = []
         root.traverse(o => {
           const nm = (o.name || '').toLowerCase()
           const b = new THREE.Box3().setFromObject(o)
@@ -1093,19 +1247,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           if (!isFinite(c.x)) return
           if (/front|hood|grill|bumper|head ?light|lamp|bonnet/.test(nm)) fronts.push(c.x)
           if (/rear|tail|exhaust|spoiler|diffuser|trunk|boot|tail ?light/.test(nm)) rears.push(c.x)
-          if (/wheel|tire|tyre|rim/.test(nm)) wheels.push(c.x)
+          if (/wheel|tire|tyre|rim/.test(nm)) wheelsX.push(c.x)
         })
         if (fronts.length && rears.length) {
           const f = avg(fronts), r = avg(rears)
           return f > r ? 1 : -1
         }
-        if (wheels.length >= 2) {
-          const min = Math.min(...wheels), max = Math.max(...wheels)
+        if (wheelsX.length >= 2) {
+          const min = Math.min(...wheelsX), max = Math.max(...wheelsX)
           return (max - min) > 0 ? 1 : 1
         }
         return 1
       }
-
       function avg(a: number[]) { return a.reduce((s, v) => s + v, 0) / a.length }
 
       function applyUserScale(scale: number) {
@@ -1150,35 +1303,154 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         for (const e of edgeLines) e.visible = v
       }
 
-      const state = { t: 0 }
-      function update(dt: number, env: { t: number; radius: number; turntable: boolean; flipForward: boolean; scale: number; yOffset: number }) {
+      // Pathing with mansion avoidance + effects
+      const state = { t: 0, phase: 0 }
+      function update(dt: number, env: {
+        t: number; radius: number; turntable: boolean; flipForward: boolean; scale: number; yOffset: number;
+        albumColor: THREE.Color; safeRect: { minX:number; maxX:number; minZ:number; maxZ:number }
+      }) {
         applyUserScale(env.scale)
         group.position.y = opts.baseY + env.yOffset
 
+        // Live effects & lights toggling
+        const fx = opts.getEffects()
+        // Lights visibility and intensities
+        const headOn = fx.lightsHeadEnabled
+        const tailOn = fx.lightsTailEnabled
+        for (const s of headLights) { s.intensity = headOn ? fx.lightsHeadIntensity : 0; s.visible = headOn }
+        for (const p of tailLights) { p.intensity = tailOn ? fx.lightsTailIntensity : 0; p.visible = tailOn }
+
         state.t += dt * 0.8
-        const a = state.t * 0.6
-        const s = Math.sin(a), c = Math.cos(a)
-        const denom = 1 + s*s
+        state.phase += dt * 0.6
 
         if (env.turntable) {
+          // Centered spin
+          const a = state.phase
           group.position.x = 0
           group.position.z = 0
           holder.rotation.y = (a * 0.6 + (env.flipForward ? Math.PI : 0))
-        } else {
-          const R = env.radius
-          const x = (R * c) / denom
-          const z = (R * s * c) / denom
-          const prev = prevWorldPos.clone()
-          group.position.x = x
-          group.position.z = z
-          const vel = new THREE.Vector3().subVectors(group.position, prev)
-          prevWorldPos.copy(group.position)
-          let yaw = holder.rotation.y
-          if (vel.lengthSq() > 1e-6) {
-            yaw = Math.atan2(vel.z, vel.x) + (forwardSign === 1 ? 0 : Math.PI)
-            if (env.flipForward) yaw += Math.PI
+          // Wheel spin (constant gentle)
+          if (fx.wheelSpinEnabled && wheels.length) {
+            const w = 1.4 // rad/s
+            for (const wh of wheels) (wh.node.rotation as any).z = ((wh.node.rotation as any).z || 0) - w * dt
           }
-          holder.rotation.y = THREE.MathUtils.lerp(holder.rotation.y, yaw, 0.25)
+          // Minimal smoke/skid off
+          smoke.setEnabled(false)
+          skid.setEnabled(false)
+          return
+        }
+
+        // Desired lemniscate (figure-8)
+        const R = env.radius
+        let a = state.phase
+        const s = Math.sin(a), c = Math.cos(a)
+        const denom = 1 + s*s
+        let x = (R * c) / denom
+        let z = (R * s * c) / denom
+
+        // Avoid mansion safe rectangle: if predicted pos intersects, advance phase
+        const inside = (xx:number, zz:number) => (xx > env.safeRect.minX && xx < env.safeRect.maxX && zz > env.safeRect.minZ && zz < env.safeRect.maxZ)
+        if (inside(x, z)) {
+          let tries = 0
+          while (tries++ < 40) {
+            a += 0.08
+            const s2 = Math.sin(a), c2 = Math.cos(a)
+            const d2 = 1 + s2*s2
+            x = (R * c2) / d2
+            z = (R * s2 * c2) / d2
+            if (!inside(x, z)) break
+          }
+          state.phase = a
+        }
+
+        const prev = prevWorldPos.clone()
+        group.position.x = THREE.MathUtils.clamp(x, -R, R)
+        group.position.z = THREE.MathUtils.clamp(z, -R, R)
+
+        // Velocity & orientation
+        const vel = tmpCur.subVectors(group.position, prev)
+        const speed = vel.length() / Math.max(1e-6, dt)
+        prevWorldPos.copy(group.position)
+
+        let yaw = holder.rotation.y
+        if (speed > 1e-6) {
+          yaw = Math.atan2(vel.z, vel.x) + (forwardSign === 1 ? 0 : Math.PI)
+          if (env.flipForward) yaw += Math.PI
+        }
+        holder.rotation.y = THREE.MathUtils.lerp(holder.rotation.y, yaw, 0.25)
+
+        // Wheel spin (approx): omega = v / r
+        if (fx.wheelSpinEnabled && wheels.length) {
+          // Projection of velocity along car forward (+X in holder space)
+          const fwd = new THREE.Vector3(1,0,0).applyQuaternion(holder.quaternion)
+          const vSign = Math.sign(fwd.dot(vel)) || 1
+          for (const wh of wheels) {
+            const w = (speed * vSign) / Math.max(0.05, wh.radius)
+            ;(wh.node.rotation as any).z = ((wh.node.rotation as any).z || 0) - w * dt
+          }
+        }
+
+        // Deceleration for brake logic
+        const accel = (speed - prevSpeed) / Math.max(1e-6, dt)
+        const decel = Math.max(0, -accel)
+        prevSpeed = speed
+
+        // Lights brake boost
+        if (tailOn) {
+          const boost = fx.lightsBrakeBoost
+          const add = THREE.MathUtils.clamp(decel * 0.06, 0, 1.0) * boost
+          for (const p of tailLights) p.intensity = fx.lightsTailIntensity + add
+          // brighten taillight emissive
+          for (const m of taillightMats) {
+            const orig = originals.get(m)
+            const std = m as any
+            if (std?.emissive && orig?.emissive) {
+              const col = orig.emissive.clone().lerp(new THREE.Color(1,0.1,0.1), Math.min(1, add * 0.6))
+              std.emissive.copy(col)
+            }
+          }
+        }
+
+        // Smoke & skid triggers (rear only)
+        const emitSmoke = fx.smokeEnabled && (speed > 1.0 || decel > 0.5)
+        const makeSkid = fx.skidEnabled && (decel > 0.8 || speed > 1.2)
+
+        // Rear wheel world positions
+        const rearWheels = wheels.filter(w => w.isRear)
+        const albumCol = opts.getAlbumColor()
+        if (emitSmoke && rearWheels.length) {
+          smoke.setEnabled(true)
+          smoke.setColor(fx.smokeTintAlbum ? albumCol : new THREE.Color(0xededed))
+          const rate = THREE.MathUtils.clamp(fx.smokeDensity * (0.3 + speed * 0.03 + decel * 0.08), 0, 6)
+          for (const rw of rearWheels) {
+            const wp = rw.node.getWorldPosition(new THREE.Vector3())
+            smoke.emit(wp, new THREE.Vector3(vel.x, 0, vel.z), rate, dt)
+          }
+        } else {
+          smoke.setEnabled(false)
+        }
+
+        // Skid marks
+        if (fx.skidEnabled && rearWheels.length) {
+          skid.setEnabled(true)
+          skid.setOpacity(THREE.MathUtils.clamp(fx.skidOpacity, 0, 1))
+          skid.setMaxSegments(fx.skidSegments)
+          // Add segment when skid condition and movement sufficient
+          for (const rw of rearWheels) {
+            const wp = rw.node.getWorldPosition(new THREE.Vector3())
+            // Project onto floor Y≈0
+            wp.y = 0.0012
+            // Width of mark proportional to wheel radius
+            const width = Math.min(0.22, Math.max(0.08, rw.radius * 0.35))
+            // Side vector (left-right) from holder orientation
+            const side = new THREE.Vector3(0,0,1).applyQuaternion(holder.quaternion).setY(0).normalize().multiplyScalar(rw.isLeft ? -width : width)
+            const pL = wp.clone().add(side)
+            const pR = wp.clone().add(side.clone().multiplyScalar(-1))
+            const active = makeSkid && speed > 0.8
+            skid.addSegment(rw.isLeft ? 'RL' : 'RR', pL, pR, active ? 1 : 0)
+          }
+        } else {
+          skid.setEnabled(false)
         }
       }
 
@@ -1210,9 +1482,211 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           e.geometry.dispose()
           ;(e.material as any).dispose?.()
         }
+        smoke.dispose()
+        skid.dispose()
+        for (const s of headLights) { s.dispose(); s.target?.removeFromParent?.(); s.removeFromParent() }
+        for (const p of tailLights) { p.dispose(); p.removeFromParent() }
       }
 
       return { group, update, dispose, setColor, setOutlineVisible, frameToView }
+    }
+
+    // Smoke system using pooled Sprites
+    function createSmokeSystem() {
+      const group = new THREE.Group()
+      group.renderOrder = 2
+      const spriteTex = makeSoftCircleTexture(128)
+
+      type Particle = {
+        s: THREE.Sprite
+        life: number
+        maxLife: number
+        vel: THREE.Vector3
+        alive: boolean
+      }
+      const pool: Particle[] = []
+      const MAX = 120
+      const up = new THREE.Vector3(0,1,0)
+      let enabled = true
+      let color = new THREE.Color(0xededed)
+
+      for (let i=0;i<MAX;i++) {
+        const mat = new THREE.SpriteMaterial({ map: spriteTex, color: 0xffffff, transparent: true, opacity: 0, depthWrite: false, depthTest: true })
+        const s = new THREE.Sprite(mat)
+        s.scale.setScalar(0.001)
+        s.visible = false
+        group.add(s)
+        pool.push({ s, life: 0, maxLife: 1, vel: new THREE.Vector3(), alive: false })
+      }
+
+      function firstDead(): Particle | undefined { return pool.find(p => !p.alive) }
+
+      function emit(pos: THREE.Vector3, motion: THREE.Vector3, rate: number, dt: number) {
+        if (!enabled) return
+        const count = Math.floor(rate * dt * 10) // heuristic emission
+        for (let i=0;i<count;i++) {
+          const p = firstDead()
+          if (!p) break
+          p.alive = true
+          p.maxLife = THREE.MathUtils.randFloat(0.7, 1.2)
+          p.life = p.maxLife
+          p.s.position.copy(pos).addScaledVector(up, THREE.MathUtils.randFloat(0.02, 0.08))
+          p.s.visible = true
+          p.s.material.color.copy(color)
+          p.s.material.opacity = 0.0
+          const jitter = new THREE.Vector3(
+            THREE.MathUtils.randFloatSpread(0.12),
+            THREE.MathUtils.randFloat(0.25, 0.55),
+            THREE.MathUtils.randFloatSpread(0.12)
+          )
+          p.vel.copy(motion).multiplyScalar(0.08).add(jitter)
+          const sc = THREE.MathUtils.randFloat(0.18, 0.30)
+          p.s.scale.set(sc, sc, sc)
+        }
+      }
+
+      const clock = new THREE.Clock()
+      function animate() {
+        const dt = Math.min(0.05, clock.getDelta())
+        for (const p of pool) {
+          if (!p.alive) continue
+          p.life -= dt
+          if (p.life <= 0) {
+            p.alive = false
+            p.s.visible = false
+            continue
+          }
+          const t = 1 - (p.life / p.maxLife) // 0..1
+          p.s.position.addScaledVector(p.vel, dt)
+          p.s.material.opacity = Math.min(0.45, 0.12 + 0.5 * (1 - t)) * (enabled ? 1 : 0)
+          // slow expansion
+          const scl = p.s.scale.x * (1 + dt * 0.5)
+          p.s.scale.set(scl, scl, scl)
+        }
+        requestAnimationFrame(animate)
+      }
+      animate()
+
+      return {
+        group,
+        emit,
+        setEnabled(v: boolean) { enabled = v },
+        setColor(c: THREE.Color) { color.copy(c) },
+        dispose() {
+          for (const p of pool) {
+            (p.s.material as THREE.Material).dispose()
+            p.s.removeFromParent()
+          }
+          spriteTex.dispose()
+          group.removeFromParent()
+        }
+      }
+    }
+
+    // Skid system: ribbon per rear wheel (two strips: RL and RR)
+    function createSkidSystem() {
+      const group = new THREE.Group()
+      const strips = new Map<string, {
+        geom: THREE.BufferGeometry
+        mesh: THREE.Mesh
+        pointsL: THREE.Vector3[]
+        pointsR: THREE.Vector3[]
+        maxSegs: number
+        activeMask: boolean[]
+      }>()
+      const material = new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.35, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })
+
+      function ensureStrip(key: string) {
+        if (strips.has(key)) return strips.get(key)!
+        const geom = new THREE.BufferGeometry()
+        const mesh = new THREE.Mesh(geom, material)
+        mesh.renderOrder = 1
+        group.add(mesh)
+        const rec = { geom, mesh, pointsL: [] as THREE.Vector3[], pointsR: [] as THREE.Vector3[], maxSegs: 140, activeMask: [] as boolean[] }
+        strips.set(key, rec)
+        return rec
+      }
+
+      function addSegment(key: 'RL'|'RR', pL: THREE.Vector3, pR: THREE.Vector3, active: 0|1) {
+        const s = ensureStrip(key)
+        s.pointsL.push(pL.clone())
+        s.pointsR.push(pR.clone())
+        s.activeMask.push(!!active)
+        while (s.pointsL.length > s.maxSegs) { s.pointsL.shift(); s.pointsR.shift(); s.activeMask.shift() }
+        rebuildStrip(s)
+      }
+
+      function rebuildStrip(s: ReturnType<typeof ensureStrip>) {
+        const n = s.pointsL.length
+        if (n < 2) return
+        const pos = new Float32Array((n - 1) * 6 * 3) // (two tris per segment) * 3 verts * xyz
+        let off = 0
+        for (let i=0; i<n-1; i++) {
+          const aL = s.pointsL[i], aR = s.pointsR[i]
+          const bL = s.pointsL[i+1], bR = s.pointsR[i+1]
+          // Quad aL-aR-bR-bL
+          off = writeTri(pos, off, aL, aR, bR)
+          off = writeTri(pos, off, aL, bR, bL)
+        }
+        s.geom.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+        s.geom.computeVertexNormals()
+        s.geom.attributes.position.needsUpdate = true
+        s.geom.computeBoundingSphere()
+      }
+
+      function writeTri(dst: Float32Array, off: number, a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3) {
+        dst[off++] = a.x; dst[off++] = a.y; dst[off++] = a.z
+        dst[off++] = b.x; dst[off++] = b.y; dst[off++] = b.z
+        dst[off++] = c.x; dst[off++] = c.y; dst[off++] = c.z
+        return off
+      }
+
+      function setOpacity(o: number) { material.opacity = THREE.MathUtils.clamp(o, 0, 1) }
+      function setMaxSegments(n: number) {
+        for (const s of strips.values()) s.maxSegs = Math.max(4, Math.floor(n))
+      }
+
+      let enabled = true
+      function setEnabled(v: boolean) {
+        enabled = v
+        group.visible = v
+      }
+      setEnabled(true)
+
+      return {
+        group,
+        addSegment,
+        setOpacity,
+        setMaxSegments,
+        setEnabled,
+        dispose() {
+          for (const s of strips.values()) {
+            s.geom.dispose()
+            s.mesh.removeFromParent()
+          }
+          strips.clear()
+          group.removeFromParent()
+        }
+      }
+    }
+
+    function makeSoftCircleTexture(size = 128) {
+      const c = document.createElement('canvas')
+      c.width = c.height = size
+      const g = c.getContext('2d')!
+      const grd = g.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2)
+      grd.addColorStop(0, 'rgba(255,255,255,0.9)')
+      grd.addColorStop(0.6, 'rgba(255,255,255,0.25)')
+      grd.addColorStop(1, 'rgba(255,255,255,0.0)')
+      g.fillStyle = grd
+      g.beginPath()
+      g.arc(size/2, size/2, size/2, 0, Math.PI*2)
+      g.fill()
+      const tex = new THREE.CanvasTexture(c)
+      tex.colorSpace = THREE.SRGBColorSpace
+      tex.minFilter = THREE.LinearMipmapLinearFilter
+      tex.generateMipmaps = true
+      return tex
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1435,39 +1909,103 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       return () => window.removeEventListener('ffw:frame-car-request', handler as EventListener)
     }, [])
 
+    const c = cfg.car
     return (
       <div style={{ border:'1px solid #2b2f3a', borderRadius:8, padding:10, marginTop:8 }}>
         <div style={{ fontSize:12, opacity:0.8, marginBottom:8 }}>Car</div>
         <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Scale: {cfg.car.scale.toFixed(2)}×</span>
-            <input type="range" min={0.4} max={1.6} step={0.01} value={cfg.car.scale}
+            <span>Scale: {c.scale.toFixed(2)}×</span>
+            <input type="range" min={0.4} max={1.6} step={0.01} value={c.scale}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, scale: +e.target.value } }))} />
           </label>
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Height: {cfg.car.yOffset.toFixed(2)} m</span>
-            <input type="range" min={-0.2} max={0.5} step={0.01} value={cfg.car.yOffset}
+            <span>Height: {c.yOffset.toFixed(2)} m</span>
+            <input type="range" min={-0.2} max={0.5} step={0.01} value={c.yOffset}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, yOffset: +e.target.value } }))} />
           </label>
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Showcase radius: {cfg.car.pathRadius.toFixed(1)} m</span>
-            <input type="range" min={6} max={15} step={0.1} value={cfg.car.pathRadius}
+            <span>Showcase radius: {c.pathRadius.toFixed(1)} m</span>
+            <input type="range" min={6} max={15} step={0.1} value={c.pathRadius}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, pathRadius: +e.target.value } }))} />
           </label>
-          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:10, alignItems:'center' }}>
             <span>Turntable mode</span>
-            <input type="checkbox" checked={cfg.car.turntable}
+            <input type="checkbox" checked={c.turntable}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, turntable: e.target.checked } }))} />
+            <span>Outline overlay</span>
+            <input type="checkbox" checked={c.outline}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, outline: e.target.checked } }))} />
+            <span>Flip forward</span>
+            <input type="checkbox" checked={c.flipForward}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, flipForward: e.target.checked } }))} />
+          </div>
+
+          <div style={{ height:1, background:'rgba(255,255,255,0.06)', margin:'2px 0' }} />
+
+          <div style={{ fontSize:12, opacity:0.8 }}>Lights</div>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:10, alignItems:'center' }}>
+            <span>Headlights</span>
+            <input type="checkbox" checked={c.lightsHeadEnabled}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, lightsHeadEnabled: e.target.checked } }))} />
+          </div>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Headlight intensity: {c.lightsHeadIntensity.toFixed(2)}</span>
+            <input type="range" min={0} max={2} step={0.01} value={c.lightsHeadIntensity}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, lightsHeadIntensity: +e.target.value } }))} />
+          </label>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:10, alignItems:'center' }}>
+            <span>Taillights</span>
+            <input type="checkbox" checked={c.lightsTailEnabled}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, lightsTailEnabled: e.target.checked } }))} />
+          </div>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Taillight intensity: {c.lightsTailIntensity.toFixed(2)}</span>
+            <input type="range" min={0} max={2} step={0.01} value={c.lightsTailIntensity}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, lightsTailIntensity: +e.target.value } }))} />
           </label>
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Outline overlay</span>
-            <input type="checkbox" checked={cfg.car.outline}
-              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, outline: e.target.checked } }))} />
+            <span>Brake boost: {c.lightsBrakeBoost.toFixed(2)}</span>
+            <input type="range" min={0} max={3} step={0.01} value={c.lightsBrakeBoost}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, lightsBrakeBoost: +e.target.value } }))} />
           </label>
+
+          <div style={{ height:1, background:'rgba(255,255,255,0.06)', margin:'2px 0' }} />
+
+          <div style={{ fontSize:12, opacity:0.8 }}>Wheels / Trails</div>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:10, alignItems:'center' }}>
+            <span>Wheel spin</span>
+            <input type="checkbox" checked={c.wheelSpinEnabled}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, wheelSpinEnabled: e.target.checked } }))} />
+            <span>Rear smoke</span>
+            <input type="checkbox" checked={c.smokeEnabled}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, smokeEnabled: e.target.checked } }))} />
+          </div>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Smoke density: {c.smokeDensity.toFixed(2)}</span>
+            <input type="range" min={0} max={2} step={0.01} value={c.smokeDensity}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, smokeDensity: +e.target.value } }))} />
+          </label>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:10, alignItems:'center' }}>
+            <span>Smoke tint album</span>
+            <input type="checkbox" checked={c.smokeTintAlbum}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, smokeTintAlbum: e.target.checked } }))} />
+            <span>Skid marks</span>
+            <input type="checkbox" checked={c.skidEnabled}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, skidEnabled: e.target.checked } }))} />
+          </div>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Skid opacity: {c.skidOpacity.toFixed(2)}</span>
+            <input type="range" min={0} max={1} step={0.01} value={c.skidOpacity}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, skidOpacity: +e.target.value } }))} />
+          </label>
+          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Skid length: {c.skidSegments}</span>
+            <input type="range" min={30} max={400} step={1} value={c.skidSegments}
+              onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, skidSegments: +e.target.value } }))} />
+          </label>
+
           <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-            <button onClick={() => setCfg(prev => ({ ...prev, car: { ...prev.car, flipForward: !prev.car.flipForward } }))} style={btnStyle}>
-              {cfg.car.flipForward ? 'Unflip forward' : 'Flip forward'}
-            </button>
             <button onClick={onFrame} style={btnStyle}>Frame car</button>
           </div>
         </div>
@@ -1546,7 +2084,7 @@ function Wire3DPanel(props: {
         {open ? 'Close 3D Settings' : '3D Settings'}
       </button>
       {open && (
-        <div style={{ width: 340, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
+        <div style={{ width: 360, marginTop:8, padding:12, border:'1px solid #2b2f3a', borderRadius:8,
           background:'rgba(10,12,16,0.88)', color:'#e6f0ff', fontFamily:'system-ui, sans-serif', fontSize:12, lineHeight:1.4 }}>
           <Card title="Camera">
             <Row label={`FOV: ${cfg.camera.fov.toFixed(0)}`}>
@@ -1563,7 +2101,7 @@ function Wire3DPanel(props: {
             </Row>
             <Row label={`Elevation: ${cfg.orbitElev.toFixed(2)}`}>
               <input type="range" min={0.03} max={0.2} step={0.01} value={cfg.orbitElev}
-                     onChange={e => onChange(prev => ({ ...prev, orbitElev: +e.target.value }))} />
+                     onChange={e => onChange(prev => ({ ...prev, orbitElev: +e.target.value } ))} />
             </Row>
             <Row label={`Camera bob: ${cfg.camBob.toFixed(2)}`}>
               <input type="range" min={0} max={0.6} step={0.01} value={cfg.camBob}

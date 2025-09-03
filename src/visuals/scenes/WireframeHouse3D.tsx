@@ -7,7 +7,6 @@ import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
-import { CatmullRomCurve3 } from 'three/src/extras/curves/CatmullRomCurve3.js'
 
 import { createRenderer, createComposer } from '../../three/Renderer'
 import { reactivityBus, type ReactiveFrame } from '../../audio/ReactivityBus'
@@ -67,14 +66,14 @@ type LocalCfg = {
     wireCar: boolean
   }
   car: {
-    // existing fields (kept)
+    // existing
     scale: number
     yOffset: number
     pathRadius: number
     turntable: boolean
     outline: boolean
     flipForward: boolean
-    // new fields
+    // new
     driveMode: DriveMode
     wheelSpin: boolean
     maxSteerDeg: number
@@ -138,7 +137,7 @@ function defaults(initial?: any): LocalCfg {
       scale: 0.75,
       yOffset: 0.0,
       pathRadius: 10.5,
-      turntable: false, // kept for backwards compatibility; driveMode handles it too
+      turntable: false, // kept for back-compat; driveMode handles it too
       outline: false,
       flipForward: false,
       driveMode: 'Track',
@@ -153,10 +152,27 @@ function defaults(initial?: any): LocalCfg {
   }
 }
 
+// Deep merge saved config onto defaults to avoid undefined fields (fixes toFixed crash)
+function deepMerge<T>(base: T, patch: any): T {
+  if (patch == null || typeof patch !== 'object') return base
+  for (const k of Object.keys(patch)) {
+    const v: any = (patch as any)[k]
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      ;(base as any)[k] = deepMerge((base as any)[k] ?? {}, v)
+    } else {
+      ;(base as any)[k] = v
+    }
+  }
+  return base
+}
+
 export default function WireframeHouse3D({ auth, quality, accessibility, settings }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [cfg, setCfg] = useState<LocalCfg>(() => {
-    try { const saved = localStorage.getItem(LS_KEY); if (saved) return { ...defaults(settings), ...JSON.parse(saved) } } catch {}
+    try {
+      const saved = localStorage.getItem(LS_KEY)
+      if (saved) return deepMerge(defaults(settings), JSON.parse(saved))
+    } catch {}
     return defaults(settings)
   })
   const cfgRef = useRef(cfg)
@@ -653,7 +669,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       ]
       // duplicate first to close loop smoothly
       pts.push(pts[0].clone())
-      const curve = new CatmullRomCurve3(pts, true, 'centripetal', 0.25)
+      const curve = new THREE.CatmullRomCurve3(pts, true, 'centripetal', 0.25)
       return curve
     }
     function getMansionOuterRect() {
@@ -669,7 +685,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       }
     }
 
-    // GLB car model (with wheels/steering/spin/smoke/skids/lights/forward detection)
+    // GLB car model (with wheels/steering/spin/smoke/skids/lights + forward detection)
     const car = createGlbCarModel({
       url: DEFAULT_GLB_URL,
       fallbackUrl: LOCAL_FALLBACK_GLB_URL,
@@ -808,6 +824,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       car.group.visible = !!cfgC.fx.wireCar
       if (car.group.visible) {
         car.setColor?.(carColorRef.current)
+        car.setOutlineVisible?.(cfgC.car.outline)
         car.update(dt, t)
       }
 
@@ -1040,7 +1057,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         maxSteerRad: number; steerRateRadPerSec: number; rearLightMax: number; smokeAmount: number
         skidMaxMeters: number; wheelRadiusOverride: number | null
       }
-      getDrive: () => { mode: DriveMode; figure8Radius: number; trackCurve: CatmullRomCurve3 }
+      getDrive: () => { mode: DriveMode; figure8Radius: number; trackCurve: THREE.CatmullRomCurve3 }
     }) {
       const group = new THREE.Group()
       group.renderOrder = 3
@@ -1203,7 +1220,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           }
         })
         if (candidates.length < 4) {
-          // Geometric fallback: choose 4 most wheel-like meshes (round-ish: two similar largest extents)
           const scored = candidates.map(c => {
             const arr = [c.size.x, c.size.y, c.size.z].sort((a,b)=>a-b)
             const roundness = Math.abs(arr[2]-arr[1]) + arr[0]*2 // smaller better
@@ -1242,23 +1258,26 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           steerPivot.add(spinPivot)
 
           // Reparent the wheel mesh under spinPivot without visual jump
-          const meshLocal = new THREE.Vector3()
-          cand.mesh.getWorldPosition(meshLocal)
-          const toSP = new THREE.Matrix4().copy(spinPivot.matrixWorld).invert()
-          const newLocal = meshLocal.clone().applyMatrix4(toSP)
-          const oldParent = cand.mesh.parent as THREE.Object3D
+          const worldPos = new THREE.Vector3()
+          const worldQuat = new THREE.Quaternion()
+          const worldScale = new THREE.Vector3()
+          cand.mesh.matrixWorld.decompose(worldPos, worldQuat, worldScale)
+          const inv = new THREE.Matrix4().copy(spinPivot.matrixWorld).invert()
+          const localMat = new THREE.Matrix4().compose(worldPos, worldQuat, worldScale).premultiply(inv)
+          const newPos = new THREE.Vector3(); const newQuat = new THREE.Quaternion(); const newScale = new THREE.Vector3()
+          localMat.decompose(newPos, newQuat, newScale)
           spinPivot.add(cand.mesh)
-          cand.mesh.position.copy(newLocal)
+          cand.mesh.position.copy(newPos)
+          cand.mesh.quaternion.copy(newQuat)
+          cand.mesh.scale.copy(newScale)
 
           // Estimate radius & axis
           const axis = pickAxis(cand.size)
           const radius = Math.max(cand.size.x, cand.size.y, cand.size.z) * 0.5
 
-          // For rear wheels, no steering (but keep steerPivot present for consistent structure)
           return { mesh: cand.mesh, center: localCenter.clone(), radius, axis, steerPivot, spinPivot, side, axle, lastSpin: 0 }
         }
 
-        // Assign left/right by z (smaller z -> left)
         if (rear.length >= 2) {
           wheels.push(buildWheel(rear[0], 'R', 'L'))
           wheels.push(buildWheel(rear[rear.length-1], 'R', 'R'))
@@ -1391,6 +1410,18 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         return { pos: new THREE.Vector3(x, 0, z), tan }
       }
 
+      // braking approx: reduction in speed / dt
+      const brakingFilter = { v: 0 as number, prevSpeed: 0 as number }
+      function computeBrakingAmount() {
+        const dv = state.speed - brakingFilter.prevSpeed
+        brakingFilter.prevSpeed = state.speed
+        const decel = -Math.min(0, dv) // positive when slowing
+        const amt = THREE.MathUtils.clamp(decel * 2.0, 0, 1)
+        const alpha = 0.15
+        brakingFilter.v = brakingFilter.v * (1 - alpha) + amt * alpha
+        return brakingFilter.v
+      }
+
       // Update (steering, spin, smoke, skids, lights, transforms)
       function update(dt: number, tAbs: number) {
         const controls = opts.getControls()
@@ -1445,14 +1476,12 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         for (const w of wheels) {
           let omega = nominalAngular
           if (controls.wheelSpin) {
-            // Rear wheels get more slip in burnout/donut
             if (w.axle === 'R') omega *= burnoutBoost * donutBoost
           } else {
             omega = 0
           }
           const dtheta = omega * dt
           w.lastSpin += dtheta
-          // Rotate spinPivot around its local spin axis
           if (w.axis === 'x') w.spinPivot.rotation.x = w.lastSpin
           else if (w.axis === 'y') w.spinPivot.rotation.y = w.lastSpin
           else w.spinPivot.rotation.z = w.lastSpin
@@ -1485,19 +1514,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         const runLevel = 0.2
         const brakeLevel = controls.rearLightMax
         setRearLightIntensity(runLevel, brakeLevel, braking)
-      }
-
-      // braking approx: reduction in speed / dt
-      const brakingFilter = { v: 0 }
-      function computeBrakingAmount() {
-        // simple low-pass of negative acceleration
-        const dv = state.speed - (brakingFilter as any).prevSpeed || 0
-        ;(brakingFilter as any).prevSpeed = state.speed
-        const decel = -Math.min(0, dv) // positive when slowing
-        const amt = THREE.MathUtils.clamp(decel * 2.0, 0, 1)
-        const alpha = 0.15
-        brakingFilter.v = brakingFilter.v * (1 - alpha) + amt * alpha
-        return brakingFilter.v
       }
 
       function frameToView(camera: THREE.PerspectiveCamera, controls: OrbitControls) {
@@ -1572,7 +1588,6 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
       let head = 0
 
       function emit(p: THREE.Vector3, strength: number) {
-        // spawn a few proportional
         let count = Math.floor(strength * 6)
         while (count-- > 0) {
           const idx = head; head = (head + 1) % maxN
@@ -1635,13 +1650,11 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           pts.push(p.clone())
           last = p.clone()
         }
-        // Trim older if too long
         while (pts.length >= 2 && distAcc > maxMeters) {
           const a = pts.shift()!
           const b = pts[0]
           if (b) distAcc -= a.distanceTo(b)
         }
-        // Write into buffer
         const n = Math.min(pts.length, maxPts)
         for (let i=0;i<n;i++) {
           positions[i*3+0] = pts[i].x
@@ -1873,7 +1886,7 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
         <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
             <span>Drive mode</span>
-            <select value={cfg.car.turntable ? 'Turntable' : cfg.car.driveMode}
+            <select value={cfg.car.turntable ? 'Turntable' : (cfg.car.driveMode || 'Track')}
               onChange={e => {
                 const v = e.target.value as DriveMode
                 setCfg(prev => ({ ...prev, car: { ...prev.car, driveMode: v, turntable: v === 'Turntable' } }))
@@ -1887,76 +1900,80 @@ export default function WireframeHouse3D({ auth, quality, accessibility, setting
           </label>
 
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Scale: {cfg.car.scale.toFixed(2)}×</span>
-            <input type="range" min={0.4} max={1.6} step={0.01} value={cfg.car.scale}
+            <span>Scale: {(cfg.car.scale ?? 0.75).toFixed(2)}×</span>
+            <input type="range" min={0.4} max={1.6} step={0.01} value={cfg.car.scale ?? 0.75}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, scale: +e.target.value } }))} />
           </label>
 
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Height: {cfg.car.yOffset.toFixed(2)} m</span>
-            <input type="range" min={-0.2} max={0.5} step={0.01} value={cfg.car.yOffset}
+            <span>Height: {(cfg.car.yOffset ?? 0).toFixed(2)} m</span>
+            <input type="range" min={-0.2} max={0.5} step={0.01} value={cfg.car.yOffset ?? 0}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, yOffset: +e.target.value } }))} />
           </label>
 
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Path radius: {cfg.car.pathRadius.toFixed(1)} m</span>
-            <input type="range" min={6} max={15} step={0.1} value={cfg.car.pathRadius}
+            <span>Path radius: {(cfg.car.pathRadius ?? 10.5).toFixed(1)} m</span>
+            <input type="range" min={6} max={15} step={0.1} value={cfg.car.pathRadius ?? 10.5}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, pathRadius: +e.target.value } }))} />
           </label>
 
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
             <label style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
               <span>Wheel spin</span>
-              <input type="checkbox" checked={cfg.car.wheelSpin}
+              <input type="checkbox" checked={!!cfg.car.wheelSpin}
                 onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, wheelSpin: e.target.checked } }))} />
             </label>
             <label style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
               <span>Outline</span>
-              <input type="checkbox" checked={cfg.car.outline}
+              <input type="checkbox" checked={!!cfg.car.outline}
                 onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, outline: e.target.checked } }))} />
             </label>
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
             <label style={{ display:'flex', flexDirection:'column', gap:4 }}>
-              <span>Max steer: {cfg.car.maxSteerDeg.toFixed(0)}°</span>
-              <input type="range" min={10} max={45} step={1} value={cfg.car.maxSteerDeg}
+              <span>Max steer: {(cfg.car.maxSteerDeg ?? 26).toFixed(0)}°</span>
+              <input type="range" min={10} max={45} step={1} value={cfg.car.maxSteerDeg ?? 26}
                 onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, maxSteerDeg: +e.target.value } }))} />
             </label>
             <label style={{ display:'flex', flexDirection:'column', gap:4 }}>
-              <span>Steer rate: {cfg.car.steerRateDegPerSec.toFixed(0)}°/s</span>
-              <input type="range" min={60} max={300} step={5} value={cfg.car.steerRateDegPerSec}
+              <span>Steer rate: {(cfg.car.steerRateDegPerSec ?? 140).toFixed(0)}°/s</span>
+              <input type="range" min={60} max={300} step={5} value={cfg.car.steerRateDegPerSec ?? 140}
                 onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, steerRateDegPerSec: +e.target.value } }))} />
             </label>
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
             <label style={{ display:'flex', flexDirection:'column', gap:4 }}>
-              <span>Rear light max: {cfg.car.rearLightMax.toFixed(1)}</span>
-              <input type="range" min={0.2} max={5} step={0.1} value={cfg.car.rearLightMax}
+              <span>Rear light max: {(cfg.car.rearLightMax ?? 2.5).toFixed(1)}</span>
+              <input type="range" min={0.2} max={5} step={0.1} value={cfg.car.rearLightMax ?? 2.5}
                 onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, rearLightMax: +e.target.value } }))} />
             </label>
             <label style={{ display:'flex', flexDirection:'column', gap:4 }}>
-              <span>Smoke amount: {cfg.car.smokeAmount.toFixed(2)}</span>
-              <input type="range" min={0} max={2} step={0.01} value={cfg.car.smokeAmount}
+              <span>Smoke amount: {(cfg.car.smokeAmount ?? 1.0).toFixed(2)}</span>
+              <input type="range" min={0} max={2} step={0.01} value={cfg.car.smokeAmount ?? 1.0}
                 onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, smokeAmount: +e.target.value } }))} />
             </label>
           </div>
 
           <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Skid max length: {cfg.car.skidMaxMeters.toFixed(0)} m</span>
-            <input type="range" min={10} max={120} step={1} value={cfg.car.skidMaxMeters}
+            <span>Skid max length: {(cfg.car.skidMaxMeters ?? 60).toFixed(0)} m</span>
+            <input type="range" min={10} max={120} step={1} value={cfg.car.skidMaxMeters ?? 60}
               onChange={e => setCfg(prev => ({ ...prev, car: { ...prev.car, skidMaxMeters: +e.target.value } }))} />
           </label>
 
-          <label style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
-            <span>Wheel radius override: {cfg.car.wheelRadiusOverride ?? 'auto'}</span>
-            <input type="range" min={0.2} max={0.6} step={0.005} value={cfg.car.wheelRadiusOverride ?? 0.0}
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+            <span>Wheel radius override: {cfg.car.wheelRadiusOverride ? `${(cfg.car.wheelRadiusOverride).toFixed(3)} m` : 'auto (0)'}</span>
+            <input
+              type="range"
+              min={0} max={0.6} step={0.005}
+              value={cfg.car.wheelRadiusOverride ?? 0}
               onChange={e => {
                 const v = +e.target.value
                 setCfg(prev => ({ ...prev, car: { ...prev.car, wheelRadiusOverride: v === 0 ? null : v } }))
-              }} />
-          </label>
+              }}
+            />
+          </div>
 
           <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
             <button onClick={() => setCfg(prev => ({ ...prev, car: { ...prev.car, flipForward: !prev.car.flipForward } }))} style={btnStyle}>

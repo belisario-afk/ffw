@@ -1,16 +1,3 @@
-
-
-// CHANGES VS PREVIOUS REVISION:
-// - Replaced lemniscate path + repel with a smooth closed oval loop around the mansion (no teleport/glitch).
-// - Built per-wheel rigs with centered spin pivots (and front steering pivots) so wheels spin in place and front wheels steer.
-// - Headlight spotlights are independent of material detection and always follow heading (work with aftermarket models).
-
-// Locate "createGlbCarModel" and see:
-//   type WheelRig, buildWheel rigs, steering, and spin logic.
-// Locate update(), see "OVAL LOOP" section replacing figure-8.
-
-// The full file follows (for clarity, this is the complete file):
-
 import React, { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
